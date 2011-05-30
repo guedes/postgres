@@ -624,8 +624,8 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 		else
 			nulls[3] = true;
 
-		/* Values only available to same user or superuser */
-		if (superuser() || beentry->st_userid == GetUserId())
+		/* Values only available to same user or superuser unless a connection is IDLE */
+		if (superuser() || beentry->st_userid == GetUserId() || (strcmp(beentry->st_activity,"<IDLE>") == 0) || (strcmp(beentry->st_activity,"<IDLE> in transaction") == 0))
 		{
 			if (*(beentry->st_activity) == '\0')
 			{
