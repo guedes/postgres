@@ -445,6 +445,10 @@ elif test "$ICC" = yes; then
 elif test "$PORTNAME" = "aix"; then
   # AIX's xlc has to have strict aliasing turned off too
   PGAC_PROG_CC_CFLAGS_OPT([-qnoansialias])
+elif test "$PORTNAME" = "hpux"; then
+  # On some versions of HP-UX, libm functions do not set errno by default.
+  # Fix that by using +Olibmerrno if the compiler recognizes it.
+  PGAC_PROG_CC_CFLAGS_OPT([+Olibmerrno])
 fi
 
 # supply -g if --enable-debug
@@ -713,7 +717,7 @@ PGAC_ARG_BOOL(with, libedit-preferred, no,
 #
 # OSSP UUID library
 #
-PGAC_ARG_BOOL(with, ossp-uuid, no, [use OSSP UUID library when building contrib/uuid-ossp])
+PGAC_ARG_BOOL(with, ossp-uuid, no, [build contrib/uuid-ossp, requires OSSP UUID library])
 AC_SUBST(with_ossp_uuid)
 
 
@@ -960,8 +964,8 @@ fi
 
 # for contrib/sepgsql
 if test "$with_selinux" = yes; then
-  AC_CHECK_LIB(selinux, getpeercon_raw, [],
-               [AC_MSG_ERROR([library 'libselinux' is required for SELinux support])])
+  AC_CHECK_LIB(selinux, selinux_sepgsql_context_path, [],
+               [AC_MSG_ERROR([library 'libselinux', version 2.0.93 or newer, is required for SELinux support])])
 fi
 
 # for contrib/uuid-ossp
