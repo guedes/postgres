@@ -19,6 +19,7 @@ objfiles.txt
 lcov.info
 *.vcproj
 win32ver.rc
+tags
 
 # Local excludes in root directory
 /GNUmakefile
