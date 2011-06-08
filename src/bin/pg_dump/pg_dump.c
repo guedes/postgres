@@ -829,7 +829,7 @@ help(const char *progname)
 	printf(_("  %s [OPTION]... [DBNAME]\n"), progname);
 
 	printf(_("\nGeneral options:\n"));
-	printf(_("  -f, --file=OUTPUT           output file or directory name\n"));
+	printf(_("  -f, --file=FILENAME         output file or directory name\n"));
 	printf(_("  -F, --format=c|d|t|p        output file format (custom, directory, tar, plain text)\n"));
 	printf(_("  -v, --verbose               verbose mode\n"));
 	printf(_("  -Z, --compress=0-9          compression level for compressed formats\n"));
@@ -854,16 +854,15 @@ help(const char *progname)
 	printf(_("  -T, --exclude-table=TABLE   do NOT dump the named table(s)\n"));
 	printf(_("  -x, --no-privileges         do not dump privileges (grant/revoke)\n"));
 	printf(_("  --binary-upgrade            for use by upgrade utilities only\n"));
-	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --column-inserts            dump data as INSERT commands with column names\n"));
 	printf(_("  --disable-dollar-quoting    disable dollar quoting, use SQL standard quoting\n"));
 	printf(_("  --disable-triggers          disable triggers during data-only restore\n"));
-	printf(_("  --no-tablespaces            do not dump tablespace assignments\n"));
-	printf(_("  --quote-all-identifiers     quote all identifiers, even if not keywords\n"));
-	printf(_("  --serializable-deferrable   wait until the dump can run without anomalies\n"));
-	printf(_("  --role=ROLENAME             do SET ROLE before dump\n"));
+	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --no-security-labels        do not dump security label assignments\n"));
+	printf(_("  --no-tablespaces            do not dump tablespace assignments\n"));
 	printf(_("  --no-unlogged-table-data    do not dump unlogged table data\n"));
+	printf(_("  --quote-all-identifiers     quote all identifiers, even if not key words\n"));
+	printf(_("  --serializable-deferrable   wait until the dump can run without anomalies\n"));
 	printf(_("  --use-set-session-authorization\n"
 			 "                              use SET SESSION AUTHORIZATION commands instead of\n"
 	"                              ALTER OWNER commands to set ownership\n"));
@@ -874,6 +873,7 @@ help(const char *progname)
 	printf(_("  -U, --username=NAME      connect as specified database user\n"));
 	printf(_("  -w, --no-password        never prompt for password\n"));
 	printf(_("  -W, --password           force password prompt (should happen automatically)\n"));
+	printf(_("  --role=ROLENAME          do SET ROLE before dump\n"));
 
 	printf(_("\nIf no database name is supplied, then the PGDATABASE environment\n"
 			 "variable value is used.\n\n"));
@@ -1153,10 +1153,11 @@ selectDumpableDefaultACL(DefaultACLInfo *dinfo)
  * selectDumpableExtension: policy-setting subroutine
  *		Mark an extension as to be dumped or not
  *
- * Normally, we just dump all extensions.  However, in binary-upgrade mode
- * it's necessary to skip built-in extensions, since we assume those will
- * already be installed in the target database.  We identify such extensions
- * by their having OIDs in the range reserved for initdb.
+ * Normally, we dump all extensions, or none of them if include_everything
+ * is false (i.e., a --schema or --table switch was given).  However, in
+ * binary-upgrade mode it's necessary to skip built-in extensions, since we
+ * assume those will already be installed in the target database.  We identify
+ * such extensions by their having OIDs in the range reserved for initdb.
  */
 static void
 selectDumpableExtension(ExtensionInfo *extinfo)
@@ -1164,7 +1165,7 @@ selectDumpableExtension(ExtensionInfo *extinfo)
 	if (binary_upgrade && extinfo->dobj.catId.oid < (Oid) FirstNormalObjectId)
 		extinfo->dobj.dump = false;
 	else
-		extinfo->dobj.dump = true;
+		extinfo->dobj.dump = include_everything;
 }
 
 /*
@@ -2541,7 +2542,7 @@ binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 	}
 	if (extobj == NULL)
 	{
-		write_msg(NULL, "failed to find parent extension for %s", objlabel);
+		write_msg(NULL, "could not find parent extension for %s", objlabel);
 		exit_nicely();
 	}
 
@@ -11179,6 +11180,14 @@ dumpForeignDataWrapper(Archive *fout, FdwInfo *fdwinfo)
 	if (!fdwinfo->dobj.dump || dataOnly)
 		return;
 
+	/*
+	 * FDWs that belong to an extension are dumped based on their "dump" field.
+	 * Otherwise omit them if we are only dumping some specific object.
+	 */
+	if (!fdwinfo->dobj.ext_member)
+		if (!include_everything)
+			return;
+
 	q = createPQExpBuffer();
 	delq = createPQExpBuffer();
 	labelq = createPQExpBuffer();
@@ -11254,7 +11263,7 @@ dumpForeignServer(Archive *fout, ForeignServerInfo *srvinfo)
 	char	   *fdwname;
 
 	/* Skip if not to be dumped */
-	if (!srvinfo->dobj.dump || dataOnly)
+	if (!srvinfo->dobj.dump || dataOnly || !include_everything)
 		return;
 
 	q = createPQExpBuffer();

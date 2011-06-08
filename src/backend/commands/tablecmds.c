@@ -7387,7 +7387,7 @@ ATExecChangeOwner(Oid relationOid, Oid newOwnerId, bool recursing, LOCKMODE lock
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("\"%s\" is not a table, view, sequence, or foreign tabl, or foreign tablee",
+					 errmsg("\"%s\" is not a table, view, sequence, or foreign table",
 							NameStr(tuple_class->relname))));
 	}
 
@@ -8641,7 +8641,6 @@ ATExecAddOf(Relation rel, const TypeName *ofTypename, LOCKMODE lockmode)
 {
 	Oid			relid = RelationGetRelid(rel);
 	Type		typetuple;
-	Form_pg_type typ;
 	Oid			typeid;
 	Relation	inheritsRelation,
 				relationRelation;
@@ -8658,7 +8657,6 @@ ATExecAddOf(Relation rel, const TypeName *ofTypename, LOCKMODE lockmode)
 	/* Validate the type. */
 	typetuple = typenameType(NULL, ofTypename, NULL);
 	check_of_type(typetuple);
-	typ = (Form_pg_type) GETSTRUCT(typetuple);
 	typeid = HeapTupleGetOid(typetuple);
 
 	/* Fail if the table has any inheritance parents. */

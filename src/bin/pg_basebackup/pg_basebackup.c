@@ -126,7 +126,8 @@ usage(void)
 	printf(_("  -D, --pgdata=DIRECTORY   receive base backup into directory\n"));
 	printf(_("  -F, --format=p|t         output format (plain, tar)\n"));
 	printf(_("  -x, --xlog               include required WAL files in backup\n"));
-	printf(_("  -Z, --compress=0-9       compress tar output\n"));
+	printf(_("  -z, --gzip               compress tar output\n"));
+	printf(_("  -Z, --compress=0-9       compress tar output with given compression level\n"));
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -c, --checkpoint=fast|spread\n"
 			 "                           set fast or spread checkpointing\n"));
@@ -261,7 +262,22 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 		 * Base tablespaces
 		 */
 		if (strcmp(basedir, "-") == 0)
-			tarfile = stdout;
+		{
+#ifdef HAVE_LIBZ
+			if (compresslevel > 0)
+			{
+				ztarfile = gzdopen(dup(fileno(stdout)), "wb");
+				if (gzsetparams(ztarfile, compresslevel, Z_DEFAULT_STRATEGY) != Z_OK)
+				{
+					fprintf(stderr, _("%s: could not set compression level %i: %s\n"),
+							progname, compresslevel, get_gz_error(ztarfile));
+					disconnect_and_exit(1);
+				}
+			}
+			else
+#endif
+				tarfile = stdout;
+		}
 		else
 		{
 #ifdef HAVE_LIBZ
@@ -384,7 +400,14 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 				}
 			}
 
-			if (strcmp(basedir, "-") != 0)
+			if (strcmp(basedir, "-") == 0)
+			{
+#ifdef HAVE_LIBZ
+				if (ztarfile)
+					gzclose(ztarfile);
+#endif
+			}
+			else
 			{
 #ifdef HAVE_LIBZ
 				if (ztarfile != NULL)
@@ -574,7 +597,7 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 					if (symlink(&copybuf[157], fn) != 0)
 					{
 						fprintf(stderr,
-								_("%s: could not create symbolic link from %s to %s: %s\n"),
+								_("%s: could not create symbolic link from \"%s\" to \"%s\": %s\n"),
 								progname, fn, &copybuf[157], strerror(errno));
 						disconnect_and_exit(1);
 					}
@@ -659,7 +682,7 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 
 	if (file != NULL)
 	{
-		fprintf(stderr, _("%s: last file was never finished\n"), progname);
+		fprintf(stderr, _("%s: COPY stream ended before last file was finished\n"), progname);
 		disconnect_and_exit(1);
 	}
 
@@ -780,7 +803,7 @@ BaseBackup(void)
 
 	if (PQsendQuery(conn, current_path) == 0)
 	{
-		fprintf(stderr, _("%s: could not start base backup: %s"),
+		fprintf(stderr, _("%s: could not send base backup command: %s"),
 				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
@@ -876,13 +899,13 @@ BaseBackup(void)
 	res = PQgetResult(conn);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not get end xlog position from server\n"),
+		fprintf(stderr, _("%s: could not get WAL end position from server\n"),
 				progname);
 		disconnect_and_exit(1);
 	}
 	if (PQntuples(res) != 1)
 	{
-		fprintf(stderr, _("%s: no end point returned from server\n"),
+		fprintf(stderr, _("%s: no WAL end position returned from server\n"),
 				progname);
 		disconnect_and_exit(1);
 	}
@@ -919,6 +942,7 @@ main(int argc, char **argv)
 		{"format", required_argument, NULL, 'F'},
 		{"checkpoint", required_argument, NULL, 'c'},
 		{"xlog", no_argument, NULL, 'x'},
+		{"gzip", no_argument, NULL, 'z'},
 		{"compress", required_argument, NULL, 'Z'},
 		{"label", required_argument, NULL, 'l'},
 		{"host", required_argument, NULL, 'h'},
@@ -977,6 +1001,13 @@ main(int argc, char **argv)
 				break;
 			case 'l':
 				label = xstrdup(optarg);
+				break;
+			case 'z':
+#ifdef HAVE_LIBZ
+				compresslevel = Z_DEFAULT_COMPRESSION;
+#else
+				compresslevel = 1; /* will be rejected below */
+#endif
 				break;
 			case 'Z':
 				compresslevel = atoi(optarg);
@@ -1073,14 +1104,6 @@ main(int argc, char **argv)
 	{
 		fprintf(stderr,
 				_("%s: this build does not support compression\n"),
-				progname);
-		exit(1);
-	}
-#else
-	if (compresslevel > 0 && strcmp(basedir, "-") == 0)
-	{
-		fprintf(stderr,
-				_("%s: compression is not supported on standard output\n"),
 				progname);
 		exit(1);
 	}

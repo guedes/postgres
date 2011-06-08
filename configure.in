@@ -445,6 +445,10 @@ elif test "$ICC" = yes; then
 elif test "$PORTNAME" = "aix"; then
   # AIX's xlc has to have strict aliasing turned off too
   PGAC_PROG_CC_CFLAGS_OPT([-qnoansialias])
+elif test "$PORTNAME" = "hpux"; then
+  # On some versions of HP-UX, libm functions do not set errno by default.
+  # Fix that by using +Olibmerrno if the compiler recognizes it.
+  PGAC_PROG_CC_CFLAGS_OPT([+Olibmerrno])
 fi
 
 # supply -g if --enable-debug
@@ -713,7 +717,7 @@ PGAC_ARG_BOOL(with, libedit-preferred, no,
 #
 # OSSP UUID library
 #
-PGAC_ARG_BOOL(with, ossp-uuid, no, [use OSSP UUID library when building contrib/uuid-ossp])
+PGAC_ARG_BOOL(with, ossp-uuid, no, [build contrib/uuid-ossp, requires OSSP UUID library])
 AC_SUBST(with_ossp_uuid)
 
 
@@ -960,8 +964,8 @@ fi
 
 # for contrib/sepgsql
 if test "$with_selinux" = yes; then
-  AC_CHECK_LIB(selinux, getpeercon_raw, [],
-               [AC_MSG_ERROR([library 'libselinux' is required for SELinux support])])
+  AC_CHECK_LIB(selinux, selinux_sepgsql_context_path, [],
+               [AC_MSG_ERROR([library 'libselinux', version 2.0.93 or newer, is required for SELinux support])])
 fi
 
 # for contrib/uuid-ossp
@@ -980,7 +984,7 @@ AC_SUBST(OSSP_UUID_LIBS)
 ##
 
 dnl sys/socket.h is required by AC_FUNC_ACCEPT_ARGTYPES
-AC_CHECK_HEADERS([crypt.h dld.h fp_class.h getopt.h ieeefp.h ifaddrs.h langinfo.h poll.h pwd.h sys/ioctl.h sys/ipc.h sys/poll.h sys/pstat.h sys/resource.h sys/select.h sys/sem.h sys/shm.h sys/socket.h sys/sockio.h sys/tas.h sys/time.h sys/un.h termios.h ucred.h utime.h wchar.h wctype.h kernel/OS.h kernel/image.h SupportDefs.h])
+AC_CHECK_HEADERS([crypt.h dld.h fp_class.h getopt.h ieeefp.h ifaddrs.h langinfo.h poll.h pwd.h sys/ioctl.h sys/ipc.h sys/poll.h sys/pstat.h sys/resource.h sys/select.h sys/sem.h sys/shm.h sys/socket.h sys/sockio.h sys/tas.h sys/time.h sys/ucred.h sys/un.h termios.h ucred.h utime.h wchar.h wctype.h kernel/OS.h kernel/image.h SupportDefs.h])
 
 # On BSD, cpp test for net/if.h will fail unless sys/socket.h
 # is included first.
@@ -1121,11 +1125,11 @@ AC_TYPE_LONG_LONG_INT
 
 PGAC_TYPE_LOCALE_T
 
-AC_CHECK_TYPES([struct cmsgcred, struct fcred, struct sockcred], [], [],
-[#include <sys/param.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/ucred.h>])
+AC_CHECK_TYPES([struct cmsgcred], [], [],
+[#include <sys/socket.h>
+#ifdef HAVE_SYS_UCRED_H
+#include <sys/ucred.h>
+#endif])
 
 AC_CHECK_TYPES([struct option], [], [],
 [#ifdef HAVE_GETOPT_H
@@ -1187,7 +1191,7 @@ PGAC_VAR_INT_TIMEZONE
 AC_FUNC_ACCEPT_ARGTYPES
 PGAC_FUNC_GETTIMEOFDAY_1ARG
 
-AC_CHECK_FUNCS([cbrt dlopen fcvt fdatasync getifaddrs getpeereid getpeerucred getrlimit memmove poll pstat readlink scandir setproctitle setsid sigprocmask symlink sysconf towlower utime utimes waitpid wcstombs wcstombs_l])
+AC_CHECK_FUNCS([cbrt dlopen fcvt fdatasync getifaddrs getpeerucred getrlimit memmove poll pstat readlink scandir setproctitle setsid sigprocmask symlink sysconf towlower utime utimes waitpid wcstombs wcstombs_l])
 
 AC_REPLACE_FUNCS(fseeko)
 case $host_os in
@@ -1306,7 +1310,7 @@ fi
 pgac_save_LIBS="$LIBS"
 LIBS=`echo "$LIBS" | sed -e 's/-ledit//g' -e 's/-lreadline//g'`
 
-AC_REPLACE_FUNCS([crypt erand48 getopt getrusage inet_aton random rint srandom strdup strerror strlcat strlcpy strtol strtoul])
+AC_REPLACE_FUNCS([crypt erand48 getopt getpeereid getrusage inet_aton random rint srandom strdup strerror strlcat strlcpy strtol strtoul])
 
 case $host_os in
 

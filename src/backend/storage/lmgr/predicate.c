@@ -10,9 +10,9 @@
  *
  *	Michael J. Cahill, Uwe Röhm, and Alan D. Fekete. 2008.
  *	Serializable isolation for snapshot databases.
- *	In SIGMOD ’08: Proceedings of the 2008 ACM SIGMOD
+ *	In SIGMOD '08: Proceedings of the 2008 ACM SIGMOD
  *	international conference on Management of data,
- *	pages 729–738, New York, NY, USA. ACM.
+ *	pages 729-738, New York, NY, USA. ACM.
  *	http://doi.acm.org/10.1145/1376616.1376690
  *
  * and further elaborated in Cahill's doctoral thesis:
@@ -155,9 +155,6 @@
  *							   BlockNumber newblkno);
  *		PredicateLockPageCombine(Relation relation, BlockNumber oldblkno,
  *								 BlockNumber newblkno);
- *		PredicateLockTupleRowVersionLink(const Relation relation,
- *										 const HeapTuple oldTuple,
- *										 const HeapTuple newTuple)
  *		ReleasePredicateLocks(bool isCommit)
  *
  * conflict detection (may also trigger rollback)
@@ -248,6 +245,11 @@
 #define SxactIsReadOnly(sxact) (((sxact)->flags & SXACT_FLAG_READ_ONLY) != 0)
 #define SxactHasSummaryConflictIn(sxact) (((sxact)->flags & SXACT_FLAG_SUMMARY_CONFLICT_IN) != 0)
 #define SxactHasSummaryConflictOut(sxact) (((sxact)->flags & SXACT_FLAG_SUMMARY_CONFLICT_OUT) != 0)
+/*
+ * The following macro actually means that the specified transaction has a
+ * conflict out *to a transaction which committed ahead of it*.  It's hard
+ * to get that into a name of a reasonable length.
+ */
 #define SxactHasConflictOut(sxact) (((sxact)->flags & SXACT_FLAG_CONFLICT_OUT) != 0)
 #define SxactIsDeferrableWaiting(sxact) (((sxact)->flags & SXACT_FLAG_DEFERRABLE_WAITING) != 0)
 #define SxactIsROSafe(sxact) (((sxact)->flags & SXACT_FLAG_RO_SAFE) != 0)
@@ -2252,90 +2254,6 @@ PredicateLockTuple(const Relation relation, const HeapTuple tuple)
 	PredicateLockAcquire(&tag);
 }
 
-/*
- * If the old tuple has any predicate locks, copy them to the new target.
- *
- * This is called at an UPDATE, where any predicate locks held on the old
- * tuple need to be copied to the new tuple, because logically they both
- * represent the same row. A lock taken before the update must conflict
- * with anyone locking the same row after the update.
- */
-void
-PredicateLockTupleRowVersionLink(const Relation relation,
-								 const HeapTuple oldTuple,
-								 const HeapTuple newTuple)
-{
-	PREDICATELOCKTARGETTAG oldtupletag;
-	PREDICATELOCKTARGETTAG oldpagetag;
-	PREDICATELOCKTARGETTAG newtupletag;
-	BlockNumber oldblk,
-				newblk;
-	OffsetNumber oldoff,
-				newoff;
-	TransactionId oldxmin,
-				newxmin;
-
-	/*
-	 * Bail out quickly if there are no serializable transactions
-	 * running.
-	 *
-	 * It's safe to do this check without taking any additional
-	 * locks. Even if a serializable transaction starts concurrently,
-	 * we know it can't take any SIREAD locks on the modified tuple
-	 * because the caller is holding the associated buffer page lock.
-	 * Memory reordering isn't an issue; the memory barrier in the
-	 * LWLock acquisition guarantees that this read occurs while the
-	 * buffer page lock is held.
-	 */
-	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
-		return;
-
-	oldblk = ItemPointerGetBlockNumber(&(oldTuple->t_self));
-	oldoff = ItemPointerGetOffsetNumber(&(oldTuple->t_self));
-	oldxmin = HeapTupleHeaderGetXmin(oldTuple->t_data);
-
-	newblk = ItemPointerGetBlockNumber(&(newTuple->t_self));
-	newoff = ItemPointerGetOffsetNumber(&(newTuple->t_self));
-	newxmin = HeapTupleHeaderGetXmin(newTuple->t_data);
-
-	SET_PREDICATELOCKTARGETTAG_TUPLE(oldtupletag,
-									 relation->rd_node.dbNode,
-									 relation->rd_id,
-									 oldblk,
-									 oldoff,
-									 oldxmin);
-
-	SET_PREDICATELOCKTARGETTAG_PAGE(oldpagetag,
-									relation->rd_node.dbNode,
-									relation->rd_id,
-									oldblk);
-
-	SET_PREDICATELOCKTARGETTAG_TUPLE(newtupletag,
-									 relation->rd_node.dbNode,
-									 relation->rd_id,
-									 newblk,
-									 newoff,
-									 newxmin);
-
-	/*
-	 * A page-level lock on the page containing the old tuple counts too.
-	 * Anyone holding a lock on the page is logically holding a lock on the
-	 * old tuple, so we need to acquire a lock on his behalf on the new tuple
-	 * too. However, if the new tuple is on the same page as the old one, the
-	 * old page-level lock already covers the new tuple.
-	 *
-	 * A relation-level lock always covers both tuple versions, so we don't
-	 * need to worry about those here.
-	 */
-	LWLockAcquire(SerializablePredicateLockListLock, LW_EXCLUSIVE);
-
-	TransferPredicateLocksToNewTarget(oldtupletag, newtupletag, false);
-	if (newblk != oldblk)
-		TransferPredicateLocksToNewTarget(oldpagetag, newtupletag, false);
-
-	LWLockRelease(SerializablePredicateLockListLock);
-}
-
 
 /*
  *		DeleteLockTarget
@@ -2650,9 +2568,15 @@ PredicateLockPageSplit(const Relation relation, const BlockNumber oldblkno,
 
 	/*
 	 * Bail out quickly if there are no serializable transactions
-	 * running. As with PredicateLockTupleRowVersionLink, it's safe to
-	 * check this without taking locks because the caller is holding
-	 * the buffer page lock.
+	 * running.
+	 *
+	 * It's safe to do this check without taking any additional
+	 * locks. Even if a serializable transaction starts concurrently,
+	 * we know it can't take any SIREAD locks on the page being split
+	 * because the caller is holding the associated buffer page lock.
+	 * Memory reordering isn't an issue; the memory barrier in the
+	 * LWLock acquisition guarantees that this read occurs while the
+	 * buffer page lock is held.
 	 */
 	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
 		return;
@@ -2789,7 +2713,7 @@ SetNewSxactGlobalXmin(void)
  * up in some relatively timely fashion.
  *
  * If this transaction is committing and is holding any predicate locks,
- * it must be added to a list of completed serializable transaction still
+ * it must be added to a list of completed serializable transactions still
  * holding locks.
  */
 void
@@ -2834,12 +2758,13 @@ ReleasePredicateLocks(const bool isCommit)
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 
 	/*
-	 * We don't hold a lock here, assuming that TransactionId is atomic!
+	 * We don't hold XidGenLock lock here, assuming that TransactionId is
+	 * atomic!
 	 *
 	 * If this value is changing, we don't care that much whether we get the
 	 * old or new value -- it is just used to determine how far
-	 * GlobalSerizableXmin must advance before this transaction can be cleaned
-	 * fully cleaned up.  The worst that could happen is we wait for ome more
+	 * GlobalSerizableXmin must advance before this transaction can be fully
+	 * cleaned up.  The worst that could happen is we wait for one more
 	 * transaction to complete before freeing some RAM; correctness of visible
 	 * behavior is not affected.
 	 */
@@ -3889,9 +3814,23 @@ FlagRWConflict(SERIALIZABLEXACT *reader, SERIALIZABLEXACT *writer)
 		SetRWConflict(reader, writer);
 }
 
-/*
- * Check whether we should roll back one of these transactions
- * instead of flagging a new rw-conflict.
+/*----------------------------------------------------------------------------
+ * We are about to add a RW-edge to the dependency graph - check that we don't
+ * introduce a dangerous structure by doing so, and abort one of the
+ * transactions if so.
+ *
+ * A serialization failure can only occur if there is a dangerous structure
+ * in the dependency graph:
+ *
+ *		Tin ------> Tpivot ------> Tout
+ *			  rw			 rw
+ *
+ * Furthermore, Tout must commit first.
+ *
+ * One more optimization is that if Tin is declared READ ONLY (or commits
+ * without writing), we can only have a problem if Tout committed before Tin
+ * acquired its snapshot.
+ *----------------------------------------------------------------------------
  */
 static void
 OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
@@ -3904,18 +3843,80 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 
 	failure = false;
 
-	/*
-	 * Check for already-committed writer with rw-conflict out flagged. This
-	 * means that the reader must immediately fail.
+	/*------------------------------------------------------------------------
+	 * Check for already-committed writer with rw-conflict out flagged
+	 * (conflict-flag on W means that T2 committed before W):
+	 *
+	 *		R ------> W ------> T2
+	 *			rw		  rw
+	 *
+	 * That is a dangerous structure, so we must abort. (Since the writer
+	 * has already committed, we must be the reader)
+	 *------------------------------------------------------------------------
 	 */
 	if (SxactIsCommitted(writer)
 	  && (SxactHasConflictOut(writer) || SxactHasSummaryConflictOut(writer)))
 		failure = true;
 
-	/*
-	 * Check whether the reader has become a pivot with a committed writer. If
-	 * so, we must roll back unless every in-conflict either committed before
-	 * the writer committed or is READ ONLY and overlaps the writer.
+	/*------------------------------------------------------------------------
+	 * Check whether the writer has become a pivot with an out-conflict
+	 * committed transaction (T2), and T2 committed first:
+	 *
+	 *		R ------> W ------> T2
+	 *			rw		  rw
+	 *
+	 * Because T2 must've committed first, there is no anomaly if:
+	 * - the reader committed before T2
+	 * - the writer committed before T2
+	 * - the reader is a READ ONLY transaction and the reader was concurrent
+	 *	 with T2 (= reader acquired its snapshot before T2 committed)
+	 *------------------------------------------------------------------------
+	 */
+	if (!failure)
+	{
+		if (SxactHasSummaryConflictOut(writer))
+		{
+			failure = true;
+			conflict = NULL;
+		}
+		else
+			conflict = (RWConflict)
+				SHMQueueNext(&writer->outConflicts,
+							 &writer->outConflicts,
+							 offsetof(RWConflictData, outLink));
+		while (conflict)
+		{
+			SERIALIZABLEXACT *t2 = conflict->sxactIn;
+
+			if (SxactIsCommitted(t2)
+				&& (!SxactIsCommitted(reader)
+					|| t2->commitSeqNo <= reader->commitSeqNo)
+				&& (!SxactIsCommitted(writer)
+					|| t2->commitSeqNo <= writer->commitSeqNo)
+				&& (!SxactIsReadOnly(reader)
+			   || t2->commitSeqNo <= reader->SeqNo.lastCommitBeforeSnapshot))
+			{
+				failure = true;
+				break;
+			}
+			conflict = (RWConflict)
+				SHMQueueNext(&writer->outConflicts,
+							 &conflict->outLink,
+							 offsetof(RWConflictData, outLink));
+		}
+	}
+
+	/*------------------------------------------------------------------------
+	 * Check whether the reader has become a pivot with a committed writer:
+	 *
+	 *		T0 ------> R ------> W
+	 *			 rw		   rw
+	 *
+	 * Because W must've committed first for an anomaly to occur, there is no
+	 * anomaly if:
+	 * - T0 committed before the writer
+	 * - T0 is READ ONLY, and overlaps the writer
+	 *------------------------------------------------------------------------
 	 */
 	if (!failure && SxactIsCommitted(writer) && !SxactIsReadOnly(reader))
 	{
@@ -3931,11 +3932,13 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 							 offsetof(RWConflictData, inLink));
 		while (conflict)
 		{
-			if (!SxactIsRolledBack(conflict->sxactOut)
-				&& (!SxactIsCommitted(conflict->sxactOut)
-					|| conflict->sxactOut->commitSeqNo >= writer->commitSeqNo)
-				&& (!SxactIsReadOnly(conflict->sxactOut)
-					|| conflict->sxactOut->SeqNo.lastCommitBeforeSnapshot >= writer->commitSeqNo))
+			SERIALIZABLEXACT *t0 = conflict->sxactOut;
+
+			if (!SxactIsRolledBack(t0)
+				&& (!SxactIsCommitted(t0)
+					|| t0->commitSeqNo >= writer->commitSeqNo)
+				&& (!SxactIsReadOnly(t0)
+			   || t0->SeqNo.lastCommitBeforeSnapshot >= writer->commitSeqNo))
 			{
 				failure = true;
 				break;
@@ -3947,58 +3950,31 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 		}
 	}
 
-	/*
-	 * Check whether the writer has become a pivot with an out-conflict
-	 * committed transaction, while neither reader nor writer is committed. If
-	 * the reader is a READ ONLY transaction, there is only a serialization
-	 * failure if an out-conflict transaction causing the pivot committed
-	 * before the reader acquired its snapshot.  (That is, the reader must not
-	 * have been concurrent with the out-conflict transaction.)
-	 */
-	if (!failure && !SxactIsCommitted(writer))
-	{
-		if (SxactHasSummaryConflictOut(reader))
-		{
-			failure = true;
-			conflict = NULL;
-		}
-		else
-			conflict = (RWConflict)
-				SHMQueueNext(&writer->outConflicts,
-							 &writer->outConflicts,
-							 offsetof(RWConflictData, outLink));
-		while (conflict)
-		{
-			if ((reader == conflict->sxactIn && SxactIsCommitted(reader))
-				|| (SxactIsCommitted(conflict->sxactIn)
-					&& !SxactIsCommitted(reader)
-					&& (!SxactIsReadOnly(reader)
-						|| conflict->sxactIn->commitSeqNo <= reader->SeqNo.lastCommitBeforeSnapshot)))
-			{
-				failure = true;
-				break;
-			}
-			conflict = (RWConflict)
-				SHMQueueNext(&writer->outConflicts,
-							 &conflict->outLink,
-							 offsetof(RWConflictData, outLink));
-		}
-	}
-
 	if (failure)
 	{
+		/*
+		 * We have to kill a transaction to avoid a possible anomaly from
+		 * occurring. If the writer is us, we can just ereport() to cause a
+		 * transaction abort. Otherwise we flag the writer for termination,
+		 * causing it to abort when it tries to commit. However, if the writer
+		 * is a prepared transaction, already prepared, we can't abort it
+		 * anymore, so we have to kill the reader instead.
+		 */
 		if (MySerializableXact == writer)
 		{
 			LWLockRelease(SerializableXactHashLock);
 			ereport(ERROR,
 					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 					 errmsg("could not serialize access due to read/write dependencies among transactions"),
-			errdetail("Cancelled on identification as pivot, during write."),
+					 errdetail("Cancelled on identification as a pivot, during write."),
 					 errhint("The transaction might succeed if retried.")));
 		}
 		else if (SxactIsPrepared(writer))
 		{
 			LWLockRelease(SerializableXactHashLock);
+
+			/* if we're not the writer, we have to be the reader */
+			Assert(MySerializableXact == reader);
 			ereport(ERROR,
 					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 					 errmsg("could not serialize access due to read/write dependencies among transactions"),
