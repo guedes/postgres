@@ -21,6 +21,8 @@ lcov.info
 win32ver.rc
 tags
 *.sw?
+*.exe
+lib*dll.def
 
 # Local excludes in root directory
 /GNUmakefile
