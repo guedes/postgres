@@ -20,6 +20,7 @@ lcov.info
 *.vcproj
 win32ver.rc
 tags
+*.sw?
 
 # Local excludes in root directory
 /GNUmakefile
