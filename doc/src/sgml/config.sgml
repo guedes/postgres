@@ -259,7 +259,7 @@ SET ENABLE_SEQSCAN TO OFF;
       </indexterm>
       <listitem>
        <para>
-        Specifies the name of an additional process-id (PID) file that the
+        Specifies the name of an additional process-ID (PID) file that the
         server should create for use by server administration programs.
         This parameter can only be set at server start.
        </para>
@@ -2107,6 +2107,10 @@ SET ENABLE_SEQSCAN TO OFF;
         <xref linkend="guc-synchronous-commit"> parameter to
         <literal>local</> or <literal>off</>.
        </para>
+       <para>
+        This parameter can only be set in the <filename>postgresql.conf</>
+        file or on the server command line.
+       </para>
       </listitem>
      </varlistentry>
 
@@ -2239,8 +2243,10 @@ SET ENABLE_SEQSCAN TO OFF;
         about queries currently executing on the standby. This parameter can
         be used to eliminate query cancels caused by cleanup records, but
         can cause database bloat on the primary for some workloads.
-        The default value is <literal>off</literal>.  Feedback messages will not
-        be sent more frequently than once per <varname>wal_receiver_status_interval</>.
+        Feedback messages will not be sent more frequently than once per
+        <varname>wal_receiver_status_interval</>. The default value is
+        <literal>off</literal>. This parameter can only be set in the
+        <filename>postgresql.conf</> file or on the server command line.
        </para>
       </listitem>
      </varlistentry>
@@ -4485,9 +4491,11 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        <para>
         The current effective value of the search path can be examined
         via the <acronym>SQL</acronym> function
-        <function>current_schemas()</>.  This is not quite the same as
+        <function>current_schemas</>
+        (see <xref linkend="functions-info">).
+        This is not quite the same as
         examining the value of <varname>search_path</varname>, since
-        <function>current_schemas()</> shows how the items
+        <function>current_schemas</> shows how the items
         appearing in <varname>search_path</varname> were resolved.
        </para>
 

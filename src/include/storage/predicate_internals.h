@@ -90,23 +90,21 @@ typedef struct SERIALIZABLEXACT
 	int			pid;			/* pid of associated process */
 } SERIALIZABLEXACT;
 
-#define SXACT_FLAG_ROLLED_BACK				0x00000001
-#define SXACT_FLAG_COMMITTED				0x00000002
+#define SXACT_FLAG_COMMITTED				0x00000001	/* already committed */
+#define SXACT_FLAG_PREPARED					0x00000002	/* about to commit */
+#define SXACT_FLAG_DOOMED					0x00000004	/* will roll back */
 /*
  * The following flag actually means that the flagged transaction has a
  * conflict out *to a transaction which committed ahead of it*.  It's hard
  * to get that into a name of a reasonable length.
  */
-#define SXACT_FLAG_CONFLICT_OUT				0x00000004
-#define SXACT_FLAG_READ_ONLY				0x00000008
-#define SXACT_FLAG_DID_WRITE				0x00000010
-#define SXACT_FLAG_MARKED_FOR_DEATH			0x00000020
-#define SXACT_FLAG_DEFERRABLE_WAITING		0x00000040
-#define SXACT_FLAG_RO_SAFE					0x00000080
-#define SXACT_FLAG_RO_UNSAFE				0x00000100
-#define SXACT_FLAG_SUMMARY_CONFLICT_IN		0x00000200
-#define SXACT_FLAG_SUMMARY_CONFLICT_OUT		0x00000400
-#define SXACT_FLAG_PREPARED					0x00000800
+#define SXACT_FLAG_CONFLICT_OUT				0x00000008
+#define SXACT_FLAG_READ_ONLY				0x00000010
+#define SXACT_FLAG_DEFERRABLE_WAITING		0x00000020
+#define SXACT_FLAG_RO_SAFE					0x00000040
+#define SXACT_FLAG_RO_UNSAFE				0x00000080
+#define SXACT_FLAG_SUMMARY_CONFLICT_IN		0x00000100
+#define SXACT_FLAG_SUMMARY_CONFLICT_OUT		0x00000200
 
 /*
  * The following types are used to provide an ad hoc list for holding
@@ -134,7 +132,8 @@ typedef struct PredXactListData
 	/*
 	 * These global variables are maintained when registering and cleaning up
 	 * serializable transactions.  They must be global across all backends,
-	 * but are not needed outside the predicate.c source file.
+	 * but are not needed outside the predicate.c source file. Protected by
+	 * SerializableXactHashLock.
 	 */
 	TransactionId SxactGlobalXmin;		/* global xmin for active serializable
 										 * transactions */
