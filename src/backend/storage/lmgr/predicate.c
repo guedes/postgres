@@ -246,6 +246,7 @@
 
 #define SxactIsCommitted(sxact) (((sxact)->flags & SXACT_FLAG_COMMITTED) != 0)
 #define SxactIsPrepared(sxact) (((sxact)->flags & SXACT_FLAG_PREPARED) != 0)
+#define SxactIsRolledBack(sxact) (((sxact)->flags & SXACT_FLAG_ROLLED_BACK) != 0)
 #define SxactIsDoomed(sxact) (((sxact)->flags & SXACT_FLAG_DOOMED) != 0)
 #define SxactIsReadOnly(sxact) (((sxact)->flags & SXACT_FLAG_READ_ONLY) != 0)
 #define SxactHasSummaryConflictIn(sxact) (((sxact)->flags & SXACT_FLAG_SUMMARY_CONFLICT_IN) != 0)
@@ -419,11 +420,11 @@ static void CreatePredicateLock(const PREDICATELOCKTARGETTAG *targettag,
 					uint32 targettaghash,
 					SERIALIZABLEXACT *sxact);
 static void DeleteLockTarget(PREDICATELOCKTARGET *target, uint32 targettaghash);
-static bool TransferPredicateLocksToNewTarget(const PREDICATELOCKTARGETTAG oldtargettag,
-								  const PREDICATELOCKTARGETTAG newtargettag,
+static bool TransferPredicateLocksToNewTarget(PREDICATELOCKTARGETTAG oldtargettag,
+								  PREDICATELOCKTARGETTAG newtargettag,
 								  bool removeOld);
 static void PredicateLockAcquire(const PREDICATELOCKTARGETTAG *targettag);
-static void DropAllPredicateLocksFromTable(const Relation relation,
+static void DropAllPredicateLocksFromTable(Relation relation,
 							   bool transfer);
 static void SetNewSxactGlobalXmin(void);
 static void ClearOldPredicateLocks(void);
@@ -1698,7 +1699,7 @@ RegisterSerializableTransactionInt(Snapshot snapshot)
  * Also store it for easy reference in MySerializableXact.
  */
 void
-RegisterPredicateLockingXid(const TransactionId xid)
+RegisterPredicateLockingXid(TransactionId xid)
 {
 	SERIALIZABLEXIDTAG sxidtag;
 	SERIALIZABLEXID *sxid;
@@ -1747,7 +1748,7 @@ RegisterPredicateLockingXid(const TransactionId xid)
  * One use is to support proper behavior during GiST index vacuum.
  */
 bool
-PageIsPredicateLocked(const Relation relation, const BlockNumber blkno)
+PageIsPredicateLocked(Relation relation, BlockNumber blkno)
 {
 	PREDICATELOCKTARGETTAG targettag;
 	uint32		targettaghash;
@@ -2309,7 +2310,7 @@ PredicateLockAcquire(const PREDICATELOCKTARGETTAG *targettag)
  * Clear any finer-grained predicate locks this session has on the relation.
  */
 void
-PredicateLockRelation(const Relation relation, const Snapshot snapshot)
+PredicateLockRelation(Relation relation, Snapshot snapshot)
 {
 	PREDICATELOCKTARGETTAG tag;
 
@@ -2332,8 +2333,7 @@ PredicateLockRelation(const Relation relation, const Snapshot snapshot)
  * Clear any finer-grained predicate locks this session has on the relation.
  */
 void
-PredicateLockPage(const Relation relation, const BlockNumber blkno,
-				  const Snapshot snapshot)
+PredicateLockPage(Relation relation, BlockNumber blkno, Snapshot snapshot)
 {
 	PREDICATELOCKTARGETTAG tag;
 
@@ -2355,8 +2355,7 @@ PredicateLockPage(const Relation relation, const BlockNumber blkno,
  * Skip if this is a temporary table.
  */
 void
-PredicateLockTuple(const Relation relation, const HeapTuple tuple,
-				   const Snapshot snapshot)
+PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 {
 	PREDICATELOCKTARGETTAG tag;
 	ItemPointer tid;
@@ -2494,8 +2493,8 @@ DeleteLockTarget(PREDICATELOCKTARGET *target, uint32 targettaghash)
  * Caller must hold SerializablePredicateLockListLock.
  */
 static bool
-TransferPredicateLocksToNewTarget(const PREDICATELOCKTARGETTAG oldtargettag,
-								  const PREDICATELOCKTARGETTAG newtargettag,
+TransferPredicateLocksToNewTarget(PREDICATELOCKTARGETTAG oldtargettag,
+								  PREDICATELOCKTARGETTAG newtargettag,
 								  bool removeOld)
 {
 	uint32		oldtargettaghash;
@@ -2614,14 +2613,13 @@ TransferPredicateLocksToNewTarget(const PREDICATELOCKTARGETTAG oldtargettag,
 				Assert(found);
 			}
 
-
 			newpredlock = (PREDICATELOCK *)
-				hash_search_with_hash_value
-				(PredicateLockHash,
-				 &newpredlocktag,
-				 PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
-														 newtargettaghash),
-				 HASH_ENTER_NULL, &found);
+				hash_search_with_hash_value(PredicateLockHash,
+											&newpredlocktag,
+											PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
+																					newtargettaghash),
+											HASH_ENTER_NULL,
+											&found);
 			if (!newpredlock)
 			{
 				/* Out of shared memory. Undo what we've done so far. */
@@ -2711,7 +2709,7 @@ exit:
  * transaction which executed DROP TABLE, the false condition will be useful.
  */
 static void
-DropAllPredicateLocksFromTable(const Relation relation, bool transfer)
+DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 {
 	HASH_SEQ_STATUS seqstat;
 	PREDICATELOCKTARGET *oldtarget;
@@ -2857,12 +2855,12 @@ DropAllPredicateLocksFromTable(const Relation relation, bool transfer)
 				newpredlocktag.myTarget = heaptarget;
 				newpredlocktag.myXact = oldXact;
 				newpredlock = (PREDICATELOCK *)
-					hash_search_with_hash_value
-					(PredicateLockHash,
-					 &newpredlocktag,
-					 PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
-														  heaptargettaghash),
-					 HASH_ENTER, &found);
+					hash_search_with_hash_value(PredicateLockHash,
+												&newpredlocktag,
+												PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
+																						heaptargettaghash),
+												HASH_ENTER,
+												&found);
 				if (!found)
 				{
 					SHMQueueInsertBefore(&(heaptarget->predicateLocks),
@@ -2907,7 +2905,7 @@ DropAllPredicateLocksFromTable(const Relation relation, bool transfer)
  *		relation to a single relation lock on the heap.
  */
 void
-TransferPredicateLocksToHeapRelation(const Relation relation)
+TransferPredicateLocksToHeapRelation(Relation relation)
 {
 	DropAllPredicateLocksFromTable(relation, true);
 }
@@ -2928,8 +2926,8 @@ TransferPredicateLocksToHeapRelation(const Relation relation)
  * which hold the locks getting in and noticing.
  */
 void
-PredicateLockPageSplit(const Relation relation, const BlockNumber oldblkno,
-					   const BlockNumber newblkno)
+PredicateLockPageSplit(Relation relation, BlockNumber oldblkno,
+					   BlockNumber newblkno)
 {
 	PREDICATELOCKTARGETTAG oldtargettag;
 	PREDICATELOCKTARGETTAG newtargettag;
@@ -3013,8 +3011,8 @@ PredicateLockPageSplit(const Relation relation, const BlockNumber oldblkno,
  * occurs in the context of another transaction isolation level.
  */
 void
-PredicateLockPageCombine(const Relation relation, const BlockNumber oldblkno,
-						 const BlockNumber newblkno)
+PredicateLockPageCombine(Relation relation, BlockNumber oldblkno,
+						 BlockNumber newblkno)
 {
 	/*
 	 * Page combines differ from page splits in that we ought to be able to
@@ -3046,7 +3044,7 @@ SetNewSxactGlobalXmin(void)
 
 	for (sxact = FirstPredXact(); sxact != NULL; sxact = NextPredXact(sxact))
 	{
-		if (!SxactIsDoomed(sxact)
+		if (!SxactIsRolledBack(sxact)
 			&& !SxactIsCommitted(sxact)
 			&& sxact != OldCommittedSxact)
 		{
@@ -3085,7 +3083,7 @@ SetNewSxactGlobalXmin(void)
  * holding locks.
  */
 void
-ReleasePredicateLocks(const bool isCommit)
+ReleasePredicateLocks(bool isCommit)
 {
 	bool		needToClear;
 	RWConflict	conflict,
@@ -3113,6 +3111,7 @@ ReleasePredicateLocks(const bool isCommit)
 	Assert(!isCommit || SxactIsPrepared(MySerializableXact));
 	Assert(!isCommit || !SxactIsDoomed(MySerializableXact));
 	Assert(!SxactIsCommitted(MySerializableXact));
+	Assert(!SxactIsRolledBack(MySerializableXact));
 
 	/* may not be serializable during COMMIT/ROLLBACK PREPARED */
 	if (MySerializableXact->pid != 0)
@@ -3151,7 +3150,22 @@ ReleasePredicateLocks(const bool isCommit)
 			MySerializableXact->flags |= SXACT_FLAG_READ_ONLY;
 	}
 	else
+	{
+		/*
+		 * The DOOMED flag indicates that we intend to roll back this
+		 * transaction and so it should not cause serialization failures for
+		 * other transactions that conflict with it. Note that this flag might
+		 * already be set, if another backend marked this transaction for
+		 * abort.
+		 *
+		 * The ROLLED_BACK flag further indicates that ReleasePredicateLocks
+		 * has been called, and so the SerializableXact is eligible for
+		 * cleanup. This means it should not be considered when calculating
+		 * SxactGlobalXmin.
+		 */
 		MySerializableXact->flags |= SXACT_FLAG_DOOMED;
+		MySerializableXact->flags |= SXACT_FLAG_ROLLED_BACK;
+	}
 
 	if (!topLevelIsDeclaredReadOnly)
 	{
@@ -3527,7 +3541,7 @@ ReleaseOneSerializableXact(SERIALIZABLEXACT *sxact, bool partial,
 				nextConflict;
 
 	Assert(sxact != NULL);
-	Assert(SxactIsDoomed(sxact) || SxactIsCommitted(sxact));
+	Assert(SxactIsRolledBack(sxact) || SxactIsCommitted(sxact));
 	Assert(LWLockHeldByMe(SerializableFinishedListLock));
 
 	/*
@@ -3719,9 +3733,9 @@ XidIsConcurrent(TransactionId xid)
  * currently no known reason to call this function from an index AM.
  */
 void
-CheckForSerializableConflictOut(const bool visible, const Relation relation,
-								const HeapTuple tuple, const Buffer buffer,
-								const Snapshot snapshot)
+CheckForSerializableConflictOut(bool visible, Relation relation,
+								HeapTuple tuple, Buffer buffer,
+								Snapshot snapshot)
 {
 	TransactionId xid;
 	SERIALIZABLEXIDTAG sxidtag;
@@ -4100,8 +4114,8 @@ CheckTargetForConflictsIn(PREDICATELOCKTARGETTAG *targettag)
  * tuple itself.
  */
 void
-CheckForSerializableConflictIn(const Relation relation, const HeapTuple tuple,
-							   const Buffer buffer)
+CheckForSerializableConflictIn(Relation relation, HeapTuple tuple,
+							   Buffer buffer)
 {
 	PREDICATELOCKTARGETTAG targettag;
 
@@ -4185,7 +4199,7 @@ CheckForSerializableConflictIn(const Relation relation, const HeapTuple tuple,
  * lead to some false positives, but it doesn't seem worth the trouble.)
  */
 void
-CheckTableForSerializableConflictIn(const Relation relation)
+CheckTableForSerializableConflictIn(Relation relation)
 {
 	HASH_SEQ_STATUS seqstat;
 	PREDICATELOCKTARGET *target;
@@ -4525,6 +4539,21 @@ PreCommit_CheckForSerializationFailure(void)
 						&& !SxactIsReadOnly(farConflict->sxactOut)
 						&& !SxactIsDoomed(farConflict->sxactOut)))
 				{
+					/*
+					 * Normally, we kill the pivot transaction to make sure we
+					 * make progress if the failing transaction is retried.
+					 * However, we can't kill it if it's already prepared, so
+					 * in that case we commit suicide instead.
+					 */
+					if (SxactIsPrepared(nearConflict->sxactOut))
+					{
+						LWLockRelease(SerializableXactHashLock);
+						ereport(ERROR,
+								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+								 errmsg("could not serialize access due to read/write dependencies among transactions"),
+								 errdetail("Cancelled on commit attempt with conflict in from prepared pivot."),
+								 errhint("The transaction might succeed if retried.")));
+					}
 					nearConflict->sxactOut->flags |= SXACT_FLAG_DOOMED;
 					break;
 				}

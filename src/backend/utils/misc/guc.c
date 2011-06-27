@@ -1532,8 +1532,8 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		/* This is PGC_SIGHUP so all backends have the same value. */
-		{"deadlock_timeout", PGC_SIGHUP, LOCK_MANAGEMENT,
+		/* This is PGC_SUSET to prevent hiding from log_lock_waits. */
+		{"deadlock_timeout", PGC_SUSET, LOCK_MANAGEMENT,
 			gettext_noop("Sets the time to wait on a lock before checking for deadlock."),
 			NULL,
 			GUC_UNIT_MS
@@ -2965,7 +2965,7 @@ static struct config_string ConfigureNamesString[] =
 
 	{
 		{"synchronous_standby_names", PGC_SIGHUP, WAL_REPLICATION,
-			gettext_noop("List of potential standby names to synchronise with."),
+			gettext_noop("List of potential standby names to synchronize with."),
 			NULL,
 			GUC_LIST_INPUT
 		},
@@ -8234,7 +8234,7 @@ check_temp_buffers(int *newval, void **extra, GucSource source)
 	 */
 	if (NLocBuffer && NLocBuffer != *newval)
 	{
-		GUC_check_errdetail("\"temp_buffers\" cannot be changed after any temp tables have been accessed in the session.");
+		GUC_check_errdetail("\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session.");
 		return false;
 	}
 	return true;

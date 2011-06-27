@@ -19,6 +19,8 @@ static void check_is_super_user(ClusterInfo *cluster);
 static void check_for_prepared_transactions(ClusterInfo *cluster);
 static void check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster);
 static void check_for_reg_data_type_usage(ClusterInfo *cluster);
+static void check_for_support_lib(ClusterInfo *cluster);
+static void get_bin_version(ClusterInfo *cluster);
 
 
 void
@@ -30,7 +32,7 @@ output_check_banner(bool *live_check)
 		if (old_cluster.port == new_cluster.port)
 			pg_log(PG_FATAL, "When checking a live server, "
 				   "the old and new port numbers must be different.\n");
-		pg_log(PG_REPORT, "PerForming Consistency Checks on Old Live Server\n");
+		pg_log(PG_REPORT, "Performing Consistency Checks on Old Live Server\n");
 		pg_log(PG_REPORT, "------------------------------------------------\n");
 	}
 	else
@@ -42,8 +44,7 @@ output_check_banner(bool *live_check)
 
 
 void
-check_old_cluster(bool live_check,
-				  char **sequence_script_file_name)
+check_old_cluster(bool live_check, char **sequence_script_file_name)
 {
 	/* -- OLD -- */
 
@@ -216,6 +217,8 @@ output_completion_banner(char *deletion_script_file_name)
 void
 check_cluster_versions(void)
 {
+	prep_status("Checking cluster versions");
+
 	/* get old and new cluster versions */
 	old_cluster.major_version = get_major_server_version(&old_cluster);
 	new_cluster.major_version = get_major_server_version(&new_cluster);
@@ -235,31 +238,33 @@ check_cluster_versions(void)
 
 	/*
 	 * We can't allow downgrading because we use the target pg_dumpall, and
-	 * pg_dumpall cannot operate on new datbase versions, only older versions.
+	 * pg_dumpall cannot operate on new database versions, only older versions.
 	 */
 	if (old_cluster.major_version > new_cluster.major_version)
 		pg_log(PG_FATAL, "This utility cannot be used to downgrade to older major PostgreSQL versions.\n");
+
+	/* get old and new binary versions */
+	get_bin_version(&old_cluster);
+	get_bin_version(&new_cluster);
+
+	/* Ensure binaries match the designated data directories */
+	if (GET_MAJOR_VERSION(old_cluster.major_version) !=
+		GET_MAJOR_VERSION(old_cluster.bin_version))
+		pg_log(PG_FATAL,
+			   "Old cluster data and binary directories are from different major versions.\n");
+	if (GET_MAJOR_VERSION(new_cluster.major_version) !=
+		GET_MAJOR_VERSION(new_cluster.bin_version))
+		pg_log(PG_FATAL,
+			   "New cluster data and binary directories are from different major versions.\n");
+
+	check_ok();
 }
 
 
 void
 check_cluster_compatibility(bool live_check)
 {
-	char		libfile[MAXPGPATH];
-	FILE	   *lib_test;
-
-	/*
-	 * Test pg_upgrade_support.so is in the proper place.	 We cannot copy it
-	 * ourselves because install directories are typically root-owned.
-	 */
-	snprintf(libfile, sizeof(libfile), "%s/pg_upgrade_support%s", new_cluster.libpath,
-			 DLSUFFIX);
-
-	if ((lib_test = fopen(libfile, "r")) == NULL)
-		pg_log(PG_FATAL,
-			   "pg_upgrade_support%s must be created and installed in %s\n", DLSUFFIX, libfile);
-	else
-		fclose(lib_test);
+	check_for_support_lib(&new_cluster);
 
 	/* get/check pg_control data of servers */
 	get_control_data(&old_cluster, live_check);
@@ -406,8 +411,7 @@ check_old_cluster_has_new_cluster_dbs(void)
  *	This is particularly useful for tablespace deletion.
  */
 void
-create_script_for_old_cluster_deletion(
-									   char **deletion_script_file_name)
+create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 {
 	FILE	   *script = NULL;
 	int			tblnum;
@@ -730,3 +734,71 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 	else
 		check_ok();
 }
+
+
+/*
+ * Test pg_upgrade_support.so is in the proper place.	 We cannot copy it
+ * ourselves because install directories are typically root-owned.
+ */
+static void
+check_for_support_lib(ClusterInfo *cluster)
+{
+	char		cmd[MAXPGPATH];
+	char		libdir[MAX_STRING];
+	char		libfile[MAXPGPATH];
+	FILE	   *lib_test;
+	FILE	   *output;
+
+	snprintf(cmd, sizeof(cmd), "\"%s/pg_config\" --pkglibdir", cluster->bindir);
+
+	if ((output = popen(cmd, "r")) == NULL)
+		pg_log(PG_FATAL, "Could not get pkglibdir data: %s\n",
+			   getErrorText(errno));
+
+	fgets(libdir, sizeof(libdir), output);
+
+	pclose(output);
+
+	/* Remove trailing newline */
+	if (strchr(libdir, '\n') != NULL)
+		*strchr(libdir, '\n') = '\0';
+
+	snprintf(libfile, sizeof(libfile), "%s/pg_upgrade_support%s", libdir,
+			 DLSUFFIX);
+
+	if ((lib_test = fopen(libfile, "r")) == NULL)
+		pg_log(PG_FATAL,
+			   "The pg_upgrade_support module must be created and installed in the %s cluster.\n",
+				CLUSTER_NAME(cluster));
+
+	fclose(lib_test);
+}
+
+
+static void
+get_bin_version(ClusterInfo *cluster)
+{
+	char		cmd[MAXPGPATH], cmd_output[MAX_STRING];
+	FILE	   *output;
+	int			pre_dot, post_dot;
+
+	snprintf(cmd, sizeof(cmd), "\"%s/pg_ctl\" --version", cluster->bindir);
+
+	if ((output = popen(cmd, "r")) == NULL)
+		pg_log(PG_FATAL, "Could not get pg_ctl version data: %s\n",
+			   getErrorText(errno));
+
+	fgets(cmd_output, sizeof(cmd_output), output);
+
+	pclose(output);
+
+	/* Remove trailing newline */
+	if (strchr(cmd_output, '\n') != NULL)
+		*strchr(cmd_output, '\n') = '\0';
+
+	if (sscanf(cmd_output, "%*s %*s %d.%d", &pre_dot, &post_dot) != 2)
+		pg_log(PG_FATAL, "could not get version from %s\n", cmd);
+
+	cluster->bin_version = (pre_dot * 100 + post_dot) * 100;
+}
+
