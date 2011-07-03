@@ -5593,7 +5593,14 @@ recoveryStopsHere(XLogRecord *record, bool *includeThis)
 	if (record->xl_rmid != RM_XACT_ID && record->xl_rmid != RM_XLOG_ID)
 		return false;
 	record_info = record->xl_info & ~XLR_INFO_MASK;
-	if (record->xl_rmid == RM_XACT_ID && record_info == XLOG_XACT_COMMIT)
+	if (record->xl_rmid == RM_XACT_ID && record_info == XLOG_XACT_COMMIT_COMPACT)
+	{
+		xl_xact_commit_compact *recordXactCommitData;
+
+		recordXactCommitData = (xl_xact_commit_compact *) XLogRecGetData(record);
+		recordXtime = recordXactCommitData->xact_time;
+	}
+	else if (record->xl_rmid == RM_XACT_ID && record_info == XLOG_XACT_COMMIT)
 	{
 		xl_xact_commit *recordXactCommitData;
 
@@ -5680,7 +5687,7 @@ recoveryStopsHere(XLogRecord *record, bool *includeThis)
 		recoveryStopTime = recordXtime;
 		recoveryStopAfter = *includeThis;
 
-		if (record_info == XLOG_XACT_COMMIT)
+		if (record_info == XLOG_XACT_COMMIT_COMPACT || record_info == XLOG_XACT_COMMIT)
 		{
 			if (recoveryStopAfter)
 				ereport(LOG,
@@ -8372,13 +8379,13 @@ xlog_redo(XLogRecPtr lsn, XLogRecord *record)
 
 		/*
 		 * If we see a shutdown checkpoint while waiting for an end-of-backup
-		 * record, the backup was cancelled and the end-of-backup record will
+		 * record, the backup was canceled and the end-of-backup record will
 		 * never arrive.
 		 */
 		if (InArchiveRecovery &&
 			!XLogRecPtrIsInvalid(ControlFile->backupStartPoint))
 			ereport(ERROR,
-					(errmsg("online backup was cancelled, recovery cannot continue")));
+					(errmsg("online backup was canceled, recovery cannot continue")));
 
 		/*
 		 * If we see a shutdown checkpoint, we know that nothing was running
@@ -9334,7 +9341,7 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive)
 						(errmsg("pg_stop_backup still waiting for all required WAL segments to be archived (%d seconds elapsed)",
 								waits),
 						 errhint("Check that your archive_command is executing properly.  "
-								 "pg_stop_backup can be cancelled safely, "
+								 "pg_stop_backup can be canceled safely, "
 								 "but the database backup will not be usable without all the WAL segments.")));
 			}
 		}
@@ -9816,13 +9823,13 @@ CancelBackup(void)
 	if (stat(BACKUP_LABEL_FILE, &stat_buf) < 0)
 		return;
 
-	/* remove leftover file from previously cancelled backup if it exists */
+	/* remove leftover file from previously canceled backup if it exists */
 	unlink(BACKUP_LABEL_OLD);
 
 	if (rename(BACKUP_LABEL_FILE, BACKUP_LABEL_OLD) == 0)
 	{
 		ereport(LOG,
-				(errmsg("online backup mode cancelled"),
+				(errmsg("online backup mode canceled"),
 				 errdetail("\"%s\" was renamed to \"%s\".",
 						   BACKUP_LABEL_FILE, BACKUP_LABEL_OLD)));
 	}
@@ -9830,7 +9837,7 @@ CancelBackup(void)
 	{
 		ereport(WARNING,
 				(errcode_for_file_access(),
-				 errmsg("online backup mode was not cancelled"),
+				 errmsg("online backup mode was not canceled"),
 				 errdetail("Could not rename \"%s\" to \"%s\": %m.",
 						   BACKUP_LABEL_FILE, BACKUP_LABEL_OLD)));
 	}
