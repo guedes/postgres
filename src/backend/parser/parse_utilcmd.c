@@ -59,7 +59,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
-#include "utils/relcache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -162,6 +162,7 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	 * possible.
 	 */
 	namespaceid = RangeVarGetAndCheckCreationNamespace(stmt->relation);
+	RangeVarAdjustRelationPersistence(stmt->relation, namespaceid);
 
 	/*
 	 * If the relation already exists and the user specified "IF NOT EXISTS",
@@ -374,7 +375,10 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 		if (cxt->rel)
 			snamespaceid = RelationGetNamespace(cxt->rel);
 		else
+		{
 			snamespaceid = RangeVarGetCreationNamespace(cxt->relation);
+			RangeVarAdjustRelationPersistence(cxt->relation, snamespaceid);
+		}
 		snamespace = get_namespace_name(snamespaceid);
 		sname = ChooseRelationName(cxt->relation->relname,
 								   column->colname,
@@ -1527,7 +1531,7 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 		if (index_rel->rd_rel->relam != get_am_oid(DEFAULT_INDEX_TYPE, false))
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("index \"%s\" is not a b-tree", index_name),
+					 errmsg("index \"%s\" is not a btree", index_name),
 					 parser_errposition(cxt->pstate, constraint->location)));
 
 		/* Must get indclass the hard way */

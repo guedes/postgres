@@ -63,6 +63,7 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 
@@ -1610,6 +1611,7 @@ DefineCompositeType(const RangeVar *typevar, List *coldeflist)
 	 * instead of below about a "relation".
 	 */
 	typeNamespace = RangeVarGetCreationNamespace(createStmt->relation);
+	RangeVarAdjustRelationPersistence(createStmt->relation, typeNamespace);
 	old_type_oid =
 		GetSysCacheOid2(TYPENAMENSP,
 						CStringGetDatum(createStmt->relation->relname),
@@ -2045,7 +2047,6 @@ AlterDomainValidateConstraint(List *names, char *constrName)
 	Relation	typrel;
 	Relation	conrel;
 	HeapTuple	tup;
-	Form_pg_type typTup;
 	Form_pg_constraint con = NULL;
 	Form_pg_constraint copy_con;
 	char	   *conbin;
@@ -2067,7 +2068,6 @@ AlterDomainValidateConstraint(List *names, char *constrName)
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(domainoid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type %u", domainoid);
-	typTup = (Form_pg_type) GETSTRUCT(tup);
 
 	/* Check it's a domain and check user has permission for ALTER DOMAIN */
 	checkDomainOwner(tup);
@@ -2097,13 +2097,13 @@ AlterDomainValidateConstraint(List *names, char *constrName)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("constraint \"%s\" of domain \"%s\" does not exist",
-						constrName, NameStr(con->conname))));
+						constrName, TypeNameToString(typename))));
 
 	if (con->contype != CONSTRAINT_CHECK)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("constraint \"%s\" of domain \"%s\" is not a check constraint",
-						constrName, NameStr(con->conname))));
+						constrName, TypeNameToString(typename))));
 
 	val = SysCacheGetAttr(CONSTROID, tuple,
 						  Anum_pg_constraint_conbin,

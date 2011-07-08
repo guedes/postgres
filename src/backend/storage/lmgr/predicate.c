@@ -244,6 +244,14 @@
 
 #define SxactIsOnFinishedList(sxact) (!SHMQueueIsDetached(&((sxact)->finishedLink)))
 
+/*
+ * Note that a sxact is marked "prepared" once it has passed
+ * PreCommit_CheckForSerializationFailure, even if it isn't using
+ * 2PC. This is the point at which it can no longer be aborted.
+ *
+ * The PREPARED flag remains set after commit, so SxactIsCommitted
+ * implies SxactIsPrepared.
+ */
 #define SxactIsCommitted(sxact) (((sxact)->flags & SXACT_FLAG_COMMITTED) != 0)
 #define SxactIsPrepared(sxact) (((sxact)->flags & SXACT_FLAG_PREPARED) != 0)
 #define SxactIsRolledBack(sxact) (((sxact)->flags & SXACT_FLAG_ROLLED_BACK) != 0)
@@ -297,7 +305,13 @@ static SlruCtlData OldSerXidSlruCtlData;
 #define OLDSERXID_PAGESIZE			BLCKSZ
 #define OLDSERXID_ENTRYSIZE			sizeof(SerCommitSeqNo)
 #define OLDSERXID_ENTRIESPERPAGE	(OLDSERXID_PAGESIZE / OLDSERXID_ENTRYSIZE)
-#define OLDSERXID_MAX_PAGE			(SLRU_PAGES_PER_SEGMENT * 0x10000 - 1)
+
+/*
+ * Set maximum pages based on the lesser of the number needed to track all
+ * transactions and the maximum that SLRU supports.
+ */
+#define OLDSERXID_MAX_PAGE			Min(SLRU_PAGES_PER_SEGMENT * 0x10000 - 1, \
+										(MaxTransactionId + 1) / OLDSERXID_ENTRIESPERPAGE - 1)
 
 #define OldSerXidNextPage(page) (((page) >= OLDSERXID_MAX_PAGE) ? 0 : (page) + 1)
 
@@ -882,7 +896,7 @@ OldSerXidAdd(TransactionId xid, SerCommitSeqNo minConflictCommitSeqNo)
 			oldSerXidControl->warningIssued = true;
 			ereport(WARNING,
 					(errmsg("memory for serializable conflict tracking is nearly exhausted"),
-					 errhint("There may be an idle transaction or a forgotten prepared transaction causing this.")));
+					 errhint("There might be an idle transaction or a forgotten prepared transaction causing this.")));
 		}
 	}
 
@@ -1176,6 +1190,7 @@ InitPredicateLocks(void)
 		}
 		PredXact->OldCommittedSxact = CreatePredXact();
 		SetInvalidVirtualTransactionId(PredXact->OldCommittedSxact->vxid);
+		PredXact->OldCommittedSxact->prepareSeqNo = 0;
 		PredXact->OldCommittedSxact->commitSeqNo = 0;
 		PredXact->OldCommittedSxact->SeqNo.lastCommitBeforeSnapshot = 0;
 		SHMQueueInit(&PredXact->OldCommittedSxact->outConflicts);
@@ -1636,6 +1651,7 @@ RegisterSerializableTransactionInt(Snapshot snapshot)
 	/* Initialize the structure. */
 	sxact->vxid = vxid;
 	sxact->SeqNo.lastCommitBeforeSnapshot = PredXact->LastSxactCommitSeqNo;
+	sxact->prepareSeqNo = InvalidSerCommitSeqNo;
 	sxact->commitSeqNo = InvalidSerCommitSeqNo;
 	SHMQueueInit(&(sxact->outConflicts));
 	SHMQueueInit(&(sxact->inConflicts));
@@ -1661,8 +1677,9 @@ RegisterSerializableTransactionInt(Snapshot snapshot)
 			 othersxact != NULL;
 			 othersxact = NextPredXact(othersxact))
 		{
-			if (!SxactIsOnFinishedList(othersxact) &&
-				!SxactIsReadOnly(othersxact))
+			if (!SxactIsCommitted(othersxact)
+				&& !SxactIsDoomed(othersxact)
+				&& !SxactIsReadOnly(othersxact))
 			{
 				SetPossibleUnsafeConflict(sxact, othersxact);
 			}
@@ -3165,6 +3182,13 @@ ReleasePredicateLocks(bool isCommit)
 		 */
 		MySerializableXact->flags |= SXACT_FLAG_DOOMED;
 		MySerializableXact->flags |= SXACT_FLAG_ROLLED_BACK;
+		/*
+		 * If the transaction was previously prepared, but is now failing due
+		 * to a ROLLBACK PREPARED or (hopefully very rare) error after the
+		 * prepare, clear the prepared flag.  This simplifies conflict
+		 * checking.
+		 */
+		MySerializableXact->flags &= ~SXACT_FLAG_PREPARED;
 	}
 
 	if (!topLevelIsDeclaredReadOnly)
@@ -3246,8 +3270,8 @@ ReleasePredicateLocks(bool isCommit)
 			&& SxactIsCommitted(conflict->sxactIn))
 		{
 			if ((MySerializableXact->flags & SXACT_FLAG_CONFLICT_OUT) == 0
-				|| conflict->sxactIn->commitSeqNo < MySerializableXact->SeqNo.earliestOutConflictCommit)
-				MySerializableXact->SeqNo.earliestOutConflictCommit = conflict->sxactIn->commitSeqNo;
+				|| conflict->sxactIn->prepareSeqNo < MySerializableXact->SeqNo.earliestOutConflictCommit)
+				MySerializableXact->SeqNo.earliestOutConflictCommit = conflict->sxactIn->prepareSeqNo;
 			MySerializableXact->flags |= SXACT_FLAG_CONFLICT_OUT;
 		}
 
@@ -4363,6 +4387,11 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 	 * - the writer committed before T2
 	 * - the reader is a READ ONLY transaction and the reader was concurrent
 	 *	 with T2 (= reader acquired its snapshot before T2 committed)
+	 *
+	 * We also handle the case that T2 is prepared but not yet committed
+	 * here. In that case T2 has already checked for conflicts, so if it
+	 * commits first, making the above conflict real, it's too late for it
+	 * to abort.
 	 *------------------------------------------------------------------------
 	 */
 	if (!failure)
@@ -4381,13 +4410,13 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 		{
 			SERIALIZABLEXACT *t2 = conflict->sxactIn;
 
-			if (SxactIsCommitted(t2)
+			if (SxactIsPrepared(t2)
 				&& (!SxactIsCommitted(reader)
-					|| t2->commitSeqNo <= reader->commitSeqNo)
+					|| t2->prepareSeqNo <= reader->commitSeqNo)
 				&& (!SxactIsCommitted(writer)
-					|| t2->commitSeqNo <= writer->commitSeqNo)
+					|| t2->prepareSeqNo <= writer->commitSeqNo)
 				&& (!SxactIsReadOnly(reader)
-			   || t2->commitSeqNo <= reader->SeqNo.lastCommitBeforeSnapshot))
+			   || t2->prepareSeqNo <= reader->SeqNo.lastCommitBeforeSnapshot))
 			{
 				failure = true;
 				break;
@@ -4400,7 +4429,8 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 	}
 
 	/*------------------------------------------------------------------------
-	 * Check whether the reader has become a pivot with a committed writer:
+	 * Check whether the reader has become a pivot with a writer
+	 * that's committed (or prepared):
 	 *
 	 *		T0 ------> R ------> W
 	 *			 rw		   rw
@@ -4411,7 +4441,7 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 	 * - T0 is READ ONLY, and overlaps the writer
 	 *------------------------------------------------------------------------
 	 */
-	if (!failure && SxactIsCommitted(writer) && !SxactIsReadOnly(reader))
+	if (!failure && SxactIsPrepared(writer) && !SxactIsReadOnly(reader))
 	{
 		if (SxactHasSummaryConflictIn(reader))
 		{
@@ -4429,9 +4459,9 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 
 			if (!SxactIsDoomed(t0)
 				&& (!SxactIsCommitted(t0)
-					|| t0->commitSeqNo >= writer->commitSeqNo)
+					|| t0->commitSeqNo >= writer->prepareSeqNo)
 				&& (!SxactIsReadOnly(t0)
-			   || t0->SeqNo.lastCommitBeforeSnapshot >= writer->commitSeqNo))
+			   || t0->SeqNo.lastCommitBeforeSnapshot >= writer->prepareSeqNo))
 			{
 				failure = true;
 				break;
@@ -4570,6 +4600,7 @@ PreCommit_CheckForSerializationFailure(void)
 						 offsetof(RWConflictData, inLink));
 	}
 
+	MySerializableXact->prepareSeqNo = ++(PredXact->LastSxactCommitSeqNo);
 	MySerializableXact->flags |= SXACT_FLAG_PREPARED;
 
 	LWLockRelease(SerializableXactHashLock);
@@ -4744,6 +4775,7 @@ predicatelock_twophase_recover(TransactionId xid, uint16 info,
 		sxact->pid = 0;
 
 		/* a prepared xact hasn't committed yet */
+		sxact->prepareSeqNo = RecoverySerCommitSeqNo;
 		sxact->commitSeqNo = InvalidSerCommitSeqNo;
 		sxact->finishedBefore = InvalidTransactionId;
 

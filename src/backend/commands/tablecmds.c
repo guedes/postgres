@@ -432,6 +432,13 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId)
 				 errmsg("constraints on foreign tables are not supported")));
 
 	/*
+	 * Look up the namespace in which we are supposed to create the relation,
+	 * and check we have permission to create there.
+	 */
+	namespaceId = RangeVarGetAndCheckCreationNamespace(stmt->relation);
+	RangeVarAdjustRelationPersistence(stmt->relation, namespaceId);
+
+	/*
 	 * Security check: disallow creating temp tables from security-restricted
 	 * code.  This is needed because calling code might not expect untrusted
 	 * tables to appear in pg_temp at the front of its search path.
@@ -441,12 +448,6 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("cannot create temporary table within security-restricted operation")));
-
-	/*
-	 * Look up the namespace in which we are supposed to create the relation,
-	 * and check we have permission to create there.
-	 */
-	namespaceId = RangeVarGetAndCheckCreationNamespace(stmt->relation);
 
 	/*
 	 * Select tablespace to use.  If not specified, use default tablespace
@@ -2577,6 +2578,31 @@ AlterTableInternal(Oid relid, List *cmds, bool recurse)
 LOCKMODE
 AlterTableGetLockLevel(List *cmds)
 {
+	/*
+	 * Late in 9.1 dev cycle a number of issues were uncovered with access
+	 * to catalog relations, leading to the decision to re-enforce all DDL
+	 * at AccessExclusiveLock level by default.
+	 *
+	 * The issues are that there is a pervasive assumption in the code that
+	 * the catalogs will not be read unless an AccessExclusiveLock is held.
+	 * If that rule is relaxed, we must protect against a number of potential
+	 * effects - infrequent, but proven possible with test cases where
+	 * multiple DDL operations occur in a stream against frequently accessed
+	 * tables.
+	 *
+	 * 1. Catalog tables are read using SnapshotNow, which has a race bug
+	 * that allows a scan to return no valid rows even when one is present
+	 * in the case of a commit of a concurrent update of the catalog table.
+	 * SnapshotNow also ignores transactions in progress, so takes the
+	 * latest committed version without waiting for the latest changes.
+	 *
+	 * 2. Relcache needs to be internally consistent, so unless we lock the
+	 * definition during reads we have no way to guarantee that.
+	 *
+	 * 3. Catcache access isn't coordinated at all so refreshes can occur at
+	 * any time.
+	 */
+#ifdef REDUCED_ALTER_TABLE_LOCK_LEVELS
 	ListCell   *lcmd;
 	LOCKMODE	lockmode = ShareUpdateExclusiveLock;
 
@@ -2725,6 +2751,9 @@ AlterTableGetLockLevel(List *cmds)
 		if (cmd_lockmode > lockmode)
 			lockmode = cmd_lockmode;
 	}
+#else
+	LOCKMODE	lockmode = AccessExclusiveLock;
+#endif
 
 	return lockmode;
 }
@@ -3396,14 +3425,12 @@ ATRewriteTables(List **wqueue, LOCKMODE lockmode)
 				Relation	refrel;
 
 				if (rel == NULL)
+				{
 					/* Long since locked, no need for another */
 					rel = heap_open(tab->relid, NoLock);
+				}
 
-				/*
-				 * We're adding a trigger to both tables, so the lock level
-				 * here should sensibly reflect that.
-				 */
-				refrel = heap_open(con->refrelid, ShareRowExclusiveLock);
+				refrel = heap_open(con->refrelid, RowShareLock);
 
 				validateForeignKeyConstraint(fkconstraint->conname, rel, refrel,
 											 con->refindid,
@@ -5500,7 +5527,14 @@ ATAddForeignKeyConstraint(AlteredTableInfo *tab, Relation rel,
 	Oid			indexOid;
 	Oid			constrOid;
 
-	pkrel = heap_openrv(fkconstraint->pktable, lockmode);
+	/*
+	 * Grab an exclusive lock on the pk table, so that someone doesn't delete
+	 * rows out from under us. (Although a lesser lock would do for that
+	 * purpose, we'll need exclusive lock anyway to add triggers to the pk
+	 * table; trying to start with a lesser lock will just create a risk of
+	 * deadlock.)
+	 */
+	pkrel = heap_openrv(fkconstraint->pktable, AccessExclusiveLock);
 
 	/*
 	 * Validity checks (permission checks wait till we have the column
@@ -6895,7 +6929,8 @@ ATPrepAlterColumnType(List **wqueue,
 	else if (transform)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-			  errmsg("ALTER TYPE USING is only supported on plain tables")));
+				 errmsg("\"%s\" is not a table",
+						RelationGetRelationName(rel))));
 
 	if (tab->relkind == RELKIND_COMPOSITE_TYPE ||
 		tab->relkind == RELKIND_FOREIGN_TABLE)
