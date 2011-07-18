@@ -229,7 +229,8 @@ SystemAttributeByName(const char *attname, bool relhasoids)
  *		heap_create		- Create an uncataloged heap relation
  *
  *		Note API change: the caller must now always provide the OID
- *		to use for the relation.
+ *		to use for the relation.  The relfilenode may (and, normally,
+ *		should) be left unspecified.
  *
  *		rel->rd_rel is initialized by RelationBuildLocalRelation,
  *		and is mostly zeroes at return.
@@ -240,6 +241,7 @@ heap_create(const char *relname,
 			Oid relnamespace,
 			Oid reltablespace,
 			Oid relid,
+			Oid relfilenode,
 			TupleDesc tupDesc,
 			char relkind,
 			char relpersistence,
@@ -297,6 +299,16 @@ heap_create(const char *relname,
 	}
 
 	/*
+	 * Unless otherwise requested, the physical ID (relfilenode) is initially
+	 * the same as the logical ID (OID).  When the caller did specify a
+	 * relfilenode, it already exists; do not attempt to create it.
+	 */
+	if (OidIsValid(relfilenode))
+		create_storage = false;
+	else
+		relfilenode = relid;
+
+	/*
 	 * Never allow a pg_class entry to explicitly specify the database's
 	 * default tablespace in reltablespace; force it to zero instead. This
 	 * ensures that if the database is cloned with a different default
@@ -315,6 +327,7 @@ heap_create(const char *relname,
 									 relnamespace,
 									 tupDesc,
 									 relid,
+									 relfilenode,
 									 reltablespace,
 									 shared_relation,
 									 mapped_relation,
@@ -1103,6 +1116,7 @@ heap_create_with_catalog(const char *relname,
 							   relnamespace,
 							   reltablespace,
 							   relid,
+							   InvalidOid,
 							   tupdesc,
 							   relkind,
 							   relpersistence,
@@ -1874,7 +1888,9 @@ StoreRelCheck(Relation rel, char *ccname, Node *expr,
 	 * in check constraints; it would fail to examine the contents of
 	 * subselects.
 	 */
-	varList = pull_var_clause(expr, PVC_REJECT_PLACEHOLDERS);
+	varList = pull_var_clause(expr,
+							  PVC_REJECT_AGGREGATES,
+							  PVC_REJECT_PLACEHOLDERS);
 	keycount = list_length(varList);
 
 	if (keycount > 0)
@@ -2171,7 +2187,9 @@ AddRelationNewConstraints(Relation rel,
 			List	   *vars;
 			char	   *colname;
 
-			vars = pull_var_clause(expr, PVC_REJECT_PLACEHOLDERS);
+			vars = pull_var_clause(expr,
+								   PVC_REJECT_AGGREGATES,
+								   PVC_REJECT_PLACEHOLDERS);
 
 			/* eliminate duplicates */
 			vars = list_union(NIL, vars);

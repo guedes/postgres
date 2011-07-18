@@ -955,7 +955,7 @@ pg_GSS_error(int severity, char *errmsg, OM_uint32 maj_stat, OM_uint32 min_stat)
 	 */
 	ereport(severity,
 			(errmsg_internal("%s", errmsg),
-			 errdetail("%s: %s", msg_major, msg_minor)));
+			 errdetail_internal("%s: %s", msg_major, msg_minor)));
 }
 
 static int
@@ -1198,11 +1198,11 @@ pg_SSPI_error(int severity, const char *errmsg, SECURITY_STATUS r)
 					  sysmsg, sizeof(sysmsg), NULL) == 0)
 		ereport(severity,
 				(errmsg_internal("%s", errmsg),
-				 errdetail("SSPI error %x", (unsigned int) r)));
+				 errdetail_internal("SSPI error %x", (unsigned int) r)));
 	else
 		ereport(severity,
 				(errmsg_internal("%s", errmsg),
-				 errdetail("%s (%x)", sysmsg, (unsigned int) r)));
+				 errdetail_internal("%s (%x)", sysmsg, (unsigned int) r)));
 }
 
 static int
@@ -1349,15 +1349,21 @@ pg_SSPI_recvauth(Port *port)
 						  _("could not accept SSPI security context"), r);
 		}
 
+		/*
+		 * Overwrite the current context with the one we just received.
+		 * If sspictx is NULL it was the first loop and we need to allocate
+		 * a buffer for it. On subsequent runs, we can just overwrite the
+		 * buffer contents since the size does not change.
+		 */
 		if (sspictx == NULL)
 		{
 			sspictx = malloc(sizeof(CtxtHandle));
 			if (sspictx == NULL)
 				ereport(ERROR,
 						(errmsg("out of memory")));
-
-			memcpy(sspictx, &newctx, sizeof(CtxtHandle));
 		}
+
+		memcpy(sspictx, &newctx, sizeof(CtxtHandle));
 
 		if (r == SEC_I_CONTINUE_NEEDED)
 			elog(DEBUG4, "SSPI continue needed");

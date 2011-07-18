@@ -649,6 +649,8 @@ UpdateIndexRelation(Oid indexoid,
  * indexRelationId: normally, pass InvalidOid to let this routine
  *		generate an OID for the index.	During bootstrap this may be
  *		nonzero to specify a preselected OID.
+ * relFileNode: normally, pass InvalidOid to get new storage.  May be
+ *		nonzero to attach an existing valid build.
  * indexInfo: same info executor uses to insert into the index
  * indexColNames: column names to use for index (List of char *)
  * accessMethodObjectId: OID of index AM to use
@@ -674,6 +676,7 @@ Oid
 index_create(Relation heapRelation,
 			 const char *indexRelationName,
 			 Oid indexRelationId,
+			 Oid relFileNode,
 			 IndexInfo *indexInfo,
 			 List *indexColNames,
 			 Oid accessMethodObjectId,
@@ -813,6 +816,7 @@ index_create(Relation heapRelation,
 								namespaceId,
 								tableSpaceId,
 								indexRelationId,
+								relFileNode,
 								indexTupDesc,
 								RELKIND_INDEX,
 								relpersistence,
@@ -2942,7 +2946,8 @@ reindex_relation(Oid relid, int flags)
 
 	/*
 	 * Open and lock the relation.	ShareLock is sufficient since we only need
-	 * to prevent schema and data changes in it.
+	 * to prevent schema and data changes in it.  The lock level used here
+	 * should match ReindexTable().
 	 */
 	rel = heap_open(relid, ShareLock);
 

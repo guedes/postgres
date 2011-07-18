@@ -2811,7 +2811,7 @@ DATA(insert OID = 2078 (  set_config		PGNSP PGUID 12 1 0 0 0 f f f f f v 3 0 25 
 DESCR("SET X as a function");
 DATA(insert OID = 2084 (  pg_show_all_settings	PGNSP PGUID 12 1 1000 0 0 f f f t t s 0 0 2249 "" "{25,25,25,25,25,25,25,25,25,25,25,1009,25,25,25,23}" "{o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}" "{name,setting,unit,category,short_desc,extra_desc,context,vartype,source,min_val,max_val,enumvals,boot_val,reset_val,sourcefile,sourceline}" _null_ show_all_settings _null_ _null_ _null_ ));
 DESCR("SHOW ALL as a function");
-DATA(insert OID = 1371 (  pg_lock_status   PGNSP PGUID 12 1 1000 0 0 f f f t t v 0 0 2249 "" "{25,26,26,23,21,25,28,26,26,21,25,23,25,16}" "{o,o,o,o,o,o,o,o,o,o,o,o,o,o}" "{locktype,database,relation,page,tuple,virtualxid,transactionid,classid,objid,objsubid,virtualtransaction,pid,mode,granted}" _null_ pg_lock_status _null_ _null_ _null_ ));
+DATA(insert OID = 1371 (  pg_lock_status   PGNSP PGUID 12 1 1000 0 0 f f f t t v 0 0 2249 "" "{25,26,26,23,21,25,28,26,26,21,25,23,25,16,16}" "{o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}" "{locktype,database,relation,page,tuple,virtualxid,transactionid,classid,objid,objsubid,virtualtransaction,pid,mode,granted,fastpath}" _null_ pg_lock_status _null_ _null_ _null_ ));
 DESCR("view system lock information");
 DATA(insert OID = 1065 (  pg_prepared_xact PGNSP PGUID 12 1 1000 0 0 f f f t t v 0 0 2249 "" "{28,25,1184,26,26}" "{o,o,o,o,o}" "{transaction,gid,prepared,ownerid,dbid}" _null_ pg_prepared_xact _null_ _null_ _null_ ));
 DESCR("view two-phase transactions");
@@ -2829,6 +2829,8 @@ DATA(insert OID = 2082 (  pg_operator_is_visible	PGNSP PGUID 12 1 0 0 0 f f f t 
 DESCR("is operator visible in search path?");
 DATA(insert OID = 2083 (  pg_opclass_is_visible		PGNSP PGUID 12 1 0 0 0 f f f t f s 1 0 16 "26" _null_ _null_ _null_ _null_ pg_opclass_is_visible _null_ _null_ _null_ ));
 DESCR("is opclass visible in search path?");
+DATA(insert OID = 3829 (  pg_opfamily_is_visible 	PGNSP PGUID 12 1 0 0 0 f f f t f s 1 0 16 "26" _null_ _null_ _null_ _null_ pg_opfamily_is_visible _null_ _null_ _null_ ));
+DESCR("is opfamily visible in search path?");
 DATA(insert OID = 2093 (  pg_conversion_is_visible	PGNSP PGUID 12 1 0 0 0 f f f t f s 1 0 16 "26" _null_ _null_ _null_ _null_ pg_conversion_is_visible _null_ _null_ _null_ ));
 DESCR("is conversion visible in search path?");
 DATA(insert OID = 3756 (  pg_ts_parser_is_visible	PGNSP PGUID 12 1 0 0 0 f f f t f s 1 0 16 "26" _null_ _null_ _null_ _null_ pg_ts_parser_is_visible _null_ _null_ _null_ ));

@@ -425,6 +425,8 @@ int			log_min_duration_statement = -1;
 int			log_temp_files = -1;
 int			trace_recovery_messages = LOG;
 
+int			temp_file_limit = -1;
+
 int			num_temp_buffers = 1024;
 
 char	   *data_directory;
@@ -535,6 +537,8 @@ const char *const config_group_names[] =
 	gettext_noop("Resource Usage"),
 	/* RESOURCES_MEM */
 	gettext_noop("Resource Usage / Memory"),
+	/* RESOURCES_DISK */
+	gettext_noop("Resource Usage / Disk"),
 	/* RESOURCES_KERNEL */
 	gettext_noop("Resource Usage / Kernel Resources"),
 	/* RESOURCES_VACUUM_DELAY */
@@ -1691,6 +1695,17 @@ static struct config_int ConfigureNamesInt[] =
 		&max_stack_depth,
 		100, 100, MAX_KILOBYTES,
 		check_max_stack_depth, assign_max_stack_depth, NULL
+	},
+
+	{
+		{"temp_file_limit", PGC_SUSET, RESOURCES_DISK,
+			gettext_noop("Limits the total size of all temp files used by each session."),
+			gettext_noop("-1 means no limit."),
+			GUC_UNIT_KB
+		},
+		&temp_file_limit,
+		-1, -1, INT_MAX,
+		NULL, NULL, NULL
 	},
 
 	{
@@ -5828,8 +5843,11 @@ SetConfigOption(const char *name, const char *value,
 
 
 /*
- * Fetch the current value of the option `name'. If the option doesn't exist,
- * throw an ereport and don't return.
+ * Fetch the current value of the option `name', as a string.
+ *
+ * If the option doesn't exist, return NULL if missing_ok is true (NOTE that
+ * this cannot be distinguished from a string variable with a NULL value!),
+ * otherwise throw an ereport and don't return.
  *
  * If restrict_superuser is true, we also enforce that only superusers can
  * see GUC_SUPERUSER_ONLY variables.  This should only be passed as true
@@ -5839,16 +5857,21 @@ SetConfigOption(const char *name, const char *value,
  * valid until the next call to configuration related functions.
  */
 const char *
-GetConfigOption(const char *name, bool restrict_superuser)
+GetConfigOption(const char *name, bool missing_ok, bool restrict_superuser)
 {
 	struct config_generic *record;
 	static char buffer[256];
 
 	record = find_option(name, false, ERROR);
 	if (record == NULL)
+	{
+		if (missing_ok)
+			return NULL;
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
-			   errmsg("unrecognized configuration parameter \"%s\"", name)));
+				 errmsg("unrecognized configuration parameter \"%s\"",
+						name)));
+	}
 	if (restrict_superuser &&
 		(record->flags & GUC_SUPERUSER_ONLY) &&
 		!superuser())
@@ -7967,11 +7990,11 @@ call_bool_check_hook(struct config_bool * conf, bool *newval, void **extra,
 		ereport(elevel,
 				(errcode(GUC_check_errcode_value),
 				 GUC_check_errmsg_string ?
-				 errmsg("%s", GUC_check_errmsg_string) :
+				 errmsg_internal("%s", GUC_check_errmsg_string) :
 				 errmsg("invalid value for parameter \"%s\": %d",
 						conf->gen.name, (int) *newval),
 				 GUC_check_errdetail_string ?
-				 errdetail("%s", GUC_check_errdetail_string) : 0,
+				 errdetail_internal("%s", GUC_check_errdetail_string) : 0,
 				 GUC_check_errhint_string ?
 				 errhint("%s", GUC_check_errhint_string) : 0));
 		/* Flush any strings created in ErrorContext */
@@ -8001,11 +8024,11 @@ call_int_check_hook(struct config_int * conf, int *newval, void **extra,
 		ereport(elevel,
 				(errcode(GUC_check_errcode_value),
 				 GUC_check_errmsg_string ?
-				 errmsg("%s", GUC_check_errmsg_string) :
+				 errmsg_internal("%s", GUC_check_errmsg_string) :
 				 errmsg("invalid value for parameter \"%s\": %d",
 						conf->gen.name, *newval),
 				 GUC_check_errdetail_string ?
-				 errdetail("%s", GUC_check_errdetail_string) : 0,
+				 errdetail_internal("%s", GUC_check_errdetail_string) : 0,
 				 GUC_check_errhint_string ?
 				 errhint("%s", GUC_check_errhint_string) : 0));
 		/* Flush any strings created in ErrorContext */
@@ -8035,11 +8058,11 @@ call_real_check_hook(struct config_real * conf, double *newval, void **extra,
 		ereport(elevel,
 				(errcode(GUC_check_errcode_value),
 				 GUC_check_errmsg_string ?
-				 errmsg("%s", GUC_check_errmsg_string) :
+				 errmsg_internal("%s", GUC_check_errmsg_string) :
 				 errmsg("invalid value for parameter \"%s\": %g",
 						conf->gen.name, *newval),
 				 GUC_check_errdetail_string ?
-				 errdetail("%s", GUC_check_errdetail_string) : 0,
+				 errdetail_internal("%s", GUC_check_errdetail_string) : 0,
 				 GUC_check_errhint_string ?
 				 errhint("%s", GUC_check_errhint_string) : 0));
 		/* Flush any strings created in ErrorContext */
@@ -8069,11 +8092,11 @@ call_string_check_hook(struct config_string * conf, char **newval, void **extra,
 		ereport(elevel,
 				(errcode(GUC_check_errcode_value),
 				 GUC_check_errmsg_string ?
-				 errmsg("%s", GUC_check_errmsg_string) :
+				 errmsg_internal("%s", GUC_check_errmsg_string) :
 				 errmsg("invalid value for parameter \"%s\": \"%s\"",
 						conf->gen.name, *newval ? *newval : ""),
 				 GUC_check_errdetail_string ?
-				 errdetail("%s", GUC_check_errdetail_string) : 0,
+				 errdetail_internal("%s", GUC_check_errdetail_string) : 0,
 				 GUC_check_errhint_string ?
 				 errhint("%s", GUC_check_errhint_string) : 0));
 		/* Flush any strings created in ErrorContext */
@@ -8103,12 +8126,12 @@ call_enum_check_hook(struct config_enum * conf, int *newval, void **extra,
 		ereport(elevel,
 				(errcode(GUC_check_errcode_value),
 				 GUC_check_errmsg_string ?
-				 errmsg("%s", GUC_check_errmsg_string) :
+				 errmsg_internal("%s", GUC_check_errmsg_string) :
 				 errmsg("invalid value for parameter \"%s\": \"%s\"",
 						conf->gen.name,
 						config_enum_lookup_by_value(conf, *newval)),
 				 GUC_check_errdetail_string ?
-				 errdetail("%s", GUC_check_errdetail_string) : 0,
+				 errdetail_internal("%s", GUC_check_errdetail_string) : 0,
 				 GUC_check_errhint_string ?
 				 errhint("%s", GUC_check_errhint_string) : 0));
 		/* Flush any strings created in ErrorContext */

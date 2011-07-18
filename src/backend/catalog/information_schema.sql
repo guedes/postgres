@@ -158,7 +158,18 @@ $$SELECT
        WHEN $1 IN (1083, 1114, 1184, 1266) /* time, timestamp, same + tz */
            THEN CASE WHEN $2 < 0 THEN 6 ELSE $2 END
        WHEN $1 IN (1186) /* interval */
-           THEN CASE WHEN $2 < 0 THEN 6 ELSE $2 & 65535 END
+           THEN CASE WHEN $2 < 0 OR $2 & 65535 = 65535 THEN 6 ELSE $2 & 65535 END
+       ELSE null
+  END$$;
+
+CREATE FUNCTION _pg_interval_type(typid oid, mod int4) RETURNS text
+    LANGUAGE sql
+    IMMUTABLE
+    RETURNS NULL ON NULL INPUT
+    AS
+$$SELECT
+  CASE WHEN $1 IN (1186) /* interval */
+           THEN upper(substring(format_type($1, $2) from 'interval[()0-9]* #"%#"' for '#'))
        ELSE null
   END$$;
 
@@ -321,8 +332,11 @@ CREATE VIEW attributes AS
              AS cardinal_number)
              AS datetime_precision,
 
-           CAST(null AS character_data) AS interval_type, -- FIXME
-           CAST(null AS character_data) AS interval_precision, -- FIXME
+           CAST(
+             _pg_interval_type(_pg_truetypid(a, t), _pg_truetypmod(a, t))
+             AS character_data)
+             AS interval_type,
+           CAST(null AS cardinal_number) AS interval_precision,
 
            CAST(current_database() AS sql_identifier) AS attribute_udt_catalog,
            CAST(nt.nspname AS sql_identifier) AS attribute_udt_schema,
@@ -670,8 +684,11 @@ CREATE VIEW columns AS
              AS cardinal_number)
              AS datetime_precision,
 
-           CAST(null AS character_data) AS interval_type, -- FIXME
-           CAST(null AS character_data) AS interval_precision, -- FIXME
+           CAST(
+             _pg_interval_type(_pg_truetypid(a, t), _pg_truetypmod(a, t))
+             AS character_data)
+             AS interval_type,
+           CAST(null AS cardinal_number) AS interval_precision,
 
            CAST(null AS sql_identifier) AS character_set_catalog,
            CAST(null AS sql_identifier) AS character_set_schema,
@@ -936,8 +953,11 @@ CREATE VIEW domains AS
              AS cardinal_number)
              AS datetime_precision,
 
-           CAST(null AS character_data) AS interval_type, -- FIXME
-           CAST(null AS character_data) AS interval_precision, -- FIXME
+           CAST(
+             _pg_interval_type(t.typbasetype, t.typtypmod)
+             AS character_data)
+             AS interval_type,
+           CAST(null AS cardinal_number) AS interval_precision,
 
            CAST(t.typdefault AS character_data) AS domain_default,
 
@@ -1085,7 +1105,7 @@ CREATE VIEW parameters AS
            CAST(null AS cardinal_number) AS numeric_scale,
            CAST(null AS cardinal_number) AS datetime_precision,
            CAST(null AS character_data) AS interval_type,
-           CAST(null AS character_data) AS interval_precision,
+           CAST(null AS cardinal_number) AS interval_precision,
            CAST(current_database() AS sql_identifier) AS udt_catalog,
            CAST(nt.nspname AS sql_identifier) AS udt_schema,
            CAST(t.typname AS sql_identifier) AS udt_name,
@@ -1353,7 +1373,7 @@ CREATE VIEW routines AS
            CAST(null AS cardinal_number) AS numeric_scale,
            CAST(null AS cardinal_number) AS datetime_precision,
            CAST(null AS character_data) AS interval_type,
-           CAST(null AS character_data) AS interval_precision,
+           CAST(null AS cardinal_number) AS interval_precision,
            CAST(current_database() AS sql_identifier) AS type_udt_catalog,
            CAST(nt.nspname AS sql_identifier) AS type_udt_schema,
            CAST(t.typname AS sql_identifier) AS type_udt_name,
@@ -1390,7 +1410,7 @@ CREATE VIEW routines AS
            CAST(null AS time_stamp) AS created,
            CAST(null AS time_stamp) AS last_altered,
            CAST(null AS yes_or_no) AS new_savepoint_level,
-           CAST('YES' AS yes_or_no) AS is_udt_dependent, -- FIXME?
+           CAST('NO' AS yes_or_no) AS is_udt_dependent,
 
            CAST(null AS character_data) AS result_cast_from_data_type,
            CAST(null AS yes_or_no) AS result_cast_as_locator,
@@ -1407,7 +1427,7 @@ CREATE VIEW routines AS
            CAST(null AS cardinal_number) AS result_cast_numeric_scale,
            CAST(null AS cardinal_number) AS result_cast_datetime_precision,
            CAST(null AS character_data) AS result_cast_interval_type,
-           CAST(null AS character_data) AS result_cast_interval_precision,
+           CAST(null AS cardinal_number) AS result_cast_interval_precision,
            CAST(null AS sql_identifier) AS result_cast_type_udt_catalog,
            CAST(null AS sql_identifier) AS result_cast_type_udt_schema,
            CAST(null AS sql_identifier) AS result_cast_type_udt_name,
@@ -1842,10 +1862,7 @@ CREATE VIEW tables AS
                 THEN 'YES' ELSE 'NO' END AS yes_or_no) AS is_insertable_into,
 
            CAST(CASE WHEN t.typname IS NOT NULL THEN 'YES' ELSE 'NO' END AS yes_or_no) AS is_typed,
-           CAST(
-             CASE WHEN nc.oid = pg_my_temp_schema() THEN 'PRESERVE' -- FIXME
-                  ELSE null END
-             AS character_data) AS commit_action
+           CAST(null AS character_data) AS commit_action
 
     FROM pg_namespace nc JOIN pg_class c ON (nc.oid = c.relnamespace)
            LEFT JOIN (pg_type t JOIN pg_namespace nt ON (t.typnamespace = nt.oid)) ON (c.reloftype = t.oid)
@@ -2212,7 +2229,7 @@ CREATE VIEW user_defined_types AS
            CAST(null AS cardinal_number) AS numeric_scale,
            CAST(null AS cardinal_number) AS datetime_precision,
            CAST(null AS character_data) AS interval_type,
-           CAST(null AS character_data) AS interval_precision,
+           CAST(null AS cardinal_number) AS interval_precision,
            CAST(null AS sql_identifier) AS source_dtd_identifier,
            CAST(null AS sql_identifier) AS ref_dtd_identifier
 
@@ -2448,7 +2465,7 @@ CREATE VIEW element_types AS
            CAST(null AS cardinal_number) AS numeric_scale,
            CAST(null AS cardinal_number) AS datetime_precision,
            CAST(null AS character_data) AS interval_type,
-           CAST(null AS character_data) AS interval_precision,
+           CAST(null AS cardinal_number) AS interval_precision,
 
            CAST(null AS character_data) AS domain_default, -- XXX maybe a bug in the standard
 

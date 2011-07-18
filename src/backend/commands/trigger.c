@@ -194,7 +194,17 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 						RelationGetRelationName(rel))));
 
 	if (stmt->isconstraint && stmt->constrrel != NULL)
-		constrrelid = RangeVarGetRelid(stmt->constrrel, false);
+	{
+		/*
+		 * We must take a lock on the target relation to protect against
+		 * concurrent drop.  It's not clear that AccessShareLock is strong
+		 * enough, but we certainly need at least that much... otherwise,
+		 * we might end up creating a pg_constraint entry referencing a
+		 * nonexistent table.
+		 */
+		constrrelid = RangeVarGetRelid(stmt->constrrel, AccessShareLock, false,
+									   false);
+	}
 
 	/* permission checks */
 	if (!isInternal)
@@ -303,7 +313,9 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 		 * subselects in WHEN clauses; it would fail to examine the contents
 		 * of subselects.
 		 */
-		varList = pull_var_clause(whenClause, PVC_REJECT_PLACEHOLDERS);
+		varList = pull_var_clause(whenClause,
+								  PVC_REJECT_AGGREGATES,
+								  PVC_REJECT_PLACEHOLDERS);
 		foreach(lc, varList)
 		{
 			Var		   *var = (Var *) lfirst(lc);
@@ -890,7 +902,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		ereport(NOTICE,
 		(errmsg("ignoring incomplete trigger group for constraint \"%s\" %s",
 				constr_name, buf.data),
-		 errdetail("%s", _(funcdescr[funcnum]))));
+		 errdetail_internal("%s", _(funcdescr[funcnum]))));
 		oldContext = MemoryContextSwitchTo(TopMemoryContext);
 		info = (OldTriggerInfo *) palloc0(sizeof(OldTriggerInfo));
 		info->args = copyObject(stmt->args);
@@ -906,7 +918,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		ereport(NOTICE,
 		(errmsg("ignoring incomplete trigger group for constraint \"%s\" %s",
 				constr_name, buf.data),
-		 errdetail("%s", _(funcdescr[funcnum]))));
+		 errdetail_internal("%s", _(funcdescr[funcnum]))));
 	}
 	else
 	{
@@ -918,7 +930,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		ereport(NOTICE,
 				(errmsg("converting trigger group into constraint \"%s\" %s",
 						constr_name, buf.data),
-				 errdetail("%s", _(funcdescr[funcnum]))));
+				 errdetail_internal("%s", _(funcdescr[funcnum]))));
 		fkcon->contype = CONSTR_FOREIGN;
 		fkcon->location = -1;
 		if (funcnum == 2)
@@ -1020,10 +1032,14 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
  * DropTrigger - drop an individual trigger by name
  */
 void
-DropTrigger(Oid relid, const char *trigname, DropBehavior behavior,
+DropTrigger(RangeVar *relation, const char *trigname, DropBehavior behavior,
 			bool missing_ok)
 {
+	Oid			relid;
 	ObjectAddress object;
+
+	/* lock level should match RemoveTriggerById */
+	relid = RangeVarGetRelid(relation, ShareRowExclusiveLock, false, false);
 
 	object.classId = TriggerRelationId;
 	object.objectId = get_trigger_oid(relid, trigname, missing_ok);

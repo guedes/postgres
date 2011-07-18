@@ -172,6 +172,7 @@ sub mkvcbuild
 
     if ($solution->{options}->{python})
     {
+
         # Attempt to get python version and location.
         # Assume python.exe in specified dir.
         open(P,
@@ -190,8 +191,8 @@ sub mkvcbuild
           if (!(defined($pyprefix) && defined($pyver)));
 
         my $pymajorver = substr($pyver, 0, 1);
-        my $plpython = $solution->AddProject('plpython' . $pymajorver, 'dll',
-                                             'PLs', 'src\pl\plpython');
+        my $plpython =
+          $solution->AddProject('plpython' . $pymajorver, 'dll','PLs', 'src\pl\plpython');
         $plpython->AddIncludeDir($pyprefix . '\include');
         $plpython->AddLibrary($pyprefix . "\\Libs\\python$pyver.lib");
         $plpython->AddReference($postgres);
@@ -283,6 +284,7 @@ sub mkvcbuild
     $isolation_tester->AddIncludeDir('src\interfaces\libpq');
     $isolation_tester->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
     $isolation_tester->AddDefine('FRONTEND');
+    $isolation_tester->AddLibrary('wsock32.lib');
     $isolation_tester->AddReference($libpq, $libpgport);
 
     my $pgregress_isolation = $solution->AddProject('pg_isolation_regress','exe','misc');
