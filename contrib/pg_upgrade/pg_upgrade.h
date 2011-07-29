@@ -199,6 +199,20 @@ typedef struct
 typedef struct
 {
 	char	   *filename;		/* name of log file (may be /dev/null) */
+	/*
+	 * WIN32 files do not accept writes from multiple processes
+	 *
+	 * On Win32, we can't send both pg_upgrade output and command output to the
+	 * same file because we get the error: "The process cannot access the file
+	 * because it is being used by another process." so we have to send all
+	 * other output to 'nul'.  Therefore, we set this to DEVNULL on Win32, and
+	 * it equals 'filename' on all other platforms.
+	 *
+	 * We could use the Windows pgwin32_open() flags to allow shared file
+	 * writes but is unclear how all other tools would use those flags, so
+	 * we just avoid it and log a little less on Windows.
+	 */
+	char	   *filename2;
 	FILE	   *fd;				/* log FILE */
 	bool		debug;			/* TRUE -> log more information */
 	FILE	   *debug_fd;		/* debug-level log FILE */

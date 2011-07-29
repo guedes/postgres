@@ -33,6 +33,7 @@
 
 #include "postgres_fe.h"
 
+#include "getopt_long.h"
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
 #include "portability/instr_time.h"
@@ -43,10 +44,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 #endif   /* ! WIN32 */
-
-#ifdef HAVE_GETOPT_H
-#include <getopt.h>
-#endif
 
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
@@ -121,6 +118,17 @@ int			scale = 1;
  * space during inserts and leave 10 percent free.
  */
 int			fillfactor = 100;
+
+/*
+ * use unlogged tables?
+ */
+int			unlogged_tables = 0;
+
+/*
+ * tablespace selection
+ */
+char	   *tablespace = NULL;
+char	   *index_tablespace = NULL;
 
 /*
  * end of configurable parameters
@@ -334,6 +342,12 @@ usage(const char *progname)
 		   "  -i           invokes initialization mode\n"
 		   "  -F NUM       fill factor\n"
 		   "  -s NUM       scaling factor\n"
+		   "  --index-tablespace=TABLESPACE\n"
+		   "               create indexes in the specified tablespace\n"
+		   "  --tablespace=TABLESPACE\n"
+		   "               create tables in the specified tablespace\n"
+		   "  --unlogged-tables\n"
+		   "               create tables as unlogged tables\n"
 		   "\nBenchmarking options:\n"
 		"  -c NUM       number of concurrent database clients (default: 1)\n"
 		   "  -C           establish new connection for each transaction\n"
@@ -1233,15 +1247,32 @@ init(void)
 	 * versions.  Since pgbench has never pretended to be fully TPC-B
 	 * compliant anyway, we stick with the historical behavior.
 	 */
-	static char *DDLs[] = {
-		"drop table if exists pgbench_branches",
-		"create table pgbench_branches(bid int not null,bbalance int,filler char(88)) with (fillfactor=%d)",
-		"drop table if exists pgbench_tellers",
-		"create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=%d)",
-		"drop table if exists pgbench_accounts",
-		"create table pgbench_accounts(aid int not null,bid int,abalance int,filler char(84)) with (fillfactor=%d)",
-		"drop table if exists pgbench_history",
-		"create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))"
+	struct ddlinfo {
+		char *table;
+		char *cols;
+		int declare_fillfactor;
+	};
+	struct ddlinfo DDLs[] = {
+		{
+			"pgbench_branches",
+			"bid int not null,bbalance int,filler char(88)",
+			1
+		},
+		{
+			"pgbench_tellers",
+			"tid int not null,bid int,tbalance int,filler char(84)",
+			1
+		},
+		{
+			"pgbench_accounts",
+			"aid int not null,bid int,abalance int,filler char(84)",
+			1
+		},
+		{
+			"pgbench_history",
+			"tid int,bid int,aid int,delta int,mtime timestamp,filler char(22)",
+			0
+		}
 	};
 	static char *DDLAFTERs[] = {
 		"alter table pgbench_branches add primary key (bid)",
@@ -1259,21 +1290,33 @@ init(void)
 
 	for (i = 0; i < lengthof(DDLs); i++)
 	{
-		/*
-		 * set fillfactor for branches, tellers and accounts tables
-		 */
-		if ((strstr(DDLs[i], "create table pgbench_branches") == DDLs[i]) ||
-			(strstr(DDLs[i], "create table pgbench_tellers") == DDLs[i]) ||
-			(strstr(DDLs[i], "create table pgbench_accounts") == DDLs[i]))
-		{
-			char		ddl_stmt[128];
+		char		opts[256];
+		char		buffer[256];
+		struct ddlinfo *ddl = &DDLs[i];
 
-			snprintf(ddl_stmt, 128, DDLs[i], fillfactor);
-			executeStatement(con, ddl_stmt);
-			continue;
+		/* Remove old table, if it exists. */
+		snprintf(buffer, 256, "drop table if exists %s", ddl->table);
+		executeStatement(con, buffer);
+
+		/* Construct new create table statement. */
+		opts[0] = '\0';
+		if (ddl->declare_fillfactor)
+			snprintf(opts+strlen(opts), 256-strlen(opts),
+				" with (fillfactor=%d)", fillfactor);
+		if (tablespace != NULL)
+		{
+			char *escape_tablespace;
+			escape_tablespace = PQescapeIdentifier(con, tablespace,
+												   strlen(tablespace));
+			snprintf(opts+strlen(opts), 256-strlen(opts),
+				" tablespace %s", escape_tablespace);
+			PQfreemem(escape_tablespace);
 		}
-		else
-			executeStatement(con, DDLs[i]);
+		snprintf(buffer, 256, "create%s table %s(%s)%s",
+				 unlogged_tables ? " unlogged" : "",
+				 ddl->table, ddl->cols, opts);
+
+		executeStatement(con, buffer);
 	}
 
 	executeStatement(con, "begin");
@@ -1340,7 +1383,23 @@ init(void)
 	 */
 	fprintf(stderr, "set primary key...\n");
 	for (i = 0; i < lengthof(DDLAFTERs); i++)
-		executeStatement(con, DDLAFTERs[i]);
+	{
+		char	buffer[256];
+
+		strncpy(buffer, DDLAFTERs[i], 256);
+
+		if (index_tablespace != NULL)
+		{
+			char *escape_tablespace;
+			escape_tablespace = PQescapeIdentifier(con, index_tablespace,
+												   strlen(index_tablespace));
+			snprintf(buffer+strlen(buffer), 256-strlen(buffer),
+				" using index tablespace %s", escape_tablespace);
+			PQfreemem(escape_tablespace);
+		}
+
+		executeStatement(con, buffer);
+	}
 
 	/* vacuum */
 	fprintf(stderr, "vacuum...");
@@ -1767,6 +1826,7 @@ main(int argc, char **argv)
 	int			do_vacuum_accounts = 0; /* do vacuum accounts before testing? */
 	int			ttype = 0;		/* transaction type. 0: TPC-B, 1: SELECT only,
 								 * 2: skip update of branches and tellers */
+	int			optindex;
 	char	   *filename = NULL;
 	bool		scale_given = false;
 
@@ -1779,6 +1839,13 @@ main(int argc, char **argv)
 	int			total_xacts;
 
 	int			i;
+
+	static struct option long_options[] = {
+			{"index-tablespace", required_argument, NULL, 3},
+			{"tablespace", required_argument, NULL, 2},
+			{"unlogged-tables", no_argument, &unlogged_tables, 1},
+			{NULL, 0, NULL, 0}
+	};
 
 #ifdef HAVE_GETRLIMIT
 	struct rlimit rlim;
@@ -1823,7 +1890,7 @@ main(int argc, char **argv)
 	state = (CState *) xmalloc(sizeof(CState));
 	memset(state, 0, sizeof(CState));
 
-	while ((c = getopt(argc, argv, "ih:nvp:dSNc:j:Crs:t:T:U:lf:D:F:M:")) != -1)
+	while ((c = getopt_long(argc, argv, "ih:nvp:dSNc:j:Crs:t:T:U:lf:D:F:M:", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -1974,6 +2041,15 @@ main(int argc, char **argv)
 					fprintf(stderr, "invalid query mode (-M): %s\n", optarg);
 					exit(1);
 				}
+				break;
+			case 0:
+				/* This covers long options which take no argument. */
+				break;
+			case 2:							/* tablespace */
+				tablespace = optarg;
+				break;
+			case 3:							/* index-tablespace */
+				index_tablespace = optarg;
 				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);

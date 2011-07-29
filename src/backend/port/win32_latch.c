@@ -98,7 +98,7 @@ WaitLatchOrSocket(volatile Latch *latch, int wakeEvents, SOCKET sock,
 	HANDLE		sockevent = WSA_INVALID_EVENT;
 	int			numevents;
 	int			result = 0;
-	int			pmdeath_eventno;
+	int			pmdeath_eventno = 0;
 	long		timeout_ms;
 
 	Assert(wakeEvents != 0);
@@ -189,7 +189,7 @@ WaitLatchOrSocket(volatile Latch *latch, int wakeEvents, SOCKET sock,
 			ZeroMemory(&resEvents, sizeof(resEvents));
 			if (WSAEnumNetworkEvents(sock, sockevent, &resEvents) == SOCKET_ERROR)
 				ereport(FATAL,
-						(errmsg_internal("failed to enumerate network events: %i", (int) GetLastError())));
+						(errmsg_internal("failed to enumerate network events: %d", (int) GetLastError())));
 
 			if ((wakeEvents & WL_SOCKET_READABLE) &&
 				(resEvents.lNetworkEvents & FD_READ))
