@@ -2331,8 +2331,7 @@ reaper(SIGNAL_ARGS)
 			if (max_wal_senders > 0)
 			{
 				ereport(LOG,
-						(errmsg("terminating walsender all processes to force cascaded"
-								"standby(s) to update timeline and reconnect")));
+						(errmsg("terminating all walsender processes to force cascaded standby(s) to update timeline and reconnect")));
 				SignalSomeChildren(SIGUSR2, BACKEND_TYPE_WALSND);
 			}
 
@@ -3358,14 +3357,14 @@ BackendInitialize(Port *port)
 	if (pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
 						   remote_host, sizeof(remote_host),
 						   remote_port, sizeof(remote_port),
-					   (log_hostname ? 0 : NI_NUMERICHOST) | NI_NUMERICSERV))
+					   (log_hostname ? 0 : NI_NUMERICHOST) | NI_NUMERICSERV) != 0)
 	{
 		int			ret = pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
 											 remote_host, sizeof(remote_host),
 											 remote_port, sizeof(remote_port),
 											 NI_NUMERICHOST | NI_NUMERICSERV);
 
-		if (ret)
+		if (ret != 0)
 			ereport(WARNING,
 					(errmsg_internal("pg_getnameinfo_all() failed: %s",
 									 gai_strerror(ret))));

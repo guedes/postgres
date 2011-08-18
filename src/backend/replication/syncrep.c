@@ -111,9 +111,6 @@ SyncRepWaitForLSN(XLogRecPtr XactCommitLSN)
 	Assert(SHMQueueIsDetached(&(MyProc->syncRepLinks)));
 	Assert(WalSndCtl != NULL);
 
-	/* Reset the latch before adding ourselves to the queue. */
-	ResetLatch(&MyProc->waitLatch);
-
 	LWLockAcquire(SyncRepLock, LW_EXCLUSIVE);
 	Assert(MyProc->syncRepState == SYNC_REP_NOT_WAITING);
 
@@ -166,15 +163,8 @@ SyncRepWaitForLSN(XLogRecPtr XactCommitLSN)
 	{
 		int			syncRepState;
 
-		/*
-		 * Wait on latch for up to 60 seconds. This allows us to check for
-		 * postmaster death regularly while waiting. Note that timeout here
-		 * does not necessarily release from loop.
-		 */
-		WaitLatch(&MyProc->waitLatch, WL_LATCH_SET | WL_TIMEOUT, 60000000L);
-
 		/* Must reset the latch before testing state. */
-		ResetLatch(&MyProc->waitLatch);
+		ResetLatch(&MyProc->procLatch);
 
 		/*
 		 * Try checking the state without the lock first.  There's no
@@ -184,6 +174,12 @@ SyncRepWaitForLSN(XLogRecPtr XactCommitLSN)
 		 * walsender changes the state to SYNC_REP_WAIT_COMPLETE, it will
 		 * never update it again, so we can't be seeing a stale value in that
 		 * case.
+		 *
+		 * Note: on machines with weak memory ordering, the acquisition of
+		 * the lock is essential to avoid race conditions: we cannot be sure
+		 * the sender's state update has reached main memory until we acquire
+		 * the lock.  We could get rid of this dance if SetLatch/ResetLatch
+		 * contained memory barriers.
 		 */
 		syncRepState = MyProc->syncRepState;
 		if (syncRepState == SYNC_REP_WAITING)
@@ -246,6 +242,12 @@ SyncRepWaitForLSN(XLogRecPtr XactCommitLSN)
 			SyncRepCancelWait();
 			break;
 		}
+
+		/*
+		 * Wait on latch.  Any condition that should wake us up will set
+		 * the latch, so no need for timeout.
+		 */
+		WaitLatch(&MyProc->procLatch, WL_LATCH_SET | WL_POSTMASTER_DEATH, -1);
 	}
 
 	/*
@@ -316,7 +318,7 @@ SyncRepCancelWait(void)
 }
 
 void
-SyncRepCleanupAtProcExit(int code, Datum arg)
+SyncRepCleanupAtProcExit(void)
 {
 	if (!SHMQueueIsDetached(&(MyProc->syncRepLinks)))
 	{
@@ -324,8 +326,6 @@ SyncRepCleanupAtProcExit(int code, Datum arg)
 		SHMQueueDelete(&(MyProc->syncRepLinks));
 		LWLockRelease(SyncRepLock);
 	}
-
-	DisownLatch(&MyProc->waitLatch);
 }
 
 /*
@@ -561,9 +561,7 @@ SyncRepWakeQueue(bool all)
 		/*
 		 * Wake only when we have set state and removed from queue.
 		 */
-		Assert(SHMQueueIsDetached(&(thisproc->syncRepLinks)));
-		Assert(thisproc->syncRepState == SYNC_REP_WAIT_COMPLETE);
-		SetLatch(&(thisproc->waitLatch));
+		SetLatch(&(thisproc->procLatch));
 
 		numprocs++;
 	}

@@ -61,13 +61,13 @@ extern bool listAllDbs(bool verbose);
 extern bool listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSystem);
 
 /* \dD */
-extern bool listDomains(const char *pattern, bool showSystem);
+extern bool listDomains(const char *pattern, bool verbose, bool showSystem);
 
 /* \dc */
-extern bool listConversions(const char *pattern, bool showSystem);
+extern bool listConversions(const char *pattern, bool verbose, bool showSystem);
 
 /* \dC */
-extern bool listCasts(const char *pattern);
+extern bool listCasts(const char *pattern, bool verbose);
 
 /* \dO */
 extern bool listCollations(const char *pattern, bool verbose, bool showSystem);

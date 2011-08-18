@@ -1451,11 +1451,18 @@ SET ENABLE_SEQSCAN TO OFF;
         This parameter can only be set at server start.
        </para>
        <para>
-        In <literal>minimal</> level, WAL-logging of some bulk operations, like
-        <command>CREATE INDEX</>, <command>CLUSTER</> and <command>COPY</> on
-        a table that was created or truncated in the same transaction can be
-        safely skipped, which can make those operations much faster (see
-        <xref linkend="populate-pitr">). But minimal WAL does not contain
+        In <literal>minimal</> level, WAL-logging of some bulk
+        operations can be safely skipped, which can make those
+        operations much faster (see <xref linkend="populate-pitr">).
+        Operations in which this optimization can be applied include:
+        <simplelist>
+         <member><command>CREATE TABLE AS</></member>
+         <member><command>CREATE INDEX</></member>
+         <member><command>CLUSTER</></member>
+         <member><command>COPY</> into tables that were created or truncated in the same
+         transaction</member>
+        </simplelist>
+        But minimal WAL does not contain
         enough information to reconstruct the data from a base backup and the
         WAL logs, so either <literal>archive</> or <literal>hot_standby</>
         level must be used to enable
@@ -1998,29 +2005,6 @@ SET ENABLE_SEQSCAN TO OFF;
         processes). The default is zero. This parameter can only be set at
         server start. <varname>wal_level</> must be set to <literal>archive</>
         or <literal>hot_standby</> to allow connections from standby servers.
-       </para>
-       </listitem>
-      </varlistentry>
-      <varlistentry id="guc-wal-sender-delay" xreflabel="wal_sender_delay">
-       <term><varname>wal_sender_delay</varname> (<type>integer</type>)</term>
-       <indexterm>
-        <primary><varname>wal_sender_delay</> configuration parameter</primary>
-       </indexterm>
-       <listitem>
-       <para>
-        Specifies the delay between activity rounds for WAL sender processes.
-        In each round the WAL sender sends any WAL accumulated since the last
-        round to the standby server. It then sleeps for
-        <varname>wal_sender_delay</> milliseconds, and repeats. The sleep
-        is interrupted by transaction commit, so the effects of a committed
-        transaction are sent to standby servers as soon as the commit
-        happens, regardless of this setting. The default value is one second
-        (<literal>1s</>).
-        Note that on many systems, the effective resolution of sleep delays is
-        10 milliseconds; setting <varname>wal_sender_delay</> to a value that
-        is not a multiple of 10 might have the same results as setting it to
-        the next higher multiple of 10. This parameter can only be set in the
-        <filename>postgresql.conf</> file or on the server command line.
        </para>
        </listitem>
       </varlistentry>
@@ -5254,7 +5238,7 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
        </para>
 
        <para>
-        Unlike <varname>local_preload_libraries</>, there is no
+        Unlike <xref linkend="guc-shared-preload-libraries">, there is no
         performance advantage to loading a library at session
         start rather than when it is first used.  Rather, the intent of
         this feature is to allow debugging or performance-measurement

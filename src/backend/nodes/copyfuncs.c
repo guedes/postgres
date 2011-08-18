@@ -964,8 +964,7 @@ _copyPlanInvalItem(PlanInvalItem *from)
 	PlanInvalItem *newnode = makeNode(PlanInvalItem);
 
 	COPY_SCALAR_FIELD(cacheId);
-	/* tupleId isn't really a "scalar", but this works anyway */
-	COPY_SCALAR_FIELD(tupleId);
+	COPY_SCALAR_FIELD(hashValue);
 
 	return newnode;
 }
@@ -2312,6 +2311,7 @@ _copyColumnDef(ColumnDef *from)
 	COPY_NODE_FIELD(collClause);
 	COPY_SCALAR_FIELD(collOid);
 	COPY_NODE_FIELD(constraints);
+	COPY_NODE_FIELD(fdwoptions);
 
 	return newnode;
 }

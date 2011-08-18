@@ -6,6 +6,56 @@
  *********************************************************************
  */
 
+#include "postgres.h"
+
+/* system stuff */
+#include <unistd.h>
+#include <fcntl.h>
+
+/* postgreSQL stuff */
+#include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
+#include "commands/trigger.h"
+#include "executor/spi.h"
+#include "funcapi.h"
+#include "fmgr.h"
+#include "mb/pg_wchar.h"
+#include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "parser/parse_type.h"
+#include "tcop/tcopprot.h"
+#include "access/transam.h"
+#include "access/xact.h"
+#include "utils/builtins.h"
+#include "utils/hsearch.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
+#include "utils/typcache.h"
+
+/*
+ * Undefine some things that get (re)defined in the
+ * Python headers. They aren't used below and we've
+ * already included all the headers we need, so this
+ * should be pretty safe.
+ */
+
+#undef _POSIX_C_SOURCE
+#undef _XOPEN_SOURCE
+#undef HAVE_STRERROR
+#undef HAVE_TZNAME
+
+/*
+ * Sometimes python carefully scribbles on our *printf macros.
+ * So we undefine them here and redefine them after it's done its dirty deed.
+ */
+
+#ifdef USE_REPL_SNPRINTF
+#undef snprintf
+#undef vsnprintf
+#endif
+
 #if defined(_MSC_VER) && defined(_DEBUG)
 /* Python uses #pragma to bring in a non-default libpython on VC++ if
  * _DEBUG is defined */
@@ -84,40 +134,29 @@ typedef int Py_ssize_t;
 		PyObject_HEAD_INIT(type) size,
 #endif
 
-#include "postgres.h"
-
-/* system stuff */
-#include <unistd.h>
-#include <fcntl.h>
-
-/* postgreSQL stuff */
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "commands/trigger.h"
-#include "executor/spi.h"
-#include "funcapi.h"
-#include "fmgr.h"
-#include "mb/pg_wchar.h"
-#include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "parser/parse_type.h"
-#include "tcop/tcopprot.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "utils/builtins.h"
-#include "utils/hsearch.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/rel.h"
-#include "utils/syscache.h"
-#include "utils/typcache.h"
-
 /* define our text domain for translations */
 #undef TEXTDOMAIN
 #define TEXTDOMAIN PG_TEXTDOMAIN("plpython")
 
 #include <compile.h>
 #include <eval.h>
+
+/* put back our snprintf and vsnprintf */
+#ifdef USE_REPL_SNPRINTF
+#ifdef snprintf
+#undef snprintf
+#endif
+#ifdef vsnprintf
+#undef vsnprintf
+#endif
+#ifdef __GNUC__
+#define vsnprintf(...)  pg_vsnprintf(__VA_ARGS__)
+#define snprintf(...)   pg_snprintf(__VA_ARGS__)
+#else
+#define vsnprintf               pg_vsnprintf
+#define snprintf                pg_snprintf
+#endif   /* __GNUC__ */
+#endif   /* USE_REPL_SNPRINTF */
 
 PG_MODULE_MAGIC;
 
@@ -1451,6 +1490,44 @@ PLy_function_delete_args(PLyProcedure *proc)
 }
 
 /*
+ * Check if our cached information about a datatype is still valid
+ */
+static bool
+PLy_procedure_argument_valid(PLyTypeInfo *arg)
+{
+	HeapTuple	relTup;
+	bool		valid;
+
+	/* Nothing to cache unless type is composite */
+	if (arg->is_rowtype != 1)
+		return true;
+
+	/*
+	 * Zero typ_relid means that we got called on an output argument of a
+	 * function returning a unnamed record type; the info for it can't change.
+	 */
+	if (!OidIsValid(arg->typ_relid))
+		return true;
+
+	/* Else we should have some cached data */
+	Assert(TransactionIdIsValid(arg->typrel_xmin));
+	Assert(ItemPointerIsValid(&arg->typrel_tid));
+
+	/* Get the pg_class tuple for the data type */
+	relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(arg->typ_relid));
+	if (!HeapTupleIsValid(relTup))
+		elog(ERROR, "cache lookup failed for relation %u", arg->typ_relid);
+
+	/* If it has changed, the cached data is not valid */
+	valid = (arg->typrel_xmin == HeapTupleHeaderGetXmin(relTup->t_data) &&
+			 ItemPointerEquals(&arg->typrel_tid, &relTup->t_self));
+
+	ReleaseSysCache(relTup);
+
+	return valid;
+}
+
+/*
  * Decide whether a cached PLyProcedure struct is still valid
  */
 static bool
@@ -1466,38 +1543,20 @@ PLy_procedure_valid(PLyProcedure *proc, HeapTuple procTup)
 		  ItemPointerEquals(&proc->fn_tid, &procTup->t_self)))
 		return false;
 
+	/* Else check the input argument datatypes */
 	valid = true;
-	/* If there are composite input arguments, they might have changed */
 	for (i = 0; i < proc->nargs; i++)
 	{
-		Oid			relid;
-		HeapTuple	relTup;
+		valid = PLy_procedure_argument_valid(&proc->args[i]);
 
 		/* Short-circuit on first changed argument */
 		if (!valid)
 			break;
-
-		/* Only check input arguments that are composite */
-		if (proc->args[i].is_rowtype != 1)
-			continue;
-
-		Assert(OidIsValid(proc->args[i].typ_relid));
-		Assert(TransactionIdIsValid(proc->args[i].typrel_xmin));
-		Assert(ItemPointerIsValid(&proc->args[i].typrel_tid));
-
-		/* Get the pg_class tuple for the argument type */
-		relid = proc->args[i].typ_relid;
-		relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
-		if (!HeapTupleIsValid(relTup))
-			elog(ERROR, "cache lookup failed for relation %u", relid);
-
-		/* If it has changed, the function is not valid */
-		if (!(proc->args[i].typrel_xmin == HeapTupleHeaderGetXmin(relTup->t_data) &&
-			  ItemPointerEquals(&proc->args[i].typrel_tid, &relTup->t_self)))
-			valid = false;
-
-		ReleaseSysCache(relTup);
 	}
+
+	/* if the output type is composite, it might have changed */
+	if (valid)
+		valid = PLy_procedure_argument_valid(&proc->result);
 
 	return valid;
 }
@@ -1662,10 +1721,9 @@ PLy_procedure_create(HeapTuple procTup, Oid fn_oid, bool is_trigger)
 
 		/*
 		 * Now get information required for input conversion of the
-		 * procedure's arguments.  Note that we ignore output arguments here
-		 * --- since we don't support returning record, and that was already
-		 * checked above, there's no need to worry about multiple output
-		 * arguments.
+		 * procedure's arguments.  Note that we ignore output arguments here.
+		 * If the function returns record, those I/O functions will be set up
+		 * when the function is first called.
 		 */
 		if (procStruct->pronargs)
 		{
@@ -1927,7 +1985,7 @@ PLy_input_tuple_funcs(PLyTypeInfo *arg, TupleDesc desc)
 	 * RECORDOID means we got called to create input functions for a tuple
 	 * fetched by plpy.execute or for an anonymous record type
 	 */
-	if (desc->tdtypeid != RECORDOID && !TransactionIdIsValid(arg->typrel_xmin))
+	if (desc->tdtypeid != RECORDOID)
 	{
 		HeapTuple	relTup;
 
@@ -1937,7 +1995,7 @@ PLy_input_tuple_funcs(PLyTypeInfo *arg, TupleDesc desc)
 		if (!HeapTupleIsValid(relTup))
 			elog(ERROR, "cache lookup failed for relation %u", arg->typ_relid);
 
-		/* Extract the XMIN value to later use it in PLy_procedure_valid */
+		/* Remember XMIN and TID for later validation if cache is still OK */
 		arg->typrel_xmin = HeapTupleHeaderGetXmin(relTup->t_data);
 		arg->typrel_tid = relTup->t_self;
 
@@ -2009,6 +2067,29 @@ PLy_output_tuple_funcs(PLyTypeInfo *arg, TupleDesc desc)
 			PLy_free(arg->out.r.atts);
 		arg->out.r.natts = desc->natts;
 		arg->out.r.atts = PLy_malloc0(desc->natts * sizeof(PLyDatumToOb));
+	}
+
+	Assert(OidIsValid(desc->tdtypeid));
+
+	/*
+	 * RECORDOID means we got called to create output functions for an
+	 * anonymous record type
+	 */
+	if (desc->tdtypeid != RECORDOID)
+	{
+		HeapTuple	relTup;
+
+		/* Get the pg_class tuple corresponding to the type of the output */
+		arg->typ_relid = typeidTypeRelid(desc->tdtypeid);
+		relTup = SearchSysCache1(RELOID, ObjectIdGetDatum(arg->typ_relid));
+		if (!HeapTupleIsValid(relTup))
+			elog(ERROR, "cache lookup failed for relation %u", arg->typ_relid);
+
+		/* Remember XMIN and TID for later validation if cache is still OK */
+		arg->typrel_xmin = HeapTupleHeaderGetXmin(relTup->t_data);
+		arg->typrel_tid = relTup->t_self;
+
+		ReleaseSysCache(relTup);
 	}
 
 	for (i = 0; i < desc->natts; i++)
@@ -2631,7 +2712,11 @@ PLyMapping_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping)
 		PLyObToDatum *att;
 
 		if (desc->attrs[i]->attisdropped)
+		{
+			values[i] = (Datum) 0;
+			nulls[i] = true;
 			continue;
+		}
 
 		key = NameStr(desc->attrs[i]->attname);
 		value = NULL;
@@ -2717,7 +2802,11 @@ PLySequence_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence)
 		PLyObToDatum *att;
 
 		if (desc->attrs[i]->attisdropped)
+		{
+			values[i] = (Datum) 0;
+			nulls[i] = true;
 			continue;
+		}
 
 		value = NULL;
 		att = &info->out.r.atts[i];
@@ -2780,7 +2869,11 @@ PLyGenericObject_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *object)
 		PLyObToDatum *att;
 
 		if (desc->attrs[i]->attisdropped)
+		{
+			values[i] = (Datum) 0;
+			nulls[i] = true;
 			continue;
+		}
 
 		key = NameStr(desc->attrs[i]->attname);
 		value = NULL;
@@ -3973,7 +4066,13 @@ PLy_add_exceptions(PyObject *plpy)
 }
 
 #if PY_MAJOR_VERSION >= 3
-static PyMODINIT_FUNC
+/*
+ * Must have external linkage, because PyMODINIT_FUNC does dllexport on
+ * Windows-like platforms.
+ */
+PyMODINIT_FUNC PyInit_plpy(void);
+
+PyMODINIT_FUNC
 PyInit_plpy(void)
 {
 	PyObject   *m;
@@ -4077,7 +4176,9 @@ PLy_init_plpy(void)
 	PyObject   *main_mod,
 			   *main_dict,
 			   *plpy_mod;
+#if PY_MAJOR_VERSION < 3
 	PyObject   *plpy;
+#endif
 
 	/*
 	 * initialize plpy module
@@ -4090,7 +4191,7 @@ PLy_init_plpy(void)
 		elog(ERROR, "could not initialize PLy_SubtransactionType");
 
 #if PY_MAJOR_VERSION >= 3
-	plpy = PyModule_Create(&PLy_module);
+	PyModule_Create(&PLy_module);
 	/* for Python 3 we initialized the exceptions in PyInit_plpy */
 #else
 	plpy = Py_InitModule("plpy", PLy_methods);

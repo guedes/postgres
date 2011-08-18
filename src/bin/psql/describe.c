@@ -830,8 +830,11 @@ listDefaultACLs(const char *pattern)
  *
  * \dd [foo]
  *
- * Note: This only lists things that actually have a description. For complete
- * lists of things, there are other \d? commands.
+ * Note: This command only lists comments for object types which do not have
+ * their comments displayed by their own backslash commands. The following
+ * types of objects will be displayed: constraint, operator class,
+ * operator family, rule, and trigger.
+ *
  */
 bool
 objectDescription(const char *pattern, bool showSystem)
@@ -851,109 +854,77 @@ objectDescription(const char *pattern, bool showSystem)
 					  gettext_noop("Object"),
 					  gettext_noop("Description"));
 
-	/* Aggregate descriptions */
+	/* Constraint descriptions */
 	appendPQExpBuffer(&buf,
-					  "  SELECT p.oid as oid, p.tableoid as tableoid,\n"
+					  "  SELECT pgc.oid as oid, pgc.tableoid AS tableoid,\n"
 					  "  n.nspname as nspname,\n"
-					  "  CAST(p.proname AS pg_catalog.text) as name,"
+					  "  CAST(pgc.conname AS pg_catalog.text) as name,"
 					  "  CAST('%s' AS pg_catalog.text) as object\n"
-					  "  FROM pg_catalog.pg_proc p\n"
-	 "       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n"
-					  "  WHERE p.proisagg\n",
-					  gettext_noop("aggregate"));
-
-	if (!showSystem && !pattern)
-		appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-						  "      AND n.nspname <> 'information_schema'\n");
-
-	processSQLNamePattern(pset.db, &buf, pattern, true, false,
-						  "n.nspname", "p.proname", NULL,
-						  "pg_catalog.pg_function_is_visible(p.oid)");
-
-	/* Function descriptions */
-	appendPQExpBuffer(&buf,
-					  "UNION ALL\n"
-					  "  SELECT p.oid as oid, p.tableoid as tableoid,\n"
-					  "  n.nspname as nspname,\n"
-					  "  CAST(p.proname AS pg_catalog.text) as name,"
-					  "  CAST('%s' AS pg_catalog.text) as object\n"
-					  "  FROM pg_catalog.pg_proc p\n"
-	 "       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n"
-					  "  WHERE NOT p.proisagg\n",
-					  gettext_noop("function"));
-
-	if (!showSystem && !pattern)
-		appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-						  "      AND n.nspname <> 'information_schema'\n");
-
-	processSQLNamePattern(pset.db, &buf, pattern, true, false,
-						  "n.nspname", "p.proname", NULL,
-						  "pg_catalog.pg_function_is_visible(p.oid)");
-
-	/* Operator descriptions */
-	appendPQExpBuffer(&buf,
-					  "UNION ALL\n"
-					  "  SELECT o.oid as oid, o.tableoid as tableoid,\n"
-					  "  n.nspname as nspname,\n"
-					  "  CAST(o.oprname AS pg_catalog.text) as name,"
-					  "  CAST('%s' AS pg_catalog.text) as object\n"
-					  "  FROM pg_catalog.pg_operator o\n"
-	"       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace\n",
-					  gettext_noop("operator"));
+					  "  FROM pg_catalog.pg_constraint pgc\n"
+					  "    JOIN pg_catalog.pg_class c "
+					  "ON c.oid = pgc.conrelid\n"
+					  "    LEFT JOIN pg_catalog.pg_namespace n "
+					  "    ON n.oid = c.relnamespace\n",
+					  gettext_noop("constraint"));
 
 	if (!showSystem && !pattern)
 		appendPQExpBuffer(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
 						  "      AND n.nspname <> 'information_schema'\n");
 
-	processSQLNamePattern(pset.db, &buf, pattern, !showSystem && !pattern, false,
-						  "n.nspname", "o.oprname", NULL,
-						  "pg_catalog.pg_operator_is_visible(o.oid)");
-
-	/* Type descriptions */
-	appendPQExpBuffer(&buf,
-					  "UNION ALL\n"
-					  "  SELECT t.oid as oid, t.tableoid as tableoid,\n"
-					  "  n.nspname as nspname,\n"
-					  "  pg_catalog.format_type(t.oid, NULL) as name,"
-					  "  CAST('%s' AS pg_catalog.text) as object\n"
-					  "  FROM pg_catalog.pg_type t\n"
-	"       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n",
-					  gettext_noop("data type"));
-
-	if (!showSystem && !pattern)
-		appendPQExpBuffer(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
-						  "      AND n.nspname <> 'information_schema'\n");
-
-	processSQLNamePattern(pset.db, &buf, pattern, !showSystem && !pattern, false,
-						  "n.nspname", "pg_catalog.format_type(t.oid, NULL)",
-						  NULL,
-						  "pg_catalog.pg_type_is_visible(t.oid)");
-
-	/* Relation (tables, views, indexes, sequences) descriptions */
-	appendPQExpBuffer(&buf,
-					  "UNION ALL\n"
-					  "  SELECT c.oid as oid, c.tableoid as tableoid,\n"
-					  "  n.nspname as nspname,\n"
-					  "  CAST(c.relname AS pg_catalog.text) as name,\n"
-					  "  CAST(\n"
-					  "    CASE c.relkind WHEN 'r' THEN '%s' WHEN 'v' THEN '%s' WHEN 'i' THEN '%s' WHEN 'S' THEN '%s' WHEN 'f' THEN '%s' END"
-					  "  AS pg_catalog.text) as object\n"
-					  "  FROM pg_catalog.pg_class c\n"
-	 "       LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
-					  "  WHERE c.relkind IN ('r', 'v', 'i', 'S', 'f')\n",
-					  gettext_noop("table"),
-					  gettext_noop("view"),
-					  gettext_noop("index"),
-					  gettext_noop("sequence"),
-					  gettext_noop("foreign table"));
-
-	if (!showSystem && !pattern)
-		appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-						  "      AND n.nspname <> 'information_schema'\n");
-
-	processSQLNamePattern(pset.db, &buf, pattern, true, false,
-						  "n.nspname", "c.relname", NULL,
+	processSQLNamePattern(pset.db, &buf, pattern, !showSystem && !pattern,
+						  false, "n.nspname", "pgc.conname", NULL,
 						  "pg_catalog.pg_table_is_visible(c.oid)");
+
+	/*
+	 * pg_opclass.opcmethod only available in 8.3+, and comment on operator
+	 * family only available in 8.3+
+	 */
+	if (pset.sversion >= 80300)
+	{
+		/* Operator class descriptions */
+		appendPQExpBuffer(&buf,
+						  "UNION ALL\n"
+						  "  SELECT o.oid as oid, o.tableoid as tableoid,\n"
+						  "  n.nspname as nspname,\n"
+						  "  CAST(o.opcname AS pg_catalog.text) as name,\n"
+						  "  CAST('%s' AS pg_catalog.text) as object\n"
+						  "  FROM pg_catalog.pg_opclass o\n"
+						  "    JOIN pg_catalog.pg_am am ON "
+						  "o.opcmethod = am.oid\n"
+						  "    JOIN pg_catalog.pg_namespace n ON "
+						  "n.oid = o.opcnamespace\n",
+						  gettext_noop("operator class"));
+
+		if (!showSystem && !pattern)
+			appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
+							  "      AND n.nspname <> 'information_schema'\n");
+
+		processSQLNamePattern(pset.db, &buf, pattern, true, false,
+							  "n.nspname", "o.opcname", NULL,
+							  "pg_catalog.pg_opclass_is_visible(o.oid)");
+
+		/* Operator family descriptions */
+		appendPQExpBuffer(&buf,
+						  "UNION ALL\n"
+						  "  SELECT opf.oid as oid, opf.tableoid as tableoid,\n"
+						  "  n.nspname as nspname,\n"
+						  "  CAST(opf.opfname AS pg_catalog.text) AS name,\n"
+						  "  CAST('%s' AS pg_catalog.text) as object\n"
+						  "  FROM pg_catalog.pg_opfamily opf\n"
+						  "    JOIN pg_catalog.pg_am am "
+						  "ON opf.opfmethod = am.oid\n"
+						  "    JOIN pg_catalog.pg_namespace n "
+						  "ON opf.opfnamespace = n.oid\n",
+						  gettext_noop("operator family"));
+
+		if (!showSystem && !pattern)
+			appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
+							  "      AND n.nspname <> 'information_schema'\n");
+
+		processSQLNamePattern(pset.db, &buf, pattern, true, false,
+							  "n.nspname", "opf.opfname", NULL,
+							  "pg_catalog.pg_opfamily_is_visible(opf.oid)");
+	}
 
 	/* Rule descriptions (ignore rules for views) */
 	appendPQExpBuffer(&buf,
@@ -972,7 +943,6 @@ objectDescription(const char *pattern, bool showSystem)
 		appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
 						  "      AND n.nspname <> 'information_schema'\n");
 
-	/* XXX not sure what to do about visibility rule here? */
 	processSQLNamePattern(pset.db, &buf, pattern, true, false,
 						  "n.nspname", "r.rulename", NULL,
 						  "pg_catalog.pg_table_is_visible(c.oid)");
@@ -993,7 +963,6 @@ objectDescription(const char *pattern, bool showSystem)
 		appendPQExpBuffer(&buf, "WHERE n.nspname <> 'pg_catalog'\n"
 						  "      AND n.nspname <> 'information_schema'\n");
 
-	/* XXX not sure what to do about visibility rule here? */
 	processSQLNamePattern(pset.db, &buf, pattern, !showSystem && !pattern, false,
 						  "n.nspname", "t.tgname", NULL,
 						  "pg_catalog.pg_table_is_visible(c.oid)");
@@ -1281,7 +1250,12 @@ describeOneTableDetails(const char *schemaname,
 		res = NULL;
 	}
 
-	/* Get column info */
+	/*
+	 * Get column info
+	 *
+	 * You need to modify value of "firstvcol" which willbe defined below if
+	 * you are adding column(s) preceding to verbose-only columns.
+	 */
 	printfPQExpBuffer(&buf, "SELECT a.attname,");
 	appendPQExpBuffer(&buf, "\n  pg_catalog.format_type(a.atttypid, a.atttypmod),"
 					  "\n  (SELECT substring(pg_catalog.pg_get_expr(d.adbin, d.adrelid) for 128)"
@@ -1295,6 +1269,12 @@ describeOneTableDetails(const char *schemaname,
 		appendPQExpBuffer(&buf, "\n  NULL AS attcollation");
 	if (tableinfo.relkind == 'i')
 		appendPQExpBuffer(&buf, ",\n  pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, TRUE) AS indexdef");
+	else
+		appendPQExpBuffer(&buf, ",\n  NULL AS indexdef");
+	if (tableinfo.relkind == 'f' && pset.sversion >= 90200)
+		appendPQExpBuffer(&buf, ",\n  a.attfdwoptions");
+	else
+		appendPQExpBuffer(&buf, ",\n  NULL AS attfdwoptions");
 	if (verbose)
 	{
 		appendPQExpBuffer(&buf, ",\n  a.attstorage");
@@ -1386,6 +1366,9 @@ describeOneTableDetails(const char *schemaname,
 	if (tableinfo.relkind == 'i')
 		headers[cols++] = gettext_noop("Definition");
 
+	if (tableinfo.relkind == 'f' && pset.sversion >= 90200)
+		headers[cols++] = gettext_noop("FDW Options");
+
 	if (verbose)
 	{
 		headers[cols++] = gettext_noop("Storage");
@@ -1471,10 +1454,14 @@ describeOneTableDetails(const char *schemaname,
 		if (tableinfo.relkind == 'i')
 			printTableAddCell(&cont, PQgetvalue(res, i, 6), false, false);
 
+		/* FDW options for foreign table column, only for 9.2 or later */
+		if (tableinfo.relkind == 'f' && pset.sversion >= 90200)
+			printTableAddCell(&cont, PQgetvalue(res, i, 7), false, false);
+
 		/* Storage and Description */
 		if (verbose)
 		{
-			int			firstvcol = (tableinfo.relkind == 'i' ? 7 : 6);
+			int			firstvcol = 8;
 			char	   *storage = PQgetvalue(res, i, firstvcol);
 
 			/* these strings are literal in our syntax, so not translated. */
@@ -2046,9 +2033,12 @@ describeOneTableDetails(const char *schemaname,
 		/* print foreign server name */
 		if (tableinfo.relkind == 'f')
 		{
+			char *ftoptions;
+
 			/* Footer information about foreign table */
 			printfPQExpBuffer(&buf,
-							  "SELECT s.srvname\n"
+							  "SELECT s.srvname,\n"
+							  "       f.ftoptions\n"
 							  "FROM pg_catalog.pg_foreign_table f,\n"
 							  "     pg_catalog.pg_foreign_server s\n"
 							  "WHERE f.ftrelid = %s AND s.oid = f.ftserver;",
@@ -2062,9 +2052,18 @@ describeOneTableDetails(const char *schemaname,
 				goto error_return;
 			}
 
+			/* Print server name */
 			printfPQExpBuffer(&buf, "Server: %s",
 							  PQgetvalue(result, 0, 0));
 			printTableAddFooter(&cont, buf.data);
+
+			/* Print per-table FDW options, if any */
+			ftoptions = PQgetvalue(result, 0, 1);
+			if (ftoptions && ftoptions[0] != '\0')
+			{
+				printfPQExpBuffer(&buf, "FDW Options: %s", ftoptions);
+				printTableAddFooter(&cont, buf.data);
+			}
 			PQclear(result);
 		}
 
@@ -2666,13 +2665,20 @@ listLanguages(const char *pattern, bool verbose, bool showSystem)
 	}
 
 	appendPQExpBuffer(&buf,
-					  "\nFROM pg_catalog.pg_language l\n");
+					  ",\n       d.description AS \"%s\""
+					  "\nFROM pg_catalog.pg_language l\n"
+					  "LEFT JOIN pg_catalog.pg_description d\n"
+					  "  ON d.classoid = l.tableoid AND d.objoid = l.oid\n"
+					  "  AND d.objsubid = 0\n",
+					  gettext_noop("Description"));
 
-	processSQLNamePattern(pset.db, &buf, pattern, false, false,
-						  NULL, "l.lanname", NULL, NULL);
+	if (pattern)
+		processSQLNamePattern(pset.db, &buf, pattern, false, false,
+							  NULL, "l.lanname", NULL, NULL);
 
 	if (!showSystem && !pattern)
-		appendPQExpBuffer(&buf, "WHERE lanplcallfoid != 0\n");
+		appendPQExpBuffer(&buf, "WHERE l.lanplcallfoid != 0\n");
+
 
 	appendPQExpBuffer(&buf, "ORDER BY 1;");
 
@@ -2698,7 +2704,7 @@ listLanguages(const char *pattern, bool verbose, bool showSystem)
  * Describes domains.
  */
 bool
-listDomains(const char *pattern, bool showSystem)
+listDomains(const char *pattern, bool verbose, bool showSystem)
 {
 	PQExpBufferData buf;
 	PGresult   *res;
@@ -2714,6 +2720,7 @@ listDomains(const char *pattern, bool showSystem)
 					  gettext_noop("Schema"),
 					  gettext_noop("Name"),
 					  gettext_noop("Type"));
+
 	if (pset.sversion >= 90100)
 		appendPQExpBuffer(&buf,
 						  "            COALESCE((SELECT ' collate ' || c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type bt\n"
@@ -2721,16 +2728,29 @@ listDomains(const char *pattern, bool showSystem)
 	appendPQExpBuffer(&buf,
 	   "            CASE WHEN t.typnotnull THEN ' not null' ELSE '' END ||\n"
 					  "            CASE WHEN t.typdefault IS NOT NULL THEN ' default ' || t.typdefault ELSE '' END\n"
-					  "       ) as \"%s\",\n",
-					  gettext_noop("Modifier"));
-	appendPQExpBuffer(&buf,
+					  "       ) as \"%s\",\n"
 					  "       pg_catalog.array_to_string(ARRAY(\n"
 					  "         SELECT pg_catalog.pg_get_constraintdef(r.oid, true) FROM pg_catalog.pg_constraint r WHERE t.oid = r.contypid\n"
-					  "       ), ' ') as \"%s\"\n"
-					  "FROM pg_catalog.pg_type t\n"
-	   "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n"
-					  "WHERE t.typtype = 'd'\n",
+					  "       ), ' ') as \"%s\"",
+					  gettext_noop("Modifier"),
 					  gettext_noop("Check"));
+
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  ",\n       d.description as \"%s\"",
+						  gettext_noop("Description"));
+
+	appendPQExpBuffer(&buf,
+					  "\nFROM pg_catalog.pg_type t\n"
+	   "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
+
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  "     LEFT JOIN pg_catalog.pg_description d "
+						  "ON d.classoid = t.tableoid AND d.objoid = t.oid "
+						  "AND d.objsubid = 0\n");
+
+	appendPQExpBuffer(&buf, "WHERE t.typtype = 'd'\n");
 
 	if (!showSystem && !pattern)
 		appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
@@ -2763,7 +2783,7 @@ listDomains(const char *pattern, bool showSystem)
  * Describes conversions.
  */
 bool
-listConversions(const char *pattern, bool showSystem)
+listConversions(const char *pattern, bool verbose, bool showSystem)
 {
 	PQExpBufferData buf;
 	PGresult   *res;
@@ -2778,9 +2798,7 @@ listConversions(const char *pattern, bool showSystem)
 	   "       pg_catalog.pg_encoding_to_char(c.conforencoding) AS \"%s\",\n"
 		"       pg_catalog.pg_encoding_to_char(c.contoencoding) AS \"%s\",\n"
 					  "       CASE WHEN c.condefault THEN '%s'\n"
-					  "       ELSE '%s' END AS \"%s\"\n"
-			   "FROM pg_catalog.pg_conversion c, pg_catalog.pg_namespace n\n"
-					  "WHERE n.oid = c.connamespace\n",
+					  "       ELSE '%s' END AS \"%s\"",
 					  gettext_noop("Schema"),
 					  gettext_noop("Name"),
 					  gettext_noop("Source"),
@@ -2788,9 +2806,28 @@ listConversions(const char *pattern, bool showSystem)
 					  gettext_noop("yes"), gettext_noop("no"),
 					  gettext_noop("Default?"));
 
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  ",\n       d.description AS \"%s\"",
+						  gettext_noop("Description"));
+
+	appendPQExpBuffer(&buf,
+					  "\nFROM pg_catalog.pg_conversion c\n"
+					  "     JOIN pg_catalog.pg_namespace n "
+					  "ON n.oid = c.connamespace\n");
+
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  "LEFT JOIN pg_catalog.pg_description d "
+						  "ON d.classoid = c.tableoid\n"
+						  "          AND d.objoid = c.oid "
+						  "AND d.objsubid = 0\n");
+
+	appendPQExpBuffer(&buf, "WHERE true\n");
+
 	if (!showSystem && !pattern)
-		appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-						  "      AND n.nspname <> 'information_schema'\n");
+		appendPQExpBuffer(&buf, "  AND n.nspname <> 'pg_catalog'\n"
+						  "  AND n.nspname <> 'information_schema'\n");
 
 	processSQLNamePattern(pset.db, &buf, pattern, true, false,
 						  "n.nspname", "c.conname", NULL,
@@ -2820,7 +2857,7 @@ listConversions(const char *pattern, bool showSystem)
  * Describes casts.
  */
 bool
-listCasts(const char *pattern)
+listCasts(const char *pattern, bool verbose)
 {
 	PQExpBufferData buf;
 	PGresult   *res;
@@ -2844,7 +2881,21 @@ listCasts(const char *pattern)
 					  "       CASE WHEN c.castcontext = 'e' THEN '%s'\n"
 					  "            WHEN c.castcontext = 'a' THEN '%s'\n"
 					  "            ELSE '%s'\n"
-					  "       END as \"%s\"\n"
+					  "       END as \"%s\"",
+					  gettext_noop("Source type"),
+					  gettext_noop("Target type"),
+					  gettext_noop("Function"),
+					  gettext_noop("no"),
+					  gettext_noop("in assignment"),
+					  gettext_noop("yes"),
+					  gettext_noop("Implicit?"));
+
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  ",\n       d.description AS \"%s\"\n",
+						  gettext_noop("Description"));
+
+	appendPQExpBuffer(&buf,
 				 "FROM pg_catalog.pg_cast c LEFT JOIN pg_catalog.pg_proc p\n"
 					  "     ON c.castfunc = p.oid\n"
 					  "     LEFT JOIN pg_catalog.pg_type ts\n"
@@ -2854,13 +2905,15 @@ listCasts(const char *pattern)
 					  "     LEFT JOIN pg_catalog.pg_type tt\n"
 					  "     ON c.casttarget = tt.oid\n"
 					  "     LEFT JOIN pg_catalog.pg_namespace nt\n"
-					  "     ON nt.oid = tt.typnamespace\n"
-					  "WHERE (true",
-					  gettext_noop("Source type"),
-					  gettext_noop("Target type"),
-					  gettext_noop("Function"),
-	  gettext_noop("no"), gettext_noop("in assignment"), gettext_noop("yes"),
-					  gettext_noop("Implicit?"));
+					  "     ON nt.oid = tt.typnamespace\n");
+
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  "     LEFT JOIN pg_catalog.pg_description d\n"
+						  "     ON d.classoid = c.tableoid AND d.objoid = "
+						  "c.oid AND d.objsubid = 0\n");
+
+	appendPQExpBuffer(&buf, "WHERE ( (true");
 
 	/*
 	 * Match name pattern against either internal or external name of either
@@ -2878,7 +2931,7 @@ listCasts(const char *pattern)
 						  "pg_catalog.format_type(tt.oid, NULL)",
 						  "pg_catalog.pg_type_is_visible(tt.oid)");
 
-	appendPQExpBuffer(&buf, ")\nORDER BY 1, 2;");
+	appendPQExpBuffer(&buf, ") )\nORDER BY 1, 2;");
 
 	res = PSQLexec(buf.data, false);
 	termPQExpBuffer(&buf);
@@ -3609,16 +3662,16 @@ listForeignDataWrappers(const char *pattern, bool verbose)
 
 	initPQExpBuffer(&buf);
 	printfPQExpBuffer(&buf,
-					  "SELECT fdwname AS \"%s\",\n"
-					  "  pg_catalog.pg_get_userbyid(fdwowner) AS \"%s\",\n",
+					  "SELECT fdw.fdwname AS \"%s\",\n"
+					  "  pg_catalog.pg_get_userbyid(fdw.fdwowner) AS \"%s\",\n",
 					  gettext_noop("Name"),
 					  gettext_noop("Owner"));
 	if (pset.sversion >= 90100)
 		appendPQExpBuffer(&buf,
-						  "  fdwhandler::pg_catalog.regproc AS \"%s\",\n",
+						  "  fdw.fdwhandler::pg_catalog.regproc AS \"%s\",\n",
 						  gettext_noop("Handler"));
 	appendPQExpBuffer(&buf,
-					  "  fdwvalidator::pg_catalog.regproc AS \"%s\"",
+					  "  fdw.fdwvalidator::pg_catalog.regproc AS \"%s\"",
 					  gettext_noop("Validator"));
 
 	if (verbose)
@@ -3627,10 +3680,21 @@ listForeignDataWrappers(const char *pattern, bool verbose)
 		printACLColumn(&buf, "fdwacl");
 		appendPQExpBuffer(&buf,
 						  ",\n  fdwoptions AS \"%s\"",
-						  gettext_noop("Options"));
+						  gettext_noop("FDW Options"));
+
+		if (pset.sversion >= 90100)
+			appendPQExpBuffer(&buf,
+							  ",\n  d.description AS \"%s\" ",
+							  gettext_noop("Description"));
 	}
 
-	appendPQExpBuffer(&buf, "\nFROM pg_catalog.pg_foreign_data_wrapper\n");
+	appendPQExpBuffer(&buf, "\nFROM pg_catalog.pg_foreign_data_wrapper fdw\n");
+
+	if (verbose && pset.sversion >= 90100)
+		appendPQExpBuffer(&buf,
+						  "LEFT JOIN pg_catalog.pg_description d\n"
+						  "       ON d.classoid = fdw.tableoid "
+						  "AND d.objoid = fdw.oid AND d.objsubid = 0\n");
 
 	processSQLNamePattern(pset.db, &buf, pattern, false, false,
 						  NULL, "fdwname", NULL, NULL);
@@ -3688,15 +3752,23 @@ listForeignServers(const char *pattern, bool verbose)
 						  ",\n"
 						  "  s.srvtype AS \"%s\",\n"
 						  "  s.srvversion AS \"%s\",\n"
-						  "  s.srvoptions AS \"%s\"",
+						  "  s.srvoptions AS \"%s\",\n"
+						  "  d.description AS \"%s\"",
 						  gettext_noop("Type"),
 						  gettext_noop("Version"),
-						  gettext_noop("Options"));
+						  gettext_noop("FDW Options"),
+						  gettext_noop("Description"));
 	}
 
 	appendPQExpBuffer(&buf,
 					  "\nFROM pg_catalog.pg_foreign_server s\n"
 	   "     JOIN pg_catalog.pg_foreign_data_wrapper f ON f.oid=s.srvfdw\n");
+
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  "LEFT JOIN pg_description d\n       "
+						  "ON d.classoid = s.tableoid AND d.objoid = s.oid "
+						  "AND d.objsubid = 0\n");
 
 	processSQLNamePattern(pset.db, &buf, pattern, false, false,
 						  NULL, "s.srvname", NULL, NULL);
@@ -3747,7 +3819,7 @@ listUserMappings(const char *pattern, bool verbose)
 	if (verbose)
 		appendPQExpBuffer(&buf,
 						  ",\n  um.umoptions AS \"%s\"",
-						  gettext_noop("Options"));
+						  gettext_noop("FDW Options"));
 
 	appendPQExpBuffer(&buf, "\nFROM pg_catalog.pg_user_mappings um\n");
 
@@ -3801,18 +3873,26 @@ listForeignTables(const char *pattern, bool verbose)
 
 	if (verbose)
 		appendPQExpBuffer(&buf,
-						  ",\n  ft.ftoptions AS \"%s\"",
-						  gettext_noop("Options"));
+						  ",\n  ft.ftoptions AS \"%s\",\n"
+						  "  d.description AS \"%s\"",
+						  gettext_noop("FDW Options"),
+						  gettext_noop("Description"));
 
-	appendPQExpBuffer(&buf, "\nFROM pg_catalog.pg_foreign_table ft,");
-	appendPQExpBuffer(&buf, "\n pg_catalog.pg_class c,");
-	appendPQExpBuffer(&buf, "\n pg_catalog.pg_namespace n,");
-	appendPQExpBuffer(&buf, "\n pg_catalog.pg_foreign_server s\n");
-	appendPQExpBuffer(&buf, "\nWHERE c.oid = ft.ftrelid");
-	appendPQExpBuffer(&buf, "\nAND s.oid = ft.ftserver\n");
-	appendPQExpBuffer(&buf, "\nAND n.oid = c.relnamespace\n");
+	appendPQExpBuffer(&buf,
+					  "\nFROM pg_catalog.pg_foreign_table ft\n"
+					  "  INNER JOIN pg_catalog.pg_class c"
+					  " ON c.oid = ft.ftrelid\n"
+					  "  INNER JOIN pg_catalog.pg_namespace n"
+					  " ON n.oid = c.relnamespace\n"
+					  "  INNER JOIN pg_catalog.pg_foreign_server s"
+					  " ON s.oid = ft.ftserver\n");
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  "   LEFT JOIN pg_catalog.pg_description d\n"
+						  "          ON d.classoid = c.tableoid AND "
+						  "d.objoid = c.oid AND d.objsubid = 0\n");
 
-	processSQLNamePattern(pset.db, &buf, pattern, true, false,
+	processSQLNamePattern(pset.db, &buf, pattern, false, false,
 						  NULL, "n.nspname", "c.relname", NULL);
 
 	appendPQExpBuffer(&buf, "ORDER BY 1, 2;");

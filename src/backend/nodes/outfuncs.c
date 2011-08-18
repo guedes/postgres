@@ -845,9 +845,7 @@ _outPlanInvalItem(StringInfo str, PlanInvalItem *node)
 	WRITE_NODE_TYPE("PLANINVALITEM");
 
 	WRITE_INT_FIELD(cacheId);
-	appendStringInfo(str, " :tupleId (%u,%u)",
-					 ItemPointerGetBlockNumber(&node->tupleId),
-					 ItemPointerGetOffsetNumber(&node->tupleId));
+	WRITE_UINT_FIELD(hashValue);
 }
 
 /*****************************************************************************
@@ -2102,6 +2100,7 @@ _outColumnDef(StringInfo str, ColumnDef *node)
 	WRITE_NODE_FIELD(collClause);
 	WRITE_OID_FIELD(collOid);
 	WRITE_NODE_FIELD(constraints);
+	WRITE_NODE_FIELD(fdwoptions);
 }
 
 static void
