@@ -51,6 +51,7 @@ static char *GUC_scanstr(const char *s);
 %option noinput
 %option nounput
 %option noyywrap
+%option warn
 %option prefix="GUC_yy"
 
 
@@ -291,7 +292,6 @@ ProcessConfigFile(GucContext context)
 	if (context == PGC_SIGHUP)
 	{
 		InitializeGUCOptionsFromEnvironment();
-		pg_timezone_initialize();
 		pg_timezone_abbrev_initialize();
 		/* this selects SQL_ASCII in processes not connected to a database */
 		SetConfigOption("client_encoding", GetDatabaseEncodingName(),

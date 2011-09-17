@@ -23,8 +23,6 @@
 #include <unistd.h>
 
 #include "access/hash.h"
-#include "catalog/pg_type.h"
-#include "executor/executor.h"
 #include "executor/instrument.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
@@ -35,8 +33,6 @@
 #include "storage/spin.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
-#include "utils/hsearch.h"
-#include "utils/guc.h"
 
 
 PG_MODULE_MAGIC;
@@ -977,8 +973,8 @@ entry_alloc(pgssHashKey *key)
 static int
 entry_cmp(const void *lhs, const void *rhs)
 {
-	double		l_usage = (*(const pgssEntry **) lhs)->counters.usage;
-	double		r_usage = (*(const pgssEntry **) rhs)->counters.usage;
+	double		l_usage = (*(pgssEntry * const *) lhs)->counters.usage;
+	double		r_usage = (*(pgssEntry * const *) rhs)->counters.usage;
 
 	if (l_usage < r_usage)
 		return -1;

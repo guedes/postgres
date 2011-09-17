@@ -38,7 +38,6 @@
 #include <signal.h>
 #include <unistd.h>
 
-#include "access/transam.h"
 #include "access/xlog_internal.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
@@ -48,11 +47,10 @@
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
 #include "storage/procarray.h"
-#include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
+#include "utils/timestamp.h"
 
 /* Global variable to indicate if this process is a walreceiver process */
 bool		am_walreceiver;

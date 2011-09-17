@@ -119,8 +119,8 @@ static int	_discoverArchiveFormat(ArchiveHandle *AH);
 
 static int	RestoringToDB(ArchiveHandle *AH);
 static void dump_lo_buf(ArchiveHandle *AH);
-static void _write_msg(const char *modulename, const char *fmt, va_list ap);
-static void _die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_list ap);
+static void _write_msg(const char *modulename, const char *fmt, va_list ap) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 0)));
+static void _die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_list ap) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
 
 static void dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim);
 static void SetOutput(ArchiveHandle *AH, char *filename, int compression);
@@ -213,6 +213,7 @@ void
 RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	bool		parallel_mode;
 	TocEntry   *te;
 	teReqs		reqs;
 	OutputContext sav;
@@ -237,6 +238,27 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	 */
 	if (ropt->createDB && ropt->single_txn)
 		die_horribly(AH, modulename, "-C and -1 are incompatible options\n");
+
+	/*
+	 * If we're going to do parallel restore, there are some restrictions.
+	 */
+	parallel_mode = (ropt->number_of_jobs > 1 && ropt->useDB);
+	if (parallel_mode)
+	{
+		/* We haven't got round to making this work for all archive formats */
+		if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
+			die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
+
+		/* Doesn't work if the archive represents dependencies as OIDs */
+		if (AH->version < K_VERS_1_8)
+			die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
+
+		/*
+		 * It's also not gonna work if we can't reopen the input file, so
+		 * let's try that immediately.
+		 */
+		(AH->ReopenPtr) (AH);
+	}
 
 	/*
 	 * Make sure we won't need (de)compression we haven't got
@@ -385,7 +407,7 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	 *
 	 * In parallel mode, turn control over to the parallel-restore logic.
 	 */
-	if (ropt->number_of_jobs > 1 && ropt->useDB)
+	if (parallel_mode)
 		restore_toc_entries_parallel(AH);
 	else
 	{
@@ -1371,7 +1393,7 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 	}
 	else if (AH->gzOut)
 	{
-		res = GZWRITE((void *) ptr, size, nmemb, AH->OF);
+		res = GZWRITE(ptr, size, nmemb, AH->OF);
 		if (res != (nmemb * size))
 			die_horribly(AH, modulename, "could not write to output file: %s\n", strerror(errno));
 		return res;
@@ -1394,7 +1416,7 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 			return ExecuteSqlCommandBuf(AH, (const char *) ptr, size * nmemb);
 		else
 		{
-			res = fwrite((void *) ptr, size, nmemb, AH->OF);
+			res = fwrite(ptr, size, nmemb, AH->OF);
 			if (res != nmemb)
 				die_horribly(AH, modulename, "could not write to output file: %s\n",
 							 strerror(errno));
@@ -3256,14 +3278,6 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	TocEntry   *te;
 
 	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
-
-	/* we haven't got round to making this work for all archive formats */
-	if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
-		die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
-
-	/* doesn't work if the archive represents dependencies as OIDs, either */
-	if (AH->version < K_VERS_1_8)
-		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
 	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), n_slots);
 

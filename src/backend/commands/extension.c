@@ -40,16 +40,13 @@
 #include "commands/alter.h"
 #include "commands/comment.h"
 #include "commands/extension.h"
-#include "commands/trigger.h"
-#include "executor/executor.h"
+#include "commands/schemacmds.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
-#include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
-#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -1370,9 +1367,18 @@ CreateExtension(CreateExtensionStmt *stmt)
 
 		if (schemaOid == InvalidOid)
 		{
-			schemaOid = NamespaceCreate(schemaName, extowner);
-			/* Advance cmd counter to make the namespace visible */
-			CommandCounterIncrement();
+			CreateSchemaStmt *csstmt = makeNode(CreateSchemaStmt);
+
+			csstmt->schemaname = schemaName;
+			csstmt->authid = NULL;		/* will be created by current user */
+			csstmt->schemaElts = NIL;
+			CreateSchemaCommand(csstmt, NULL);
+
+			/*
+			 * CreateSchemaCommand includes CommandCounterIncrement, so new
+			 * schema is now visible
+			 */
+			schemaOid = get_namespace_oid(schemaName, false);
 		}
 	}
 	else

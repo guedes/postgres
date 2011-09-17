@@ -796,21 +796,6 @@ PostmasterMain(int argc, char *argv[])
 	CreateDataDirLockFile(true);
 
 	/*
-	 * If timezone is not set, determine what the OS uses.	(In theory this
-	 * should be done during GUC initialization, but because it can take as
-	 * much as several seconds, we delay it until after we've created the
-	 * postmaster.pid file.  This prevents problems with boot scripts that
-	 * expect the pidfile to appear quickly.  Also, we avoid problems with
-	 * trying to locate the timezone files too early in initialization.)
-	 */
-	pg_timezone_initialize();
-
-	/*
-	 * Likewise, init timezone_abbreviations if not already set.
-	 */
-	pg_timezone_abbrev_initialize();
-
-	/*
 	 * Initialize SSL library, if specified.
 	 */
 #ifdef USE_SSL
@@ -2328,10 +2313,11 @@ reaper(SIGNAL_ARGS)
 			 * XXX should avoid the need for disconnection. When we do,
 			 * am_cascading_walsender should be replaced with RecoveryInProgress()
 			 */
-			if (max_wal_senders > 0)
+			if (max_wal_senders > 0 && CountChildren(BACKEND_TYPE_WALSND) > 0)
 			{
 				ereport(LOG,
-						(errmsg("terminating all walsender processes to force cascaded standby(s) to update timeline and reconnect")));
+						(errmsg("terminating all walsender processes to force cascaded "
+								"standby(s) to update timeline and reconnect")));
 				SignalSomeChildren(SIGUSR2, BACKEND_TYPE_WALSND);
 			}
 
@@ -3705,16 +3691,16 @@ internal_forkexec(int argc, char *argv[], Port *port)
 									NULL);
 	if (paramHandle == INVALID_HANDLE_VALUE)
 	{
-		elog(LOG, "could not create backend parameter file mapping: error code %d",
-			 (int) GetLastError());
+		elog(LOG, "could not create backend parameter file mapping: error code %lu",
+			 GetLastError());
 		return -1;
 	}
 
 	param = MapViewOfFile(paramHandle, FILE_MAP_WRITE, 0, 0, sizeof(BackendParameters));
 	if (!param)
 	{
-		elog(LOG, "could not map backend parameter memory: error code %d",
-			 (int) GetLastError());
+		elog(LOG, "could not map backend parameter memory: error code %lu",
+			 GetLastError());
 		CloseHandle(paramHandle);
 		return -1;
 	}
@@ -3754,8 +3740,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 	if (!CreateProcess(NULL, cmdLine, NULL, NULL, TRUE, CREATE_SUSPENDED,
 					   NULL, NULL, &si, &pi))
 	{
-		elog(LOG, "CreateProcess call failed: %m (error code %d)",
-			 (int) GetLastError());
+		elog(LOG, "CreateProcess call failed: %m (error code %lu)",
+			 GetLastError());
 		return -1;
 	}
 
@@ -3767,8 +3753,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 		 */
 		if (!TerminateProcess(pi.hProcess, 255))
 			ereport(LOG,
-					(errmsg_internal("could not terminate unstarted process: error code %d",
-									 (int) GetLastError())));
+					(errmsg_internal("could not terminate unstarted process: error code %lu",
+									 GetLastError())));
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
 		return -1;				/* log made by save_backend_variables */
@@ -3776,11 +3762,11 @@ internal_forkexec(int argc, char *argv[], Port *port)
 
 	/* Drop the parameter shared memory that is now inherited to the backend */
 	if (!UnmapViewOfFile(param))
-		elog(LOG, "could not unmap view of backend parameter file: error code %d",
-			 (int) GetLastError());
+		elog(LOG, "could not unmap view of backend parameter file: error code %lu",
+			 GetLastError());
 	if (!CloseHandle(paramHandle))
-		elog(LOG, "could not close handle to backend parameter file: error code %d",
-			 (int) GetLastError());
+		elog(LOG, "could not close handle to backend parameter file: error code %lu",
+			 GetLastError());
 
 	/*
 	 * Reserve the memory region used by our main shared memory segment before
@@ -3794,8 +3780,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 		 */
 		if (!TerminateProcess(pi.hProcess, 255))
 			ereport(LOG,
-					(errmsg_internal("could not terminate process that failed to reserve memory: error code %d",
-									 (int) GetLastError())));
+					(errmsg_internal("could not terminate process that failed to reserve memory: error code %lu",
+									 GetLastError())));
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
 		return -1;				/* logging done made by
@@ -3812,8 +3798,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 		if (!TerminateProcess(pi.hProcess, 255))
 		{
 			ereport(LOG,
-					(errmsg_internal("could not terminate unstartable process: error code %d",
-									 (int) GetLastError())));
+					(errmsg_internal("could not terminate unstartable process: error code %lu",
+									 GetLastError())));
 			CloseHandle(pi.hProcess);
 			CloseHandle(pi.hThread);
 			return -1;
@@ -3821,8 +3807,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
 		ereport(LOG,
-				(errmsg_internal("could not resume thread of unstarted process: error code %d",
-								 (int) GetLastError())));
+				(errmsg_internal("could not resume thread of unstarted process: error code %lu",
+								 GetLastError())));
 		return -1;
 	}
 
@@ -3850,8 +3836,8 @@ internal_forkexec(int argc, char *argv[], Port *port)
 									 INFINITE,
 								WT_EXECUTEONLYONCE | WT_EXECUTEINWAITTHREAD))
 		ereport(FATAL,
-		(errmsg_internal("could not register process for wait: error code %d",
-						 (int) GetLastError())));
+		(errmsg_internal("could not register process for wait: error code %lu",
+						 GetLastError())));
 
 	/* Don't close pi.hProcess here - the wait thread needs access to it */
 
@@ -4710,8 +4696,8 @@ write_duplicated_handle(HANDLE *dest, HANDLE src, HANDLE childProcess)
 						 DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS))
 	{
 		ereport(LOG,
-				(errmsg_internal("could not duplicate handle to be written to backend parameter file: error code %d",
-								 (int) GetLastError())));
+				(errmsg_internal("could not duplicate handle to be written to backend parameter file: error code %lu",
+								 GetLastError())));
 		return false;
 	}
 
@@ -4830,8 +4816,8 @@ read_backend_variables(char *id, Port *port)
 	paramp = MapViewOfFile(paramHandle, FILE_MAP_READ, 0, 0, 0);
 	if (!paramp)
 	{
-		write_stderr("could not map view of backend variables: error code %d\n",
-					 (int) GetLastError());
+		write_stderr("could not map view of backend variables: error code %lu\n",
+					 GetLastError());
 		exit(1);
 	}
 
@@ -4839,15 +4825,15 @@ read_backend_variables(char *id, Port *port)
 
 	if (!UnmapViewOfFile(paramp))
 	{
-		write_stderr("could not unmap view of backend variables: error code %d\n",
-					 (int) GetLastError());
+		write_stderr("could not unmap view of backend variables: error code %lu\n",
+					 GetLastError());
 		exit(1);
 	}
 
 	if (!CloseHandle(paramHandle))
 	{
-		write_stderr("could not close handle to backend parameter variables: error code %d\n",
-					 (int) GetLastError());
+		write_stderr("could not close handle to backend parameter variables: error code %lu\n",
+					 GetLastError());
 		exit(1);
 	}
 #endif
@@ -5063,7 +5049,7 @@ InitPostmasterDeathWatchHandle(void)
 						TRUE,
 						DUPLICATE_SAME_ACCESS) == 0)
 		ereport(FATAL,
-				(errmsg_internal("could not duplicate postmaster handle: error code %d",
-								 (int) GetLastError())));
+				(errmsg_internal("could not duplicate postmaster handle: error code %lu",
+								 GetLastError())));
 #endif   /* WIN32 */
 }

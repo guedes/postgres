@@ -7,6 +7,8 @@
  *	contrib/pg_upgrade/check.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 
@@ -79,6 +81,7 @@ check_old_cluster(bool live_check, char **sequence_script_file_name)
 	{
 		old_8_3_check_for_name_data_type_usage(&old_cluster);
 		old_8_3_check_for_tsquery_usage(&old_cluster);
+		old_8_3_check_ltree_usage(&old_cluster);
 		if (user_opts.check)
 		{
 			old_8_3_rebuild_tsvector_tables(&old_cluster, true);
@@ -530,7 +533,7 @@ check_for_prepared_transactions(ClusterInfo *cluster)
 
 	res = executeQueryOrDie(conn,
 							"SELECT * "
-							"FROM pg_catalog.pg_prepared_xact()");
+							"FROM pg_catalog.pg_prepared_xacts");
 
 	if (PQntuples(res) != 0)
 		pg_log(PG_FATAL, "The %s cluster contains prepared transactions\n",

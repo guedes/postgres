@@ -53,7 +53,6 @@
 #include "miscadmin.h"
 #include "storage/procarray.h"
 #include "storage/spin.h"
-#include "storage/standby.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 

@@ -47,9 +47,11 @@
 #include "miscadmin.h"
 #include "nodes/replnodes.h"
 #include "replication/basebackup.h"
+#include "replication/syncrep.h"
 #include "replication/walprotocol.h"
 #include "replication/walreceiver.h"
 #include "replication/walsender.h"
+#include "replication/walsender_private.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
@@ -61,6 +63,7 @@
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
+#include "utils/timestamp.h"
 
 
 /* Array of WalSnds in shared memory */
@@ -366,6 +369,35 @@ StartReplication(StartReplicationCmd *cmd)
 	 */
 	MarkPostmasterChildWalSender();
 	SendPostmasterSignal(PMSIGNAL_ADVANCE_STATE_MACHINE);
+
+	/*
+	 * When promoting a cascading standby, postmaster sends SIGUSR2 to
+	 * any cascading walsenders to kill them. But there is a corner-case where
+	 * such walsender fails to receive SIGUSR2 and survives a standby promotion
+	 * unexpectedly. This happens when postmaster sends SIGUSR2 before
+	 * the walsender marks itself as a WAL sender, because postmaster sends
+	 * SIGUSR2 to only the processes marked as a WAL sender.
+	 *
+	 * To avoid this corner-case, if recovery is NOT in progress even though
+	 * the walsender is cascading one, we do the same thing as SIGUSR2 signal
+	 * handler does, i.e., set walsender_ready_to_stop to true. Which causes
+	 * the walsender to end later.
+	 *
+	 * When terminating cascading walsenders, usually postmaster writes
+	 * the log message announcing the terminations. But there is a race condition
+	 * here. If there is no walsender except this process before reaching here,
+	 * postmaster thinks that there is no walsender and suppresses that
+	 * log message. To handle this case, we always emit that log message here.
+	 * This might cause duplicate log messages, but which is less likely to happen,
+	 * so it's not worth writing some code to suppress them.
+	 */
+	if (am_cascading_walsender && !RecoveryInProgress())
+	{
+		ereport(LOG,
+				(errmsg("terminating walsender process to force cascaded standby "
+						"to update timeline and reconnect")));
+		walsender_ready_to_stop = true;
+	}
 
 	/*
 	 * We assume here that we're logging enough information in the WAL for

@@ -14,6 +14,7 @@
 #ifndef TABLECMDS_H
 #define TABLECMDS_H
 
+#include "access/htup.h"
 #include "nodes/parsenodes.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
@@ -41,6 +42,8 @@ extern void AlterRelationNamespaceInternal(Relation classRel, Oid relOid,
 extern void CheckTableNotInUse(Relation rel, const char *stmt);
 
 extern void ExecuteTruncate(TruncateStmt *stmt);
+
+extern void SetRelationHasSubclass(Oid relationId, bool relhassubclass);
 
 extern void renameatt(Oid myrelid, RenameStmt *stmt);
 

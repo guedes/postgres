@@ -24,7 +24,6 @@
  */
 #include "postgres.h"
 
-#include "access/genam.h"
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "executor/execdebug.h"

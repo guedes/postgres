@@ -7,9 +7,10 @@
  *	contrib/pg_upgrade/version.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
-#include "access/transam.h"
 
 
 /*

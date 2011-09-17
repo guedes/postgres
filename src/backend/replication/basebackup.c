@@ -25,6 +25,7 @@
 #include "nodes/pg_list.h"
 #include "replication/basebackup.h"
 #include "replication/walsender.h"
+#include "replication/walsender_private.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "utils/builtins.h"
@@ -368,7 +369,7 @@ SendBaseBackup(BaseBackupCmd *cmd)
 	dir = AllocateDir("pg_tblspc");
 	if (!dir)
 		ereport(ERROR,
-				(errmsg("could not open directory \"pg_tblspc\": %m")));
+				(errmsg("could not open directory \"%s\": %m", "pg_tblspc")));
 
 	perform_base_backup(&opt, dir);
 

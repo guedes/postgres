@@ -15,7 +15,6 @@
 #define STORAGE_H
 
 #include "access/xlog.h"
-#include "lib/stringinfo.h"
 #include "storage/block.h"
 #include "storage/relfilenode.h"
 #include "utils/relcache.h"

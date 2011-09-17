@@ -999,7 +999,7 @@ spawn_process(const char *cmdline)
 	/* Open the current token to use as base for the restricted one */
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &origToken))
 	{
-		fprintf(stderr, _("could not open process token: %lu\n"),
+		fprintf(stderr, _("could not open process token: error code %lu\n"),
 				GetLastError());
 		exit_nicely(2);
 	}
@@ -1011,7 +1011,7 @@ spawn_process(const char *cmdline)
 		!AllocateAndInitializeSid(&NtAuthority, 2,
 								  SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_POWER_USERS, 0, 0, 0, 0, 0, 0, &dropSids[1].Sid))
 	{
-		fprintf(stderr, _("could not allocate SIDs: %lu\n"), GetLastError());
+		fprintf(stderr, _("could not allocate SIDs: error code %lu\n"), GetLastError());
 		exit_nicely(2);
 	}
 
@@ -1030,7 +1030,7 @@ spawn_process(const char *cmdline)
 
 	if (!b)
 	{
-		fprintf(stderr, _("could not create restricted token: %lu\n"),
+		fprintf(stderr, _("could not create restricted token: error code %lu\n"),
 				GetLastError());
 		exit_nicely(2);
 	}
@@ -1054,7 +1054,7 @@ spawn_process(const char *cmdline)
 							 &si,
 							 &pi))
 	{
-		fprintf(stderr, _("could not start process for \"%s\": %lu\n"),
+		fprintf(stderr, _("could not start process for \"%s\": error code %lu\n"),
 				cmdline2, GetLastError());
 		exit_nicely(2);
 	}
@@ -1380,7 +1380,7 @@ wait_for_tests(PID_TYPE * pids, int *statuses, char **names, int num_tests)
 		r = WaitForMultipleObjects(tests_left, active_pids, FALSE, INFINITE);
 		if (r < WAIT_OBJECT_0 || r >= WAIT_OBJECT_0 + tests_left)
 		{
-			fprintf(stderr, _("failed to wait for subprocesses: %lu\n"),
+			fprintf(stderr, _("failed to wait for subprocesses: error code %lu\n"),
 					GetLastError());
 			exit_nicely(2);
 		}
@@ -1870,40 +1870,40 @@ help(void)
 {
 	printf(_("PostgreSQL regression test driver\n"));
 	printf(_("\n"));
-	printf(_("Usage: %s [options...] [extra tests...]\n"), progname);
+	printf(_("Usage:\n  %s [OPTION]... [EXTRA-TEST]...\n"), progname);
 	printf(_("\n"));
 	printf(_("Options:\n"));
+	printf(_("  --create-role=ROLE        create the specified role before testing\n"));
 	printf(_("  --dbname=DB               use database DB (default \"regression\")\n"));
 	printf(_("  --debug                   turn on debug mode in programs that are run\n"));
-	printf(_("  --inputdir=DIR            take input files from DIR (default \".\")\n"));
-	printf(_("  --load-language=lang      load the named language before running the\n"));
-	printf(_("                            tests; can appear multiple times\n"));
-	printf(_("  --load-extension=ext      load the named extension before running the\n"));
-	printf(_("                            tests; can appear multiple times\n"));
-	printf(_("  --create-role=ROLE        create the specified role before testing\n"));
-	printf(_("  --max-connections=N       maximum number of concurrent connections\n"));
-	printf(_("                            (default is 0 meaning unlimited)\n"));
+	printf(_("  --dlpath=DIR              look for dynamic libraries in DIR\n"));
 	printf(_("  --encoding=ENCODING       use ENCODING as the encoding\n"));
+	printf(_("  --inputdir=DIR            take input files from DIR (default \".\")\n"));
+	printf(_("  --launcher=CMD            use CMD as launcher of psql\n"));
+	printf(_("  --load-extension=EXT      load the named extension before running the\n"));
+	printf(_("                            tests; can appear multiple times\n"));
+	printf(_("  --load-language=LANG      load the named language before running the\n"));
+	printf(_("                            tests; can appear multiple times\n"));
+	printf(_("  --max-connections=N       maximum number of concurrent connections\n"));
+	printf(_("                            (default is 0, meaning unlimited)\n"));
 	printf(_("  --outputdir=DIR           place output files in DIR (default \".\")\n"));
 	printf(_("  --schedule=FILE           use test ordering schedule from FILE\n"));
 	printf(_("                            (can be used multiple times to concatenate)\n"));
-	printf(_("  --dlpath=DIR              look for dynamic libraries in DIR\n"));
 	printf(_("  --temp-install=DIR        create a temporary installation in DIR\n"));
 	printf(_("  --use-existing            use an existing installation\n"));
-	printf(_("  --launcher=CMD            use CMD as launcher of psql\n"));
 	printf(_("\n"));
 	printf(_("Options for \"temp-install\" mode:\n"));
+	printf(_("  --extra-install=DIR       additional directory to install (e.g., contrib)\n"));
 	printf(_("  --no-locale               use C locale\n"));
-	printf(_("  --top-builddir=DIR        (relative) path to top level build directory\n"));
 	printf(_("  --port=PORT               start postmaster on PORT\n"));
-	printf(_("  --temp-config=PATH        append contents of PATH to temporary config\n"));
-	printf(_("  --extra-install=DIR       additional directory to install (e.g., contrib\n"));
+	printf(_("  --temp-config=FILE        append contents of FILE to temporary config\n"));
+	printf(_("  --top-builddir=DIR        (relative) path to top level build directory\n"));
 	printf(_("\n"));
 	printf(_("Options for using an existing installation:\n"));
 	printf(_("  --host=HOST               use postmaster running on HOST\n"));
 	printf(_("  --port=PORT               use postmaster running at PORT\n"));
 	printf(_("  --user=USER               connect as USER\n"));
-	printf(_("  --psqldir=DIR             use psql in DIR (default: find in PATH)\n"));
+	printf(_("  --psqldir=DIR             use psql in DIR (default: configured bindir)\n"));
 	printf(_("\n"));
 	printf(_("The exit status is 0 if all tests passed, 1 if some tests failed, and 2\n"));
 	printf(_("if the tests could not be run for some reason.\n"));
@@ -2295,7 +2295,7 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 						progname, strerror(errno));
 #else
 			if (TerminateProcess(postmaster_pid, 255) == 0)
-				fprintf(stderr, _("\n%s: could not kill failed postmaster: %lu\n"),
+				fprintf(stderr, _("\n%s: could not kill failed postmaster: error code %lu\n"),
 						progname, GetLastError());
 #endif
 

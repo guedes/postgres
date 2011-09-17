@@ -239,7 +239,9 @@ check_locale(int category, const char *value)
 	/* set the locale with setlocale, to see if it accepts it. */
 	ret = (setlocale(category, value) != NULL);
 
-	setlocale(category, save);	/* assume this won't fail */
+	/* restore old value. */
+	if (!setlocale(category, save))
+		elog(WARNING, "failed to restore old locale");
 	pfree(save);
 
 	return ret;
@@ -499,13 +501,15 @@ PGLC_localeconv(void)
 	/* Try to restore internal settings */
 	if (save_lc_monetary)
 	{
-		setlocale(LC_MONETARY, save_lc_monetary);
+		if (!setlocale(LC_MONETARY, save_lc_monetary))
+			elog(WARNING, "failed to restore old locale");
 		pfree(save_lc_monetary);
 	}
 
 	if (save_lc_numeric)
 	{
-		setlocale(LC_NUMERIC, save_lc_numeric);
+		if (!setlocale(LC_NUMERIC, save_lc_numeric))
+			elog(WARNING, "failed to restore old locale");
 		pfree(save_lc_numeric);
 	}
 
@@ -513,7 +517,8 @@ PGLC_localeconv(void)
 	/* Try to restore internal ctype settings */
 	if (save_lc_ctype)
 	{
-		setlocale(LC_CTYPE, save_lc_ctype);
+		if (!setlocale(LC_CTYPE, save_lc_ctype))
+			elog(WARNING, "failed to restore old locale");
 		pfree(save_lc_ctype);
 	}
 #endif
@@ -559,7 +564,7 @@ strftime_win32(char *dst, size_t dstlen, const wchar_t *format, const struct tm 
 	len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, dst, dstlen, NULL, NULL);
 	if (len == 0)
 		elog(ERROR,
-			 "could not convert string to UTF-8:error %lu", GetLastError());
+			 "could not convert string to UTF-8: error code %lu", GetLastError());
 
 	dst[len] = '\0';
 	if (encoding != PG_UTF8)
@@ -674,7 +679,8 @@ cache_locale_time(void)
 	/* try to restore internal settings */
 	if (save_lc_time)
 	{
-		setlocale(LC_TIME, save_lc_time);
+		if (!setlocale(LC_TIME, save_lc_time))
+			elog(WARNING, "failed to restore old locale");
 		pfree(save_lc_time);
 	}
 
@@ -682,7 +688,8 @@ cache_locale_time(void)
 	/* try to restore internal ctype settings */
 	if (save_lc_ctype)
 	{
-		setlocale(LC_CTYPE, save_lc_ctype);
+		if (!setlocale(LC_CTYPE, save_lc_ctype))
+			elog(WARNING, "failed to restore old locale");
 		pfree(save_lc_ctype);
 	}
 #endif

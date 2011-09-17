@@ -24,7 +24,6 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "executor/execdebug.h"

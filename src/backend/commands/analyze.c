@@ -16,18 +16,17 @@
 
 #include <math.h>
 
-#include "access/heapam.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
 #include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_inherits_fn.h"
 #include "catalog/pg_namespace.h"
 #include "commands/dbcommands.h"
+#include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -49,6 +48,7 @@
 #include "utils/pg_rusage.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
+#include "utils/timestamp.h"
 #include "utils/tqual.h"
 
 
@@ -845,12 +845,11 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 		stats->attrtypmod = attr->atttypmod;
 	}
 
-	typtuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(stats->attrtypid));
+	typtuple = SearchSysCacheCopy1(TYPEOID,
+								   ObjectIdGetDatum(stats->attrtypid));
 	if (!HeapTupleIsValid(typtuple))
 		elog(ERROR, "cache lookup failed for type %u", stats->attrtypid);
-	stats->attrtype = (Form_pg_type) palloc(sizeof(FormData_pg_type));
-	memcpy(stats->attrtype, GETSTRUCT(typtuple), sizeof(FormData_pg_type));
-	ReleaseSysCache(typtuple);
+	stats->attrtype = (Form_pg_type) GETSTRUCT(typtuple);
 	stats->anl_context = anl_context;
 	stats->tupattnum = attnum;
 
@@ -879,7 +878,7 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 
 	if (!ok || stats->compute_stats == NULL || stats->minrows <= 0)
 	{
-		pfree(stats->attrtype);
+		heap_freetuple(typtuple);
 		pfree(stats->attr);
 		pfree(stats);
 		return NULL;
@@ -1363,8 +1362,8 @@ get_next_S(double t, int n, double *stateptr)
 static int
 compare_rows(const void *a, const void *b)
 {
-	HeapTuple	ha = *(HeapTuple *) a;
-	HeapTuple	hb = *(HeapTuple *) b;
+	HeapTuple	ha = *(const HeapTuple *) a;
+	HeapTuple	hb = *(const HeapTuple *) b;
 	BlockNumber ba = ItemPointerGetBlockNumber(&ha->t_self);
 	OffsetNumber oa = ItemPointerGetOffsetNumber(&ha->t_self);
 	BlockNumber bb = ItemPointerGetBlockNumber(&hb->t_self);
@@ -1412,14 +1411,15 @@ acquire_inherited_sample_rows(Relation onerel, HeapTuple *rows, int targrows,
 	/*
 	 * Check that there's at least one descendant, else fail.  This could
 	 * happen despite analyze_rel's relhassubclass check, if table once had a
-	 * child but no longer does.
+	 * child but no longer does.  In that case, we can clear the
+	 * relhassubclass field so as not to make the same mistake again later.
+	 * (This is safe because we hold ShareUpdateExclusiveLock.)
 	 */
 	if (list_length(tableOIDs) < 2)
 	{
-		/*
-		 * XXX It would be desirable to clear relhassubclass here, but we
-		 * don't have adequate lock to do that safely.
-		 */
+		/* CCI because we already updated the pg_class row in this command */
+		CommandCounterIncrement();
+		SetRelationHasSubclass(RelationGetRelid(onerel), false);
 		return 0;
 	}
 
@@ -2700,10 +2700,10 @@ compute_scalar_stats(VacAttrStatsP stats,
 static int
 compare_scalars(const void *a, const void *b, void *arg)
 {
-	Datum		da = ((ScalarItem *) a)->value;
-	int			ta = ((ScalarItem *) a)->tupno;
-	Datum		db = ((ScalarItem *) b)->value;
-	int			tb = ((ScalarItem *) b)->tupno;
+	Datum		da = ((const ScalarItem *) a)->value;
+	int			ta = ((const ScalarItem *) a)->tupno;
+	Datum		db = ((const ScalarItem *) b)->value;
+	int			tb = ((const ScalarItem *) b)->tupno;
 	CompareScalarsContext *cxt = (CompareScalarsContext *) arg;
 	int32		compare;
 
@@ -2734,8 +2734,8 @@ compare_scalars(const void *a, const void *b, void *arg)
 static int
 compare_mcvs(const void *a, const void *b)
 {
-	int			da = ((ScalarMCVItem *) a)->first;
-	int			db = ((ScalarMCVItem *) b)->first;
+	int			da = ((const ScalarMCVItem *) a)->first;
+	int			db = ((const ScalarMCVItem *) b)->first;
 
 	return da - db;
 }

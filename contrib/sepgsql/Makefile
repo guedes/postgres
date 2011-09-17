@@ -1,11 +1,14 @@
 # contrib/sepgsql/Makefile
 
 MODULE_big = sepgsql
-OBJS = hooks.o selinux.o label.o dml.o \
+OBJS = hooks.o selinux.o uavc.o label.o dml.o \
 	schema.o relation.o proc.o
 DATA_built = sepgsql.sql
+
 REGRESS = label dml misc
 REGRESS_PREP = check_selinux_environment
+REGRESS_OPTS = --launcher $(top_builddir)/contrib/sepgsql/launcher
+
 EXTRA_CLEAN = -r tmp *.pp sepgsql-regtest.if sepgsql-regtest.fc
 
 ifdef USE_PGXS
@@ -19,8 +22,7 @@ include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 endif
 
-SHLIB_LINK += $(filter -lselinux, $(LIBS))
-REGRESS_OPTS += --launcher $(top_builddir)/contrib/sepgsql/launcher
+SHLIB_LINK += -lselinux
 
 check_selinux_environment:
 	@$(top_builddir)/contrib/sepgsql/chkselinuxenv "$(bindir)" "$(datadir)"

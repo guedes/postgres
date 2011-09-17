@@ -121,7 +121,7 @@ HandleSlashCmds(PsqlScanState scan_state,
 		/* eat any remaining arguments after a valid command */
 		/* note we suppress evaluation of backticks here */
 		while ((arg = psql_scan_slash_option(scan_state,
-											 OT_VERBATIM, NULL, false)))
+											 OT_NO_EVAL, NULL, false)))
 		{
 			psql_error("\\%s: extra argument \"%s\" ignored\n", cmd, arg);
 			free(arg);
@@ -995,7 +995,7 @@ exec_command(const char *cmd,
 
 			if (!SetVariable(pset.vars, opt, result))
 			{
-				psql_error("\\%s: error\n", cmd);
+				psql_error("\\%s: error while setting variable\n", cmd);
 				success = false;
 			}
 
@@ -1096,7 +1096,7 @@ exec_command(const char *cmd,
 
 			if (!SetVariable(pset.vars, opt0, newval))
 			{
-				psql_error("\\%s: error\n", cmd);
+				psql_error("\\%s: error while setting variable\n", cmd);
 				success = false;
 			}
 			free(newval);
@@ -1272,7 +1272,7 @@ exec_command(const char *cmd,
 		}
 		else if (!SetVariable(pset.vars, opt, NULL))
 		{
-			psql_error("\\%s: error\n", cmd);
+			psql_error("\\%s: error while setting variable\n", cmd);
 			success = false;
 		}
 		free(opt);

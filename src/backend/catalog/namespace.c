@@ -21,7 +21,6 @@
 
 #include "access/xact.h"
 #include "catalog/dependency.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_conversion.h"
@@ -42,7 +41,6 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
-#include "storage/backendid.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/sinval.h"
@@ -52,7 +50,6 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -2939,6 +2936,24 @@ GetOverrideSearchPath(MemoryContext context)
 	result->schemas = schemas;
 
 	MemoryContextSwitchTo(oldcxt);
+
+	return result;
+}
+
+/*
+ * CopyOverrideSearchPath - copy the specified OverrideSearchPath.
+ *
+ * The result structure is allocated in CurrentMemoryContext.
+ */
+OverrideSearchPath *
+CopyOverrideSearchPath(OverrideSearchPath *path)
+{
+	OverrideSearchPath *result;
+
+	result = (OverrideSearchPath *) palloc(sizeof(OverrideSearchPath));
+	result->schemas = list_copy(path->schemas);
+	result->addCatalog = path->addCatalog;
+	result->addTemp = path->addTemp;
 
 	return result;
 }

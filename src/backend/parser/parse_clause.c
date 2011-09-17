@@ -23,7 +23,6 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/tlist.h"
-#include "optimizer/var.h"
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
 #include "parser/parse_clause.h"

@@ -17,7 +17,6 @@
 #include "access/xlog.h"
 #include "nodes/pg_list.h"
 #include "storage/relfilenode.h"
-#include "utils/timestamp.h"
 
 
 /*

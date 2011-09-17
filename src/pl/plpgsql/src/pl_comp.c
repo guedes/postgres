@@ -18,18 +18,14 @@
 #include <ctype.h>
 
 #include "catalog/namespace.h"
-#include "catalog/pg_attrdef.h"
-#include "catalog/pg_attribute.h"
-#include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_proc_fn.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_type.h"
-#include "tcop/tcopprot.h"
-#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -81,7 +77,7 @@ typedef struct
 } ExceptionLabelMap;
 
 static const ExceptionLabelMap exception_label_map[] = {
-#include "plerrcodes.h"
+#include "plerrcodes.h"	/* pgrminclude ignore */
 	{NULL, 0}
 };
 

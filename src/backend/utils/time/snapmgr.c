@@ -32,7 +32,6 @@
 #include "storage/procarray.h"
 #include "utils/memutils.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/tqual.h"
 

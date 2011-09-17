@@ -5,13 +5,7 @@
 
 #include "trgm.h"
 
-#include "access/gist.h"
-#include "access/itup.h"
 #include "access/skey.h"
-#include "access/tuptoaster.h"
-#include "storage/bufpage.h"
-#include "utils/array.h"
-#include "utils/builtins.h"
 
 
 PG_FUNCTION_INFO_V1(gtrgm_in);
@@ -600,10 +594,10 @@ typedef struct
 static int
 comparecost(const void *a, const void *b)
 {
-	if (((SPLITCOST *) a)->cost == ((SPLITCOST *) b)->cost)
+	if (((const SPLITCOST *) a)->cost == ((const SPLITCOST *) b)->cost)
 		return 0;
 	else
-		return (((SPLITCOST *) a)->cost > ((SPLITCOST *) b)->cost) ? 1 : -1;
+		return (((const SPLITCOST *) a)->cost > ((const SPLITCOST *) b)->cost) ? 1 : -1;
 }
 
 

@@ -13,22 +13,14 @@
 #include "postgres.h"
 
 #include "access/reloptions.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
-#include "catalog/pg_type.h"
 #include "catalog/pg_user_mapping.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
-#include "funcapi.h"
 #include "miscadmin.h"
-#include "nodes/parsenodes.h"
-#include "utils/acl.h"
-#include "utils/array.h"
 #include "utils/builtins.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
 #include "utils/syscache.h"
 
 
@@ -371,8 +363,17 @@ deflist_to_tuplestore(ReturnSetInfo *rsinfo, List *options)
 		DefElem    *def = lfirst(cell);
 
 		values[0] = CStringGetTextDatum(def->defname);
-		values[1] = CStringGetTextDatum(((Value *) def->arg)->val.str);
-		nulls[0] = nulls[1] = false;
+		nulls[0] = false;
+		if (def->arg)
+		{
+			values[1] = CStringGetTextDatum(((Value *) (def->arg))->val.str);
+			nulls[1] = false;
+		}
+		else
+		{
+			values[1] = (Datum) 0;
+			nulls[1] = true;
+		}
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 	}
 

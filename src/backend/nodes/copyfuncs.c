@@ -24,8 +24,6 @@
 
 #include "miscadmin.h"
 #include "foreign/fdwapi.h"
-#include "nodes/plannodes.h"
-#include "nodes/relation.h"
 #include "utils/datum.h"
 
 
@@ -458,8 +456,6 @@ _copySubqueryScan(SubqueryScan *from)
 	 * copy remainder of node
 	 */
 	COPY_NODE_FIELD(subplan);
-	COPY_NODE_FIELD(subrtable);
-	COPY_NODE_FIELD(subrowmark);
 
 	return newnode;
 }

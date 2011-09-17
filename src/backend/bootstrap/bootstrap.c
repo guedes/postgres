@@ -21,9 +21,6 @@
 #include <getopt.h>
 #endif
 
-#include "access/genam.h"
-#include "access/heapam.h"
-#include "access/xact.h"
 #include "bootstrap/bootstrap.h"
 #include "catalog/index.h"
 #include "catalog/pg_collation.h"
@@ -37,7 +34,6 @@
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
-#include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -337,10 +333,6 @@ AuxiliaryProcessMain(int argc, char *argv[])
 	{
 		if (!SelectConfigFiles(userDoption, progname))
 			proc_exit(1);
-		/* If timezone is not set, determine what the OS uses */
-		pg_timezone_initialize();
-		/* If timezone_abbreviations is not set, select default */
-		pg_timezone_abbrev_initialize();
 	}
 
 	/* Validate we have been given a reasonable-looking DataDir */
@@ -821,7 +813,7 @@ InsertOneValue(char *value, int i)
 	Oid			typoutput;
 	char	   *prt;
 
-	AssertArg(i >= 0 || i < MAXATTR);
+	AssertArg(i >= 0 && i < MAXATTR);
 
 	elog(DEBUG4, "inserting column %d value \"%s\"", i, value);
 
@@ -846,7 +838,7 @@ void
 InsertOneNull(int i)
 {
 	elog(DEBUG4, "inserting column %d NULL", i);
-	Assert(i >= 0 || i < MAXATTR);
+	Assert(i >= 0 && i < MAXATTR);
 	values[i] = PointerGetDatum(NULL);
 	Nulls[i] = true;
 }

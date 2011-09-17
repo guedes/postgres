@@ -7,6 +7,8 @@
  *	contrib/pg_upgrade/info.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include "access/transam.h"
@@ -266,9 +268,10 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 "  LEFT OUTER JOIN pg_catalog.pg_tablespace t "
 			 "	   ON c.reltablespace = t.oid "
 			 "WHERE relkind IN ('r','t', 'i'%s) AND "
-			 /* exclude pg_catalog and pg_temp_ (could be orphaned tables) */
-			 "  ((n.nspname !~ '^pg_' AND "
-			"     n.nspname NOT IN ('information_schema', 'binary_upgrade') AND "
+			 /* exclude possible orphaned temp tables */
+			 "  ((n.nspname !~ '^pg_temp_' AND "
+			 "    n.nspname !~ '^pg_toast_temp_' AND "
+			 "    n.nspname NOT IN ('pg_catalog', 'information_schema', 'binary_upgrade') AND "
 			 "	  c.oid >= %u) "
 			 "  OR (n.nspname = 'pg_catalog' AND "
 	"    relname IN ('pg_largeobject', 'pg_largeobject_loid_pn_index'%s) )) "
@@ -283,7 +286,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 (GET_MAJOR_VERSION(old_cluster.major_version) <= 804) ?
 	"" : ", 'pg_largeobject_metadata', 'pg_largeobject_metadata_oid_index'");
 
-	res = executeQueryOrDie(conn, query);
+	res = executeQueryOrDie(conn, "%s", query);
 
 	ntups = PQntuples(res);
 
