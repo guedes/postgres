@@ -155,7 +155,7 @@ typedef enum
 	/* Types of set_config_option actions */
 	GUC_ACTION_SET,				/* regular SET command */
 	GUC_ACTION_LOCAL,			/* SET LOCAL command */
-	GUC_ACTION_SAVE				/* function SET option */
+	GUC_ACTION_SAVE				/* function SET option, or temp assignment */
 } GucAction;
 
 #define GUC_QUALIFIER_SEPARATOR '.'
@@ -315,7 +315,7 @@ extern bool parse_int(const char *value, int *result, int flags,
 extern bool parse_real(const char *value, double *result);
 extern int	set_config_option(const char *name, const char *value,
 				  GucContext context, GucSource source,
-				  GucAction action, bool changeVal);
+				  GucAction action, bool changeVal, int elevel);
 extern char *GetConfigOptionByName(const char *name, const char **varname);
 extern void GetConfigOptionByNum(int varnum, const char **values, bool *noshow);
 extern int	GetNumConfigOptions(void);
