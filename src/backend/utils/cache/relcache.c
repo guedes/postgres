@@ -1414,6 +1414,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 
 	relation->rd_rel->relpages = 0;
 	relation->rd_rel->reltuples = 0;
+	relation->rd_rel->relallvisible = 0;
 	relation->rd_rel->relkind = RELKIND_RELATION;
 	relation->rd_rel->relhasoids = hasoids;
 	relation->rd_rel->relnatts = (int16) natts;
@@ -2668,6 +2669,7 @@ RelationSetNewRelfilenode(Relation relation, TransactionId freezeXid)
 	{
 		classform->relpages = 0;	/* it's empty until further notice */
 		classform->reltuples = 0;
+		classform->relallvisible = 0;
 	}
 	classform->relfrozenxid = freezeXid;
 
@@ -3684,10 +3686,10 @@ RelationGetIndexAttrBitmap(Relation relation)
 		}
 
 		/* Collect all attributes used in expressions, too */
-		pull_varattnos((Node *) indexInfo->ii_Expressions, &indexattrs);
+		pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &indexattrs);
 
 		/* Collect all attributes in the index predicate, too */
-		pull_varattnos((Node *) indexInfo->ii_Predicate, &indexattrs);
+		pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &indexattrs);
 
 		index_close(indexDesc, AccessShareLock);
 	}

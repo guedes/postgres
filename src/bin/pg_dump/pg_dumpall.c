@@ -441,7 +441,12 @@ main(int argc, char *argv[])
 	if (verbose)
 		dumpTimestamp("Started on");
 
-	fprintf(OPF, "\\connect postgres\n\n");
+	/*
+	 * We used to emit \connect postgres here, but that served no purpose
+	 * other than to break things for installations without a postgres
+	 * database.  Everything we're restoring here is a global, so whichever
+	 * database we're connected to at the moment is fine.
+	 */
 
 	/* Replicate encoding and std_strings in output */
 	fprintf(OPF, "SET client_encoding = '%s';\n",
@@ -804,10 +809,16 @@ dumpRoles(PGconn *conn)
 							 buf, "ROLE", rolename);
 
 		fprintf(OPF, "%s", buf->data);
-
-		if (server_version >= 70300)
-			dumpUserConfig(conn, rolename);
 	}
+
+	/*
+	 * Dump configuration settings for roles after all roles have been dumped.
+	 * We do it this way because config settings for roles could mention the
+	 * names of other roles.
+	 */
+	if (server_version >= 70300)
+		for (i = 0; i < PQntuples(res); i++)
+			dumpUserConfig(conn, PQgetvalue(res, i, i_rolname));
 
 	PQclear(res);
 

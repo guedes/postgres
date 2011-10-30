@@ -46,7 +46,7 @@
 					# (change requires restart)
 
 # If external_pid_file is not explicitly set, no extra PID file is written.
-#external_pid_file = '(none)'		# write an extra PID file
+#external_pid_file = ''			# write an extra PID file
 					# (change requires restart)
 
 
@@ -243,6 +243,7 @@
 #enable_hashagg = on
 #enable_hashjoin = on
 #enable_indexscan = on
+#enable_indexonlyscan = on
 #enable_material = on
 #enable_mergejoin = on
 #enable_nestloop = on
@@ -321,6 +322,8 @@
 #syslog_facility = 'LOCAL0'
 #syslog_ident = 'postgres'
 
+# This is only relevant when logging to eventlog (win32):
+#event_source = 'PostgreSQL'
 
 # - When to Log -
 

@@ -110,6 +110,7 @@ Cost		disable_cost = 1.0e10;
 
 bool		enable_seqscan = true;
 bool		enable_indexscan = true;
+bool		enable_indexonlyscan = true;
 bool		enable_bitmapscan = true;
 bool		enable_tidscan = true;
 bool		enable_sort = true;
@@ -210,6 +211,7 @@ cost_seqscan(Path *path, PlannerInfo *root,
  * 'index' is the index to be used
  * 'indexQuals' is the list of applicable qual clauses (implicit AND semantics)
  * 'indexOrderBys' is the list of ORDER BY operators for amcanorderbyop indexes
+ * 'indexonly' is true if it's an index-only scan
  * 'outer_rel' is the outer relation when we are considering using the index
  *		scan as the inside of a nestloop join (hence, some of the indexQuals
  *		are join clauses, and we should expect repeated scans of the index);
@@ -232,6 +234,7 @@ cost_index(IndexPath *path, PlannerInfo *root,
 		   IndexOptInfo *index,
 		   List *indexQuals,
 		   List *indexOrderBys,
+		   bool indexonly,
 		   RelOptInfo *outer_rel)
 {
 	RelOptInfo *baserel = index->rel;
@@ -258,6 +261,7 @@ cost_index(IndexPath *path, PlannerInfo *root,
 
 	if (!enable_indexscan)
 		startup_cost += disable_cost;
+	/* we don't need to check enable_indexonlyscan; indxpath.c does that */
 
 	/*
 	 * Call index-access-method-specific code to estimate the processing cost
@@ -314,6 +318,13 @@ cost_index(IndexPath *path, PlannerInfo *root,
 	 * For partially-correlated indexes, we ought to charge somewhere between
 	 * these two estimates.  We currently interpolate linearly between the
 	 * estimates based on the correlation squared (XXX is that appropriate?).
+	 *
+	 * If it's an index-only scan, then we will not need to fetch any heap
+	 * pages for which the visibility map shows all tuples are visible.
+	 * Hence, reduce the estimated number of heap fetches accordingly.
+	 * We use the measured fraction of the entire heap that is all-visible,
+	 * which might not be particularly relevant to the subset of the heap
+	 * that this query will fetch; but it's not clear how to do better.
 	 *----------
 	 */
 	if (outer_rel != NULL && outer_rel->rows > 1)
@@ -332,6 +343,9 @@ cost_index(IndexPath *path, PlannerInfo *root,
 											baserel->pages,
 											(double) index->pages,
 											root);
+
+		if (indexonly)
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
 
 		max_IO_cost = (pages_fetched * spc_random_page_cost) / num_scans;
 
@@ -352,6 +366,9 @@ cost_index(IndexPath *path, PlannerInfo *root,
 											(double) index->pages,
 											root);
 
+		if (indexonly)
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+
 		min_IO_cost = (pages_fetched * spc_random_page_cost) / num_scans;
 	}
 	else
@@ -365,14 +382,26 @@ cost_index(IndexPath *path, PlannerInfo *root,
 											(double) index->pages,
 											root);
 
+		if (indexonly)
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+
 		/* max_IO_cost is for the perfectly uncorrelated case (csquared=0) */
 		max_IO_cost = pages_fetched * spc_random_page_cost;
 
 		/* min_IO_cost is for the perfectly correlated case (csquared=1) */
 		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
-		min_IO_cost = spc_random_page_cost;
-		if (pages_fetched > 1)
-			min_IO_cost += (pages_fetched - 1) * spc_seq_page_cost;
+
+		if (indexonly)
+			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
+
+		if (pages_fetched > 0)
+		{
+			min_IO_cost = spc_random_page_cost;
+			if (pages_fetched > 1)
+				min_IO_cost += (pages_fetched - 1) * spc_seq_page_cost;
+		}
+		else
+			min_IO_cost = 0;
 	}
 
 	/*

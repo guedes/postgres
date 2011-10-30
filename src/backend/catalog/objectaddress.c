@@ -66,6 +66,174 @@
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 
+/*
+ * ObjectProperty
+ *
+ * This array provides a common part of system object structure; to help
+ * consolidate routines to handle various kind of object classes.
+ */
+typedef struct
+{
+	Oid			class_oid;			/* oid of catalog */
+	Oid			oid_index_oid; 		/* oid of index on system oid column */
+	int			oid_catcache_id;	/* id of catcache on system oid column  */
+	AttrNumber	attnum_namespace;	/* attnum of namespace field */
+} ObjectPropertyType;
+
+static ObjectPropertyType ObjectProperty[] =
+{
+	{
+		CastRelationId,
+		CastOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		CollationRelationId,
+		CollationOidIndexId,
+		COLLOID,
+		Anum_pg_collation_collnamespace
+	},
+	{
+		ConstraintRelationId,
+		ConstraintOidIndexId,
+		CONSTROID,
+		Anum_pg_constraint_connamespace
+	},
+	{
+		ConversionRelationId,
+		ConversionOidIndexId,
+		CONVOID,
+		Anum_pg_conversion_connamespace
+	},
+	{
+		DatabaseRelationId,
+		DatabaseOidIndexId,
+		DATABASEOID,
+		InvalidAttrNumber
+	},
+	{
+		ExtensionRelationId,
+		ExtensionOidIndexId,
+		-1,
+		InvalidAttrNumber		/* extension doesn't belong to extnamespace */
+	},
+	{
+		ForeignDataWrapperRelationId,
+		ForeignDataWrapperOidIndexId,
+		FOREIGNDATAWRAPPEROID,
+		InvalidAttrNumber
+	},
+	{
+		ForeignServerRelationId,
+		ForeignServerOidIndexId,
+		FOREIGNSERVEROID,
+		InvalidAttrNumber
+	},
+	{
+		ProcedureRelationId,
+		ProcedureOidIndexId,
+		PROCOID,
+		Anum_pg_proc_pronamespace
+	},
+	{
+		LanguageRelationId,
+		LanguageOidIndexId,
+		LANGOID,
+		InvalidAttrNumber,
+	},
+	{
+		LargeObjectMetadataRelationId,
+		LargeObjectMetadataOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		OperatorClassRelationId,
+		OpclassOidIndexId,
+		CLAOID,
+		Anum_pg_opclass_opcnamespace,
+	},
+	{
+		OperatorRelationId,
+		OperatorOidIndexId,
+		OPEROID,
+		Anum_pg_operator_oprnamespace
+	},
+	{
+		OperatorFamilyRelationId,
+		OpfamilyOidIndexId,
+		OPFAMILYOID,
+		Anum_pg_opfamily_opfnamespace
+	},
+	{
+		AuthIdRelationId,
+		AuthIdOidIndexId,
+		AUTHOID,
+		InvalidAttrNumber
+	},
+	{
+		RewriteRelationId,
+		RewriteOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		NamespaceRelationId,
+		NamespaceOidIndexId,
+		NAMESPACEOID,
+		InvalidAttrNumber
+	},
+	{
+		RelationRelationId,
+		ClassOidIndexId,
+		RELOID,
+		Anum_pg_class_relnamespace
+	},
+	{
+		TableSpaceRelationId,
+		TablespaceOidIndexId,
+		TABLESPACEOID,
+		InvalidAttrNumber
+	},
+	{
+		TriggerRelationId,
+		TriggerOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		TSConfigRelationId,
+		TSConfigOidIndexId,
+		TSCONFIGOID,
+		Anum_pg_ts_config_cfgnamespace
+	},
+	{
+		TSDictionaryRelationId,
+		TSDictionaryOidIndexId,
+		TSDICTOID,
+		Anum_pg_ts_dict_dictnamespace
+	},
+	{
+		TSParserRelationId,
+		TSParserOidIndexId,
+		TSPARSEROID,
+		Anum_pg_ts_parser_prsnamespace
+	},
+	{
+		TSTemplateRelationId,
+		TSTemplateOidIndexId,
+		TSTEMPLATEOID,
+		Anum_pg_ts_template_tmplnamespace,
+	},
+	{
+		TypeRelationId,
+		TypeOidIndexId,
+		TYPEOID,
+		Anum_pg_type_typnamespace
+	}
+};
+
 static ObjectAddress get_object_address_unqualified(ObjectType objtype,
 							   List *qualname, bool missing_ok);
 static ObjectAddress get_relation_by_qualified_name(ObjectType objtype,
@@ -81,7 +249,7 @@ static ObjectAddress get_object_address_type(ObjectType objtype,
 static ObjectAddress get_object_address_opcf(ObjectType objtype, List *objname,
 						List *objargs, bool missing_ok);
 static bool object_exists(ObjectAddress address);
-
+static ObjectPropertyType *get_object_property_data(Oid class_id);
 
 /*
  * Translate an object name and arguments (as passed by the parser) to an
@@ -448,7 +616,7 @@ get_relation_by_qualified_name(ObjectType objtype, List *objname,
 			break;
 	}
 
-	/* Done */
+	/* Done. */
 	address.objectId = RelationGetRelid(relation);
 	*relp = relation;
 
@@ -498,7 +666,8 @@ get_object_address_relobject(ObjectType objtype, List *objname,
 		 * Caller is expecting to get back the relation, even though we
 		 * didn't end up using it to find the rule.
 		 */
-		relation = heap_open(reloid, AccessShareLock);
+		if (OidIsValid(address.objectId))
+			relation = heap_open(reloid, AccessShareLock);
 	}
 	else
 	{
@@ -535,6 +704,14 @@ get_object_address_relobject(ObjectType objtype, List *objname,
 				address.classId = InvalidOid;
 				address.objectId = InvalidOid;
 				address.objectSubId = 0;
+		}
+
+		/* Avoid relcache leak when object not found. */
+		if (!OidIsValid(address.objectId))
+		{
+			heap_close(relation, AccessShareLock);
+			relation = NULL;		/* department of accident prevention */
+			return address;
 		}
 	}
 
@@ -678,6 +855,7 @@ object_exists(ObjectAddress address)
 	ScanKeyData skey[1];
 	SysScanDesc sd;
 	bool		found;
+	ObjectPropertyType	   *property;
 
 	/* Sub-objects require special treatment. */
 	if (address.objectSubId != 0)
@@ -699,99 +877,20 @@ object_exists(ObjectAddress address)
 	}
 
 	/*
-	 * For object types that have a relevant syscache, we use it; for
-	 * everything else, we'll have to do an index-scan.  This switch sets
-	 * either the cache to be used for the syscache lookup, or the index to be
-	 * used for the index scan.
+	 * Weird backward compatibility hack: ObjectAddress notation uses
+	 * LargeObjectRelationId for large objects, but since PostgreSQL
+	 * 9.0, the relevant catalog is actually LargeObjectMetadataRelationId.
 	 */
-	switch (address.classId)
-	{
-		case RelationRelationId:
-			cache = RELOID;
-			break;
-		case RewriteRelationId:
-			indexoid = RewriteOidIndexId;
-			break;
-		case TriggerRelationId:
-			indexoid = TriggerOidIndexId;
-			break;
-		case ConstraintRelationId:
-			cache = CONSTROID;
-			break;
-		case DatabaseRelationId:
-			cache = DATABASEOID;
-			break;
-		case TableSpaceRelationId:
-			cache = TABLESPACEOID;
-			break;
-		case AuthIdRelationId:
-			cache = AUTHOID;
-			break;
-		case NamespaceRelationId:
-			cache = NAMESPACEOID;
-			break;
-		case LanguageRelationId:
-			cache = LANGOID;
-			break;
-		case TypeRelationId:
-			cache = TYPEOID;
-			break;
-		case ProcedureRelationId:
-			cache = PROCOID;
-			break;
-		case OperatorRelationId:
-			cache = OPEROID;
-			break;
-		case CollationRelationId:
-			cache = COLLOID;
-			break;
-		case ConversionRelationId:
-			cache = CONVOID;
-			break;
-		case OperatorClassRelationId:
-			cache = CLAOID;
-			break;
-		case OperatorFamilyRelationId:
-			cache = OPFAMILYOID;
-			break;
-		case LargeObjectRelationId:
+	if (address.classId == LargeObjectRelationId)
+		address.classId = LargeObjectMetadataRelationId;
 
-			/*
-			 * Weird backward compatibility hack: ObjectAddress notation uses
-			 * LargeObjectRelationId for large objects, but since PostgreSQL
-			 * 9.0, the relevant catalog is actually
-			 * LargeObjectMetadataRelationId.
-			 */
-			address.classId = LargeObjectMetadataRelationId;
-			indexoid = LargeObjectMetadataOidIndexId;
-			break;
-		case CastRelationId:
-			indexoid = CastOidIndexId;
-			break;
-		case ForeignDataWrapperRelationId:
-			cache = FOREIGNDATAWRAPPEROID;
-			break;
-		case ForeignServerRelationId:
-			cache = FOREIGNSERVEROID;
-			break;
-		case TSParserRelationId:
-			cache = TSPARSEROID;
-			break;
-		case TSDictionaryRelationId:
-			cache = TSDICTOID;
-			break;
-		case TSTemplateRelationId:
-			cache = TSTEMPLATEOID;
-			break;
-		case TSConfigRelationId:
-			cache = TSCONFIGOID;
-			break;
-		case ExtensionRelationId:
-			indexoid = ExtensionOidIndexId;
-			break;
-		default:
-			elog(ERROR, "unrecognized classid: %u", address.classId);
-	}
+	/*
+	 * For object types that have a relevant syscache, we use it; for
+	 * everything else, we'll have to do an index-scan.
+	 */
+	property = get_object_property_data(address.classId);
+	cache = property->oid_catcache_id;
+	indexoid = property->oid_index_oid;
 
 	/* Found a syscache? */
 	if (cache != -1)
@@ -810,7 +909,6 @@ object_exists(ObjectAddress address)
 	heap_close(rel, AccessShareLock);
 	return found;
 }
-
 
 /*
  * Check ownership of an object previously identified by get_object_address.
@@ -975,4 +1073,59 @@ check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
 			elog(ERROR, "unrecognized object type: %d",
 				 (int) objtype);
 	}
+}
+
+/*
+ * get_object_namespace
+ *
+ * Find the schema containing the specified object.  For non-schema objects,
+ * this function returns InvalidOid.
+ */
+Oid
+get_object_namespace(const ObjectAddress *address)
+{
+	int			cache;
+	HeapTuple	tuple;
+	bool		isnull;
+	Oid			oid;
+	ObjectPropertyType	   *property;
+
+	/* If not owned by a namespace, just return InvalidOid. */
+	property = get_object_property_data(address->classId);
+	if (property->attnum_namespace == InvalidAttrNumber)
+		return InvalidOid;
+
+	/* Currently, we can only handle object types with system caches. */
+	cache = property->oid_catcache_id;
+	Assert(cache != -1);
+
+	/* Fetch tuple from syscache and extract namespace attribute. */
+	tuple = SearchSysCache1(cache, ObjectIdGetDatum(address->objectId));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for cache %d oid %u",
+			 cache, address->objectId);
+	oid = DatumGetObjectId(SysCacheGetAttr(cache,
+										   tuple,
+										   property->attnum_namespace,
+										   &isnull));
+	Assert(!isnull);
+	ReleaseSysCache(tuple);
+
+	return oid;
+}
+
+/*
+ * Find ObjectProperty structure by class_id.
+ */
+static ObjectPropertyType *
+get_object_property_data(Oid class_id)
+{
+	int			index;
+
+	for (index = 0; index < lengthof(ObjectProperty); index++)
+		if (ObjectProperty[index].class_oid == class_id)
+			return &ObjectProperty[index];
+
+	elog(ERROR, "unrecognized class id: %u", class_id);
+	return NULL;		/* not reached */
 }

@@ -213,12 +213,7 @@ static const LockMethodData user_lockmethod = {
 	AccessExclusiveLock,		/* highest valid lock mode number */
 	true,
 	LockConflicts,
-	lock_mode_names,
-#ifdef LOCK_DEBUG
-	&Trace_userlocks
-#else
-	&Dummy_trace
-#endif
+	lock_mode_names
 };
 
 /*
@@ -276,7 +271,6 @@ static ResourceOwner awaitedOwner;
 
 int			Trace_lock_oidmin = FirstNormalObjectId;
 bool		Trace_locks = false;
-bool		Trace_userlocks = false;
 int			Trace_lock_table = 0;
 bool		Debug_deadlocks = false;
 
@@ -3675,6 +3669,8 @@ VirtualXactLock(VirtualTransactionId vxid, bool wait)
 	 * it's no longer running anywhere.
 	 */
 	proc = BackendIdGetProc(vxid.backendId);
+	if (proc == NULL)
+		return true;
 
 	/*
 	 * We must acquire this lock before checking the backendId and lxid

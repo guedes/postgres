@@ -25,8 +25,8 @@
 #include "optimizer/paths.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
-#include "utils/selfuncs.h"
 #include "utils/lsyscache.h"
+#include "utils/selfuncs.h"
 
 
 static List *translate_sub_tlist(List *tlist, int relid);
@@ -418,6 +418,7 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel)
  * 'indexscandir' is ForwardScanDirection or BackwardScanDirection
  *			for an ordered index, or NoMovementScanDirection for
  *			an unordered index.
+ * 'indexonly' is true if an index-only scan is wanted.
  * 'outer_rel' is the outer relation if this is a join inner indexscan path.
  *			(pathkeys and indexscandir are ignored if so.)	NULL if not.
  *
@@ -430,6 +431,7 @@ create_index_path(PlannerInfo *root,
 				  List *indexorderbys,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
+				  bool indexonly,
 				  RelOptInfo *outer_rel)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
@@ -450,7 +452,7 @@ create_index_path(PlannerInfo *root,
 		indexscandir = NoMovementScanDirection;
 	}
 
-	pathnode->path.pathtype = T_IndexScan;
+	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathkeys = pathkeys;
 
@@ -506,7 +508,8 @@ create_index_path(PlannerInfo *root,
 		pathnode->rows = rel->rows;
 	}
 
-	cost_index(pathnode, root, index, indexquals, indexorderbys, outer_rel);
+	cost_index(pathnode, root, index, indexquals, indexorderbys,
+			   indexonly, outer_rel);
 
 	return pathnode;
 }
@@ -1018,14 +1021,37 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.parent = rel;
 
 	/*
-	 * Treat the output as always unsorted, since we don't necessarily have
-	 * pathkeys to represent it.
+	 * Assume the output is unsorted, since we don't necessarily have pathkeys
+	 * to represent it.  (This might get overridden below.)
 	 */
 	pathnode->path.pathkeys = NIL;
 
 	pathnode->subpath = subpath;
 	pathnode->in_operators = in_operators;
 	pathnode->uniq_exprs = uniq_exprs;
+
+	/*
+	 * If the input is a relation and it has a unique index that proves the
+	 * uniq_exprs are unique, then we don't need to do anything.  Note that
+	 * relation_has_unique_index_for automatically considers restriction
+	 * clauses for the rel, as well.
+	 */
+	if (rel->rtekind == RTE_RELATION && all_btree &&
+		relation_has_unique_index_for(root, rel, NIL,
+									  uniq_exprs, in_operators))
+	{
+		pathnode->umethod = UNIQUE_PATH_NOOP;
+		pathnode->rows = rel->rows;
+		pathnode->path.startup_cost = subpath->startup_cost;
+		pathnode->path.total_cost = subpath->total_cost;
+		pathnode->path.pathkeys = subpath->pathkeys;
+
+		rel->cheapest_unique_path = (Path *) pathnode;
+
+		MemoryContextSwitchTo(oldcontext);
+
+		return pathnode;
+	}
 
 	/*
 	 * If the input is a subquery whose output must be unique already, then we

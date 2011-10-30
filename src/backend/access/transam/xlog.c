@@ -58,6 +58,7 @@
 #include "utils/guc.h"
 #include "utils/ps_status.h"
 #include "utils/relmapper.h"
+#include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "pg_trace.h"
 
@@ -6382,6 +6383,12 @@ StartupXLOG(void)
 		ResetUnloggedRelations(UNLOGGED_RELATION_CLEANUP);
 
 		/*
+		 * Likewise, delete any saved transaction snapshot files that got
+		 * left behind by crashed backends.
+		 */
+		DeleteAllExportedSnapshotFiles();
+
+		/*
 		 * Initialize for Hot Standby, if enabled. We won't let backends in
 		 * yet, not until we've reached the min recovery point specified in
 		 * control file and we've established a recovery snapshot from a
@@ -9067,8 +9074,10 @@ do_pg_start_backup(const char *backupidstr, bool fast, char **labelfile)
 						(errcode_for_file_access(),
 						 errmsg("could not create file \"%s\": %m",
 								BACKUP_LABEL_FILE)));
-			fwrite(labelfbuf.data, labelfbuf.len, 1, fp);
-			if (fflush(fp) || ferror(fp) || FreeFile(fp))
+			if (fwrite(labelfbuf.data, labelfbuf.len, 1, fp) != 1 ||
+				fflush(fp) != 0 ||
+				ferror(fp) ||
+				FreeFile(fp))
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not write file \"%s\": %m",

@@ -477,11 +477,25 @@
      </row>
 
      <row>
+      <entry><structfield>amcanreturn</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>Can the access method return the contents of index entries?</entry>
+     </row>
+
+     <row>
       <entry><structfield>amoptionalkey</structfield></entry>
       <entry><type>bool</type></entry>
       <entry></entry>
       <entry>Does the access method support a scan without any constraint
        for the first index column?</entry>
+     </row>
+
+     <row>
+      <entry><structfield>amsearcharray</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>Does the access method support <literal>ScalarArrayOpExpr</> searches?</entry>
      </row>
 
      <row>
@@ -1641,6 +1655,19 @@
       <entry></entry>
       <entry>
        Number of rows in the table.  This is only an estimate used by the
+       planner.  It is updated by <command>VACUUM</command>,
+       <command>ANALYZE</command>, and a few DDL commands such as
+       <command>CREATE INDEX</command>.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structfield>relallvisible</structfield></entry>
+      <entry><type>int4</type></entry>
+      <entry></entry>
+      <entry>
+       Number of pages that are marked all-visible in the table's
+       visibility map.  This is only an estimate used by the
        planner.  It is updated by <command>VACUUM</command>,
        <command>ANALYZE</command>, and a few DDL commands such as
        <command>CREATE INDEX</command>.

@@ -6467,8 +6467,17 @@ CreateFKCheckTrigger(RangeVar *myRel, Constraint *fkconstraint,
 {
 	CreateTrigStmt *fk_trigger;
 
+	/*
+	 * Note: for a self-referential FK (referencing and referenced tables are
+	 * the same), it is important that the ON UPDATE action fires before the
+	 * CHECK action, since both triggers will fire on the same row during an
+	 * UPDATE event; otherwise the CHECK trigger will be checking a non-final
+	 * state of the row.  Triggers fire in name order, so we ensure this by
+	 * using names like "RI_ConstraintTrigger_a_NNNN" for the action triggers
+	 * and "RI_ConstraintTrigger_c_NNNN" for the check triggers.
+	 */
 	fk_trigger = makeNode(CreateTrigStmt);
-	fk_trigger->trigname = "RI_ConstraintTrigger";
+	fk_trigger->trigname = "RI_ConstraintTrigger_c";
 	fk_trigger->relation = myRel;
 	fk_trigger->row = true;
 	fk_trigger->timing = TRIGGER_TYPE_AFTER;
@@ -6520,18 +6529,11 @@ createForeignKeyTriggers(Relation rel, Constraint *fkconstraint,
 	CommandCounterIncrement();
 
 	/*
-	 * Build and execute a CREATE CONSTRAINT TRIGGER statement for the CHECK
-	 * action for both INSERTs and UPDATEs on the referencing table.
-	 */
-	CreateFKCheckTrigger(myRel, fkconstraint, constraintOid, indexOid, true);
-	CreateFKCheckTrigger(myRel, fkconstraint, constraintOid, indexOid, false);
-
-	/*
 	 * Build and execute a CREATE CONSTRAINT TRIGGER statement for the ON
 	 * DELETE action on the referenced table.
 	 */
 	fk_trigger = makeNode(CreateTrigStmt);
-	fk_trigger->trigname = "RI_ConstraintTrigger";
+	fk_trigger->trigname = "RI_ConstraintTrigger_a";
 	fk_trigger->relation = fkconstraint->pktable;
 	fk_trigger->row = true;
 	fk_trigger->timing = TRIGGER_TYPE_AFTER;
@@ -6584,7 +6586,7 @@ createForeignKeyTriggers(Relation rel, Constraint *fkconstraint,
 	 * UPDATE action on the referenced table.
 	 */
 	fk_trigger = makeNode(CreateTrigStmt);
-	fk_trigger->trigname = "RI_ConstraintTrigger";
+	fk_trigger->trigname = "RI_ConstraintTrigger_a";
 	fk_trigger->relation = fkconstraint->pktable;
 	fk_trigger->row = true;
 	fk_trigger->timing = TRIGGER_TYPE_AFTER;
@@ -6628,6 +6630,16 @@ createForeignKeyTriggers(Relation rel, Constraint *fkconstraint,
 	fk_trigger->args = NIL;
 
 	(void) CreateTrigger(fk_trigger, NULL, constraintOid, indexOid, true);
+
+	/* Make changes-so-far visible */
+	CommandCounterIncrement();
+
+	/*
+	 * Build and execute CREATE CONSTRAINT TRIGGER statements for the CHECK
+	 * action for both INSERTs and UPDATEs on the referencing table.
+	 */
+	CreateFKCheckTrigger(myRel, fkconstraint, constraintOid, indexOid, true);
+	CreateFKCheckTrigger(myRel, fkconstraint, constraintOid, indexOid, false);
 }
 
 /*
@@ -6734,6 +6746,7 @@ ATExecDropConstraint(Relation rel, const char *constrName,
 	{
 		Oid			childrelid = lfirst_oid(child);
 		Relation	childrel;
+		HeapTuple	copy_tuple;
 
 		/* find_inheritance_children already got lock */
 		childrel = heap_open(childrelid, NoLock);
@@ -6746,83 +6759,79 @@ ATExecDropConstraint(Relation rel, const char *constrName,
 		scan = systable_beginscan(conrel, ConstraintRelidIndexId,
 								  true, SnapshotNow, 1, &key);
 
-		found = false;
-
+		/* scan for matching tuple - there should only be one */
 		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		{
-			HeapTuple	copy_tuple;
-
 			con = (Form_pg_constraint) GETSTRUCT(tuple);
 
 			/* Right now only CHECK constraints can be inherited */
 			if (con->contype != CONSTRAINT_CHECK)
 				continue;
 
-			if (strcmp(NameStr(con->conname), constrName) != 0)
-				continue;
+			if (strcmp(NameStr(con->conname), constrName) == 0)
+				break;
+		}
 
-			found = true;
+		if (!HeapTupleIsValid(tuple))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+				errmsg("constraint \"%s\" of relation \"%s\" does not exist",
+					   constrName,
+					   RelationGetRelationName(childrel))));
 
-			if (con->coninhcount <= 0)	/* shouldn't happen */
-				elog(ERROR, "relation %u has non-inherited constraint \"%s\"",
-					 childrelid, constrName);
+		copy_tuple = heap_copytuple(tuple);
 
-			copy_tuple = heap_copytuple(tuple);
-			con = (Form_pg_constraint) GETSTRUCT(copy_tuple);
+		systable_endscan(scan);
 
-			if (recurse)
+		con = (Form_pg_constraint) GETSTRUCT(copy_tuple);
+
+		if (con->coninhcount <= 0)	/* shouldn't happen */
+			elog(ERROR, "relation %u has non-inherited constraint \"%s\"",
+				 childrelid, constrName);
+
+		if (recurse)
+		{
+			/*
+			 * If the child constraint has other definition sources, just
+			 * decrement its inheritance count; if not, recurse to delete
+			 * it.
+			 */
+			if (con->coninhcount == 1 && !con->conislocal)
 			{
-				/*
-				 * If the child constraint has other definition sources, just
-				 * decrement its inheritance count; if not, recurse to delete
-				 * it.
-				 */
-				if (con->coninhcount == 1 && !con->conislocal)
-				{
-					/* Time to delete this child constraint, too */
-					ATExecDropConstraint(childrel, constrName, behavior,
-										 true, true,
-										 false, lockmode);
-				}
-				else
-				{
-					/* Child constraint must survive my deletion */
-					con->coninhcount--;
-					simple_heap_update(conrel, &copy_tuple->t_self, copy_tuple);
-					CatalogUpdateIndexes(conrel, copy_tuple);
-
-					/* Make update visible */
-					CommandCounterIncrement();
-				}
+				/* Time to delete this child constraint, too */
+				ATExecDropConstraint(childrel, constrName, behavior,
+									 true, true,
+									 false, lockmode);
 			}
 			else
 			{
-				/*
-				 * If we were told to drop ONLY in this table (no recursion),
-				 * we need to mark the inheritors' constraints as locally
-				 * defined rather than inherited.
-				 */
+				/* Child constraint must survive my deletion */
 				con->coninhcount--;
-				con->conislocal = true;
-
 				simple_heap_update(conrel, &copy_tuple->t_self, copy_tuple);
 				CatalogUpdateIndexes(conrel, copy_tuple);
 
 				/* Make update visible */
 				CommandCounterIncrement();
 			}
+		}
+		else
+		{
+			/*
+			 * If we were told to drop ONLY in this table (no recursion),
+			 * we need to mark the inheritors' constraints as locally
+			 * defined rather than inherited.
+			 */
+			con->coninhcount--;
+			con->conislocal = true;
 
-			heap_freetuple(copy_tuple);
+			simple_heap_update(conrel, &copy_tuple->t_self, copy_tuple);
+			CatalogUpdateIndexes(conrel, copy_tuple);
+
+			/* Make update visible */
+			CommandCounterIncrement();
 		}
 
-		systable_endscan(scan);
-
-		if (!found)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-				errmsg("constraint \"%s\" of relation \"%s\" does not exist",
-					   constrName,
-					   RelationGetRelationName(childrel))));
+		heap_freetuple(copy_tuple);
 
 		heap_close(childrel, NoLock);
 	}

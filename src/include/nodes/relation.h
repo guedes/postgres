@@ -319,6 +319,7 @@ typedef struct PlannerInfo
  *					(always NIL if it's not a table)
  *		pages - number of disk pages in relation (zero if not a table)
  *		tuples - number of tuples in relation (not considering restrictions)
+ *		allvisfrac - fraction of disk pages that are marked all-visible
  *		subplan - plan for subquery (NULL if it's not a subquery)
  *		subroot - PlannerInfo for subquery (NULL if it's not a subquery)
  *
@@ -402,8 +403,9 @@ typedef struct RelOptInfo
 	Relids	   *attr_needed;	/* array indexed [min_attr .. max_attr] */
 	int32	   *attr_widths;	/* array indexed [min_attr .. max_attr] */
 	List	   *indexlist;		/* list of IndexOptInfo */
-	BlockNumber pages;
+	BlockNumber pages;			/* size estimates derived from pg_class */
 	double		tuples;
+	double		allvisfrac;
 	struct Plan *subplan;		/* if subquery */
 	PlannerInfo *subroot;		/* if subquery */
 
@@ -449,6 +451,10 @@ typedef struct RelOptInfo
  *		The indexprs and indpred expressions have been run through
  *		prepqual.c and eval_const_expressions() for ease of matching to
  *		WHERE clauses. indpred is in implicit-AND form.
+ *
+ *		indextlist is a TargetEntry list representing the index columns.
+ *		It provides an equivalent base-relation Var for each simple column,
+ *		and links to the matching indexprs element for each expression column.
  */
 typedef struct IndexOptInfo
 {
@@ -478,11 +484,16 @@ typedef struct IndexOptInfo
 	List	   *indexprs;		/* expressions for non-simple index columns */
 	List	   *indpred;		/* predicate if a partial index, else NIL */
 
+	List	   *indextlist;		/* targetlist representing index columns */
+
 	bool		predOK;			/* true if predicate matches query */
 	bool		unique;			/* true if a unique index */
+	bool		immediate;		/* is uniqueness enforced immediately? */
 	bool		hypothetical;	/* true if index doesn't really exist */
 	bool		amcanorderbyop; /* does AM support order by operator result? */
+	bool		amcanreturn;	/* can AM return IndexTuples? */
 	bool		amoptionalkey;	/* can query omit key for the first column? */
+	bool		amsearcharray;	/* can AM handle ScalarArrayOpExpr quals? */
 	bool		amsearchnulls;	/* can AM search for NULL/NOT NULL entries? */
 	bool		amhasgettuple;	/* does AM have amgettuple interface? */
 	bool		amhasgetbitmap; /* does AM have amgetbitmap interface? */
@@ -639,6 +650,9 @@ typedef struct Path
 /*----------
  * IndexPath represents an index scan over a single index.
  *
+ * This struct is used for both regular indexscans and index-only scans;
+ * path.pathtype is T_IndexScan or T_IndexOnlyScan to show which is meant.
+ *
  * 'indexinfo' is the index to be scanned.
  *
  * 'indexclauses' is a list of index qualification clauses, with implicit
@@ -675,7 +689,7 @@ typedef struct Path
  * 'indextotalcost' and 'indexselectivity' are saved in the IndexPath so that
  * we need not recompute them when considering using the same index in a
  * bitmap index/heap scan (see BitmapHeapPath).  The costs of the IndexPath
- * itself represent the costs of an IndexScan plan type.
+ * itself represent the costs of an IndexScan or IndexOnlyScan plan type.
  *
  * 'rows' is the estimated result tuple count for the indexscan.  This
  * is the same as path.parent->rows for a simple indexscan, but it is
@@ -708,11 +722,12 @@ typedef struct IndexPath
  * The individual indexscans are represented by IndexPath nodes, and any
  * logic on top of them is represented by a tree of BitmapAndPath and
  * BitmapOrPath nodes.	Notice that we can use the same IndexPath node both
- * to represent a regular IndexScan plan, and as the child of a BitmapHeapPath
- * that represents scanning the same index using a BitmapIndexScan.  The
- * startup_cost and total_cost figures of an IndexPath always represent the
- * costs to use it as a regular IndexScan.	The costs of a BitmapIndexScan
- * can be computed using the IndexPath's indextotalcost and indexselectivity.
+ * to represent a regular (or index-only) index scan plan, and as the child
+ * of a BitmapHeapPath that represents scanning the same index using a
+ * BitmapIndexScan.  The startup_cost and total_cost figures of an IndexPath
+ * always represent the costs to use it as a regular (or index-only)
+ * IndexScan.  The costs of a BitmapIndexScan can be computed using the
+ * IndexPath's indextotalcost and indexselectivity.
  *
  * BitmapHeapPaths can be nestloop inner indexscans.  The isjoininner and
  * rows fields serve the same purpose as for plain IndexPaths.
