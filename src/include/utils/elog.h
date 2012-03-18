@@ -4,7 +4,7 @@
  *	  POSTGRES error reporting/logging definitions.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/elog.h
@@ -333,6 +333,10 @@ extern void FreeErrorData(ErrorData *edata);
 extern void FlushErrorState(void);
 extern void ReThrowError(ErrorData *edata);
 extern void pg_re_throw(void) __attribute__((noreturn));
+
+/* Hook for intercepting messages before they are sent to the server log */
+typedef void (*emit_log_hook_type) (ErrorData *edata);
+extern PGDLLIMPORT emit_log_hook_type emit_log_hook;
 
 
 /* GUC-configurable parameters */

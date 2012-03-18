@@ -3,7 +3,7 @@
  * catcache.c
  *	  System catalog cache for tuples matching a key.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,6 +19,7 @@
 #include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
+#include "access/tuptoaster.h"
 #include "access/valid.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
@@ -1281,6 +1282,46 @@ ReleaseCatCache(HeapTuple tuple)
 
 
 /*
+ *	GetCatCacheHashValue
+ *
+ *		Compute the hash value for a given set of search keys.
+ *
+ * The reason for exposing this as part of the API is that the hash value is
+ * exposed in cache invalidation operations, so there are places outside the
+ * catcache code that need to be able to compute the hash values.
+ */
+uint32
+GetCatCacheHashValue(CatCache *cache,
+					 Datum v1,
+					 Datum v2,
+					 Datum v3,
+					 Datum v4)
+{
+	ScanKeyData cur_skey[CATCACHE_MAXKEYS];
+
+	/*
+	 * one-time startup overhead for each cache
+	 */
+	if (cache->cc_tupdesc == NULL)
+		CatalogCacheInitializeCache(cache);
+
+	/*
+	 * initialize the search key information
+	 */
+	memcpy(cur_skey, cache->cc_skey, sizeof(cur_skey));
+	cur_skey[0].sk_argument = v1;
+	cur_skey[1].sk_argument = v2;
+	cur_skey[2].sk_argument = v3;
+	cur_skey[3].sk_argument = v4;
+
+	/*
+	 * calculate the hash value
+	 */
+	return CatalogCacheComputeHashValue(cache, cache->cc_nkeys, cur_skey);
+}
+
+
+/*
  *	SearchCatCacheList
  *
  *		Generate a list of all tuples matching a partial key (that is,
@@ -1591,15 +1632,31 @@ CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp,
 						uint32 hashValue, Index hashIndex, bool negative)
 {
 	CatCTup    *ct;
+	HeapTuple	dtp;
 	MemoryContext oldcxt;
+
+	/*
+	 * If there are any out-of-line toasted fields in the tuple, expand them
+	 * in-line.  This saves cycles during later use of the catcache entry,
+	 * and also protects us against the possibility of the toast tuples being
+	 * freed before we attempt to fetch them, in case of something using a
+	 * slightly stale catcache entry.
+	 */
+	if (HeapTupleHasExternal(ntp))
+		dtp = toast_flatten_tuple(ntp, cache->cc_tupdesc);
+	else
+		dtp = ntp;
 
 	/*
 	 * Allocate CatCTup header in cache memory, and copy the tuple there too.
 	 */
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 	ct = (CatCTup *) palloc(sizeof(CatCTup));
-	heap_copytuple_with_tuple(ntp, &ct->tuple);
+	heap_copytuple_with_tuple(dtp, &ct->tuple);
 	MemoryContextSwitchTo(oldcxt);
+
+	if (dtp != ntp)
+		heap_freetuple(dtp);
 
 	/*
 	 * Finish initializing the CatCTup header, and add it to the cache's

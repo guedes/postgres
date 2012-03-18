@@ -5,7 +5,7 @@
  * Interactions between userspace and selinux in kernelspace,
  * using libselinux api.
  *
- * Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
@@ -44,6 +44,12 @@ static struct
 		{
 			{
 				"transition", SEPG_PROCESS__TRANSITION
+			},
+			{
+				"dyntransition", SEPG_PROCESS__DYNTRANSITION
+			},
+			{
+				"setcurrent", SEPG_PROCESS__SETCURRENT
 			},
 			{
 				NULL, 0UL

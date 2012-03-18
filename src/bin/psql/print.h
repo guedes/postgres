@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2012, PostgreSQL Global Development Group
  *
  * src/bin/psql/print.h
  */
@@ -67,11 +67,17 @@ typedef struct printTextFormat
 										 * marks when border=0? */
 } printTextFormat;
 
+struct separator
+{
+	char	   *separator;
+	bool		separator_zero;
+};
+
 typedef struct printTableOpt
 {
 	enum printFormat format;	/* see enum above */
-	bool		expanded;		/* expanded/vertical output (if supported by
-								 * output format) */
+	unsigned short int expanded;/* expanded/vertical output (if supported by
+								 * output format); 0=no, 1=yes, 2=auto */
 	unsigned short int border;	/* Print a border around the table. 0=none,
 								 * 1=dividing lines, 2=full */
 	unsigned short int pager;	/* use pager for output (if to stdout and
@@ -81,8 +87,8 @@ typedef struct printTableOpt
 	bool		stop_table;		/* print stop decoration, eg </table> */
 	unsigned long prior_records;	/* start offset for record counters */
 	const printTextFormat *line_style;	/* line style (NULL for default) */
-	char	   *fieldSep;		/* field separator for unaligned text mode */
-	char	   *recordSep;		/* record separator for unaligned text mode */
+	struct separator fieldSep;	/* field separator for unaligned text mode */
+	struct separator recordSep;	/* record separator for unaligned text mode */
 	bool		numericLocale;	/* locale-aware numeric units separator and
 								 * decimal marker */
 	char	   *tableAttr;		/* attributes for HTML <table ...> */
@@ -156,9 +162,9 @@ extern void printTableInit(printTableContent *const content,
 			   const printTableOpt *opt, const char *title,
 			   const int ncolumns, const int nrows);
 extern void printTableAddHeader(printTableContent *const content,
-				 const char *header, const bool translate, const char align);
+				 char *header, const bool translate, const char align);
 extern void printTableAddCell(printTableContent *const content,
-				const char *cell, const bool translate, const bool mustfree);
+				char *cell, const bool translate, const bool mustfree);
 extern void printTableAddFooter(printTableContent *const content,
 					const char *footer);
 extern void printTableSetFooter(printTableContent *const content,

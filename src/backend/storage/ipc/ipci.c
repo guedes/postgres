@@ -3,7 +3,7 @@
  * ipci.c
  *	  POSTGRES inter-process communication initialization code.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -192,7 +192,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	XLOGShmemInit();
 	CLOGShmemInit();
 	SUBTRANSShmemInit();
-	TwoPhaseShmemInit();
 	MultiXactShmemInit();
 	InitBufferPool();
 
@@ -213,6 +212,7 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 		InitProcGlobal();
 	CreateSharedProcArray();
 	CreateSharedBackendStatus();
+	TwoPhaseShmemInit();
 
 	/*
 	 * Set up shared-inval messaging

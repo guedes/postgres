@@ -4,7 +4,7 @@
  *	  local buffer manager. Fast buffer manager for temporary tables,
  *	  which never need to be WAL-logged or checkpointed, etc.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -276,6 +276,10 @@ MarkLocalBufferDirty(Buffer buffer)
 	Assert(LocalRefCount[bufid] > 0);
 
 	bufHdr = &LocalBufferDescriptors[bufid];
+
+	if (!(bufHdr->flags & BM_DIRTY))
+		pgBufferUsage.local_blks_dirtied++;
+
 	bufHdr->flags |= BM_DIRTY;
 }
 

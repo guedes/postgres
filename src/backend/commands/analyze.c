@@ -3,7 +3,7 @@
  * analyze.c
  *	  the Postgres statistics generator
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -47,8 +47,8 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
+#include "utils/sortsupport.h"
 #include "utils/syscache.h"
-#include "utils/tuplesort.h"
 #include "utils/timestamp.h"
 #include "utils/tqual.h"
 
@@ -109,8 +109,6 @@ static void update_attstats(Oid relid, bool inh,
 				int natts, VacAttrStats **vacattrstats);
 static Datum std_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
 static Datum ind_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
-
-static bool std_typanalyze(VacAttrStats *stats);
 
 
 /*
@@ -223,7 +221,7 @@ analyze_rel(Oid relid, VacuumStmt *vacstmt, BufferAccessStrategy bstrategy)
 	 * OK, let's do it.  First let other backends know I'm in ANALYZE.
 	 */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->vacuumFlags |= PROC_IN_ANALYZE;
+	MyPgXact->vacuumFlags |= PROC_IN_ANALYZE;
 	LWLockRelease(ProcArrayLock);
 
 	/*
@@ -250,7 +248,7 @@ analyze_rel(Oid relid, VacuumStmt *vacstmt, BufferAccessStrategy bstrategy)
 	 * because the vacuum flag is cleared by the end-of-xact code.
 	 */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->vacuumFlags &= ~PROC_IN_ANALYZE;
+	MyPgXact->vacuumFlags &= ~PROC_IN_ANALYZE;
 	LWLockRelease(ProcArrayLock);
 }
 
@@ -476,8 +474,7 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt, bool inh)
 		for (i = 0; i < attr_cnt; i++)
 		{
 			VacAttrStats *stats = vacattrstats[i];
-			AttributeOpts *aopt =
-			get_attribute_options(onerel->rd_id, stats->attr->attnum);
+			AttributeOpts *aopt;
 
 			stats->rows = rows;
 			stats->tupDesc = onerel->rd_att;
@@ -490,11 +487,12 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt, bool inh)
 			 * If the appropriate flavor of the n_distinct option is
 			 * specified, override with the corresponding value.
 			 */
+			aopt = get_attribute_options(onerel->rd_id, stats->attr->attnum);
 			if (aopt != NULL)
 			{
-				float8		n_distinct =
-				inh ? aopt->n_distinct_inherited : aopt->n_distinct;
+				float8		n_distinct;
 
+				n_distinct = inh ? aopt->n_distinct_inherited : aopt->n_distinct;
 				if (n_distinct != 0.0)
 					stats->stadistinct = n_distinct;
 			}
@@ -1774,8 +1772,7 @@ typedef struct
 
 typedef struct
 {
-	FmgrInfo   *cmpFn;
-	int			cmpFlags;
+	SortSupport ssup;
 	int		   *tupnoLink;
 } CompareScalarsContext;
 
@@ -1795,7 +1792,7 @@ static int	compare_mcvs(const void *a, const void *b);
 /*
  * std_typanalyze -- the default type-specific typanalyze function
  */
-static bool
+bool
 std_typanalyze(VacAttrStats *stats)
 {
 	Form_pg_attribute attr = stats->attr;
@@ -2222,9 +2219,7 @@ compute_scalar_stats(VacAttrStatsP stats,
 	bool		is_varwidth = (!stats->attrtype->typbyval &&
 							   stats->attrtype->typlen < 0);
 	double		corr_xysum;
-	Oid			cmpFn;
-	int			cmpFlags;
-	FmgrInfo	f_cmpfn;
+	SortSupportData ssup;
 	ScalarItem *values;
 	int			values_cnt = 0;
 	int		   *tupnoLink;
@@ -2238,8 +2233,13 @@ compute_scalar_stats(VacAttrStatsP stats,
 	tupnoLink = (int *) palloc(samplerows * sizeof(int));
 	track = (ScalarMCVItem *) palloc(num_mcv * sizeof(ScalarMCVItem));
 
-	SelectSortFunction(mystats->ltopr, false, &cmpFn, &cmpFlags);
-	fmgr_info(cmpFn, &f_cmpfn);
+	memset(&ssup, 0, sizeof(ssup));
+	ssup.ssup_cxt = CurrentMemoryContext;
+	/* We always use the default collation for statistics */
+	ssup.ssup_collation = DEFAULT_COLLATION_OID;
+	ssup.ssup_nulls_first = false;
+
+	PrepareSortSupportFromOrderingOp(mystats->ltopr, &ssup);
 
 	/* Initial scan to find sortable values */
 	for (i = 0; i < samplerows; i++)
@@ -2307,8 +2307,7 @@ compute_scalar_stats(VacAttrStatsP stats,
 		CompareScalarsContext cxt;
 
 		/* Sort the collected values */
-		cxt.cmpFn = &f_cmpfn;
-		cxt.cmpFlags = cmpFlags;
+		cxt.ssup = &ssup;
 		cxt.tupnoLink = tupnoLink;
 		qsort_arg((void *) values, values_cnt, sizeof(ScalarItem),
 				  compare_scalars, (void *) &cxt);
@@ -2712,12 +2711,9 @@ compare_scalars(const void *a, const void *b, void *arg)
 	Datum		db = ((const ScalarItem *) b)->value;
 	int			tb = ((const ScalarItem *) b)->tupno;
 	CompareScalarsContext *cxt = (CompareScalarsContext *) arg;
-	int32		compare;
+	int			compare;
 
-	/* We always use the default collation for statistics */
-	compare = ApplySortFunction(cxt->cmpFn, cxt->cmpFlags,
-								DEFAULT_COLLATION_OID,
-								da, false, db, false);
+	compare = ApplySortComparator(da, false, db, false, cxt->ssup);
 	if (compare != 0)
 		return compare;
 

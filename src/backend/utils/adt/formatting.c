@@ -4,7 +4,7 @@
  * src/backend/utils/adt/formatting.c
  *
  *
- *	 Portions Copyright (c) 1999-2011, PostgreSQL Global Development Group
+ *	 Portions Copyright (c) 1999-2012, PostgreSQL Global Development Group
  *
  *
  *	 TO_CHAR(); TO_TIMESTAMP(); TO_DATE(); TO_NUMBER();
@@ -459,7 +459,7 @@ typedef struct TmToChar
 {
 	struct pg_tm tm;			/* classic 'tm' struct */
 	fsec_t		fsec;			/* fractional seconds */
-	char	   *tzn;			/* timezone */
+	const char *tzn;			/* timezone */
 } TmToChar;
 
 #define tmtcTm(_X)	(&(_X)->tm)
@@ -1012,7 +1012,7 @@ index_seq_search(char *str, const KeyWord *kw, const int *index)
 
 		do
 		{
-			if (!strncmp(str, k->name, k->len))
+			if (strncmp(str, k->name, k->len) == 0)
 				return k;
 			k++;
 			if (!k->name)
@@ -1032,7 +1032,7 @@ suff_search(char *str, KeySuffix *suf, int type)
 		if (s->type != type)
 			continue;
 
-		if (!strncmp(str, s->name, s->len))
+		if (strncmp(str, s->name, s->len) == 0)
 			return s;
 	}
 	return NULL;
@@ -1104,6 +1104,7 @@ NUMDesc_prepare(NUMDesc *num, FormatNode *n)
 			case NUM_D:
 				num->flag |= NUM_F_LDECIMAL;
 				num->need_locale = TRUE;
+				/* FALLTHROUGH */
 			case NUM_DEC:
 				if (IS_DECIMAL(num))
 					ereport(ERROR,
@@ -1554,7 +1555,9 @@ str_tolower(const char *buff, size_t nbytes, Oid collid)
 #endif   /* USE_WIDE_UPPER_LOWER */
 	else
 	{
+#ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
+#endif
 		char	   *p;
 
 		if (collid != DEFAULT_COLLATION_OID)
@@ -1570,7 +1573,9 @@ str_tolower(const char *buff, size_t nbytes, Oid collid)
 						 errmsg("could not determine which collation to use for lower() function"),
 						 errhint("Use the COLLATE clause to set the collation explicitly.")));
 			}
+#ifdef HAVE_LOCALE_T
 			mylocale = pg_newlocale_from_collation(collid);
+#endif
 		}
 
 		result = pnstrdup(buff, nbytes);
@@ -1675,7 +1680,9 @@ str_toupper(const char *buff, size_t nbytes, Oid collid)
 #endif   /* USE_WIDE_UPPER_LOWER */
 	else
 	{
+#ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
+#endif
 		char	   *p;
 
 		if (collid != DEFAULT_COLLATION_OID)
@@ -1691,7 +1698,9 @@ str_toupper(const char *buff, size_t nbytes, Oid collid)
 						 errmsg("could not determine which collation to use for upper() function"),
 						 errhint("Use the COLLATE clause to set the collation explicitly.")));
 			}
+#ifdef HAVE_LOCALE_T
 			mylocale = pg_newlocale_from_collation(collid);
+#endif
 		}
 
 		result = pnstrdup(buff, nbytes);
@@ -1820,7 +1829,9 @@ str_initcap(const char *buff, size_t nbytes, Oid collid)
 #endif   /* USE_WIDE_UPPER_LOWER */
 	else
 	{
+#ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
+#endif
 		char	   *p;
 
 		if (collid != DEFAULT_COLLATION_OID)
@@ -1836,7 +1847,9 @@ str_initcap(const char *buff, size_t nbytes, Oid collid)
 						 errmsg("could not determine which collation to use for initcap() function"),
 						 errhint("Use the COLLATE clause to set the collation explicitly.")));
 			}
+#ifdef HAVE_LOCALE_T
 			mylocale = pg_newlocale_from_collation(collid);
+#endif
 		}
 
 		result = pnstrdup(buff, nbytes);

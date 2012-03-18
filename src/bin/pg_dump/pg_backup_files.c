@@ -26,6 +26,8 @@
  */
 
 #include "pg_backup_archiver.h"
+#include "dumputils.h"
+#include "dumpmem.h"
 
 static void _ArchiveEntry(ArchiveHandle *AH, TocEntry *te);
 static void _StartData(ArchiveHandle *AH, TocEntry *te);
@@ -58,7 +60,7 @@ typedef struct
 typedef struct
 {
 #ifdef HAVE_LIBZ
-	gzFile	   *FH;
+	gzFile		FH;
 #else
 	FILE	   *FH;
 #endif
@@ -103,15 +105,13 @@ InitArchiveFmt_Files(ArchiveHandle *AH)
 	/*
 	 * Set up some special context used in compressing data.
 	 */
-	ctx = (lclContext *) calloc(1, sizeof(lclContext));
+	ctx = (lclContext *) pg_calloc(1, sizeof(lclContext));
 	AH->formatData = (void *) ctx;
 	ctx->filePos = 0;
 
 	/* Initialize LO buffering */
 	AH->lo_buf_size = LOBBUFSIZE;
-	AH->lo_buf = (void *) malloc(LOBBUFSIZE);
-	if (AH->lo_buf == NULL)
-		die_horribly(AH, modulename, "out of memory\n");
+	AH->lo_buf = (void *) pg_malloc(LOBBUFSIZE);
 
 	/*
 	 * Now open the TOC file
@@ -127,15 +127,15 @@ InitArchiveFmt_Files(ArchiveHandle *AH)
 		{
 			AH->FH = fopen(AH->fSpec, PG_BINARY_W);
 			if (AH->FH == NULL)
-				die_horribly(NULL, modulename, "could not open output file \"%s\": %s\n",
-							 AH->fSpec, strerror(errno));
+				exit_horribly(modulename, "could not open output file \"%s\": %s\n",
+							  AH->fSpec, strerror(errno));
 		}
 		else
 		{
 			AH->FH = stdout;
 			if (AH->FH == NULL)
-				die_horribly(NULL, modulename, "could not open output file: %s\n",
-							 strerror(errno));
+				exit_horribly(modulename, "could not open output file: %s\n",
+							  strerror(errno));
 		}
 
 		ctx->hasSeek = checkSeek(AH->FH);
@@ -152,15 +152,15 @@ InitArchiveFmt_Files(ArchiveHandle *AH)
 		{
 			AH->FH = fopen(AH->fSpec, PG_BINARY_R);
 			if (AH->FH == NULL)
-				die_horribly(NULL, modulename, "could not open input file \"%s\": %s\n",
-							 AH->fSpec, strerror(errno));
+				exit_horribly(modulename, "could not open input file \"%s\": %s\n",
+							  AH->fSpec, strerror(errno));
 		}
 		else
 		{
 			AH->FH = stdin;
 			if (AH->FH == NULL)
-				die_horribly(NULL, modulename, "could not open input file: %s\n",
-							 strerror(errno));
+				exit_horribly(modulename, "could not open input file: %s\n",
+							  strerror(errno));
 		}
 
 		ctx->hasSeek = checkSeek(AH->FH);
@@ -183,7 +183,7 @@ _ArchiveEntry(ArchiveHandle *AH, TocEntry *te)
 	lclTocEntry *ctx;
 	char		fn[K_STD_BUF_SIZE];
 
-	ctx = (lclTocEntry *) calloc(1, sizeof(lclTocEntry));
+	ctx = (lclTocEntry *) pg_calloc(1, sizeof(lclTocEntry));
 	if (te->dataDumper)
 	{
 #ifdef HAVE_LIBZ
@@ -194,7 +194,7 @@ _ArchiveEntry(ArchiveHandle *AH, TocEntry *te)
 #else
 		sprintf(fn, "%d.dat", te->dumpId);
 #endif
-		ctx->filename = strdup(fn);
+		ctx->filename = pg_strdup(fn);
 	}
 	else
 	{
@@ -222,7 +222,7 @@ _ReadExtraToc(ArchiveHandle *AH, TocEntry *te)
 
 	if (ctx == NULL)
 	{
-		ctx = (lclTocEntry *) calloc(1, sizeof(lclTocEntry));
+		ctx = (lclTocEntry *) pg_calloc(1, sizeof(lclTocEntry));
 		te->formatData = (void *) ctx;
 	}
 

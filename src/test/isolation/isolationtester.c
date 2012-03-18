@@ -14,6 +14,13 @@
 #ifndef WIN32
 #include <sys/time.h>
 #include <unistd.h>
+
+#ifdef HAVE_GETOPT_H
+#include <getopt.h>
+#endif
+
+#else
+int			getopt(int argc, char *const argv[], const char *optstring);
 #endif   /* ! WIN32 */
 
 #ifdef HAVE_SYS_SELECT_H
@@ -25,6 +32,8 @@
 
 #include "isolationtester.h"
 
+extern int	optind;
+
 #define PREP_WAITING "isolationtester_waiting"
 
 /*
@@ -35,6 +44,10 @@ static PGconn **conns = NULL;
 static const char **backend_pids = NULL;
 static int	nconns = 0;
 
+/* In dry run only output permutations to be run by the tester. */
+static int	dry_run = false;
+
+static void run_testspec(TestSpec *testspec);
 static void run_all_permutations(TestSpec * testspec);
 static void run_all_permutations_recurse(TestSpec * testspec, int nsteps,
 							 Step ** steps);
@@ -69,20 +82,46 @@ main(int argc, char **argv)
 	int			i;
 	PGresult   *res;
 	PQExpBufferData wait_query;
+	int opt;
+
+	while ((opt = getopt(argc, argv, "n")) != -1)
+	{
+		switch (opt)
+		{
+			case 'n':
+				dry_run = true;
+				break;
+			default:
+				fprintf(stderr, "Usage: isolationtester [-n] [CONNINFO]\n");
+				return EXIT_FAILURE;
+		}
+	}
 
 	/*
-	 * If the user supplies a parameter on the command line, use it as the
-	 * conninfo string; otherwise default to setting dbname=postgres and using
-	 * environment variables or defaults for all other connection parameters.
+	 * If the user supplies a non-option parameter on the command line, use it
+	 * as the conninfo string; otherwise default to setting dbname=postgres and
+	 * using environment variables or defaults for all other connection
+	 * parameters.
 	 */
-	if (argc > 1)
-		conninfo = argv[1];
+	if (argc > optind)
+		conninfo = argv[optind];
 	else
 		conninfo = "dbname = postgres";
 
 	/* Read the test spec from stdin */
 	spec_yyparse();
 	testspec = &parseresult;
+
+	/*
+	 * In dry-run mode, just print the permutations that would be run, and
+	 * exit.
+	 */
+	if (dry_run)
+	{
+		run_testspec(testspec);
+		return 0;
+	}
+
 	printf("Parsed test spec with %d sessions\n", testspec->nsessions);
 
 	/*
@@ -240,10 +279,7 @@ main(int argc, char **argv)
 	 * Run the permutations specified in the spec, or all if none were
 	 * explicitly specified.
 	 */
-	if (testspec->permutations)
-		run_named_permutations(testspec);
-	else
-		run_all_permutations(testspec);
+	run_testspec(testspec);
 
 	/* Clean up and exit */
 	for (i = 0; i < nconns; i++)
@@ -252,6 +288,19 @@ main(int argc, char **argv)
 }
 
 static int *piles;
+
+/*
+ * Run the permutations specified in the spec, or all if none were
+ * explicitly specified.
+ */
+static void
+run_testspec(TestSpec *testspec)
+{
+	if (testspec->permutations)
+		run_named_permutations(testspec);
+	else
+		run_all_permutations(testspec);
+}
 
 /*
  * Run all permutations of the steps and sessions.
@@ -348,19 +397,24 @@ run_named_permutations(TestSpec * testspec)
 
 		steps = malloc(p->nsteps * sizeof(Step *));
 
-		/* Find all the named steps from the lookup table */
+		/* Find all the named steps using the lookup table */
 		for (j = 0; j < p->nsteps; j++)
 		{
-			steps[j] = *((Step **) bsearch(p->stepnames[j], allsteps, nallsteps,
-										 sizeof(Step *), &step_bsearch_cmp));
-			if (steps[j] == NULL)
+			Step	**this = (Step **) bsearch(p->stepnames[j], allsteps,
+											   nallsteps, sizeof(Step *),
+											   &step_bsearch_cmp);
+			if (this == NULL)
 			{
-				fprintf(stderr, "undefined step \"%s\" specified in permutation\n", p->stepnames[j]);
+				fprintf(stderr, "undefined step \"%s\" specified in permutation\n",
+						p->stepnames[j]);
 				exit_nicely();
 			}
+			steps[j] = *this;
 		}
 
+		/* And run them */
 		run_permutation(testspec, p->nsteps, steps);
+
 		free(steps);
 	}
 }
@@ -425,6 +479,8 @@ report_two_error_messages(Step *step1, Step *step2)
 		free(step2->errormsg);
 		step2->errormsg = NULL;
 	}
+
+	free(prefix);
 }
 
 /*
@@ -436,6 +492,19 @@ run_permutation(TestSpec * testspec, int nsteps, Step ** steps)
 	PGresult   *res;
 	int			i;
 	Step	   *waiting = NULL;
+
+	/*
+	 * In dry run mode, just display the permutation in the same format used by
+	 * spec files, and return.
+	 */
+	if (dry_run)
+	{
+		printf("permutation");
+		for (i = 0; i < nsteps; i++)
+			printf(" \"%s\"", steps[i]->name);
+		printf("\n");
+		return;
+	}
 
 	printf("\nstarting permutation:");
 	for (i = 0; i < nsteps; i++)
@@ -479,8 +548,53 @@ run_permutation(TestSpec * testspec, int nsteps, Step ** steps)
 	for (i = 0; i < nsteps; i++)
 	{
 		Step *step = steps[i];
+		PGconn *conn = conns[1 + step->session];
 
-		if (!PQsendQuery(conns[1 + step->session], step->sql))
+		if (waiting != NULL && step->session == waiting->session)
+		{
+			PGcancel *cancel;
+			PGresult *res;
+			int j;
+
+			/*
+			 * This permutation is invalid: it can never happen in real life.
+			 *
+			 * A session is blocked on an earlier step (waiting) and no further
+			 * steps from this session can run until it is unblocked, but it
+			 * can only be unblocked by running steps from other sessions.
+			 */
+			fprintf(stderr, "invalid permutation detected\n");
+
+			/* Cancel the waiting statement from this session. */
+			cancel = PQgetCancel(conn);
+			if (cancel != NULL)
+			{
+				char buf[256];
+
+				PQcancel(cancel, buf, sizeof(buf));
+
+				/* Be sure to consume the error message. */
+				while ((res = PQgetResult(conn)) != NULL)
+					PQclear(res);
+
+				PQfreeCancel(cancel);
+			}
+
+			/*
+			 * Now we really have to complete all the running transactions to
+			 * make sure teardown doesn't block.
+			 */
+			for (j = 1; j < nconns; j++)
+			{
+				res = PQexec(conns[j], "ROLLBACK");
+				if (res != NULL)
+					PQclear(res);
+			}
+
+			goto teardown;
+		}
+
+		if (!PQsendQuery(conn, step->sql))
 		{
 			fprintf(stdout, "failed to send query for step %s: %s\n",
 					step->name, PQerrorMessage(conns[1 + step->session]));
@@ -519,6 +633,7 @@ run_permutation(TestSpec * testspec, int nsteps, Step ** steps)
 		report_error_message(waiting);
 	}
 
+teardown:
 	/* Perform per-session teardown */
 	for (i = 0; i < testspec->nsessions; i++)
 	{
@@ -583,7 +698,7 @@ try_complete_step(Step *step, int flags)
 
 	FD_ZERO(&read_set);
 
-	while (flags & STEP_NONBLOCK && PQisBusy(conn))
+	while ((flags & STEP_NONBLOCK) && PQisBusy(conn))
 	{
 		FD_SET(sock, &read_set);
 		timeout.tv_sec = 0;
@@ -622,7 +737,8 @@ try_complete_step(Step *step, int flags)
 		}
 		else if (!PQconsumeInput(conn)) /* select(): data available */
 		{
-			fprintf(stderr, "PQconsumeInput failed: %s", PQerrorMessage(conn));
+			fprintf(stderr, "PQconsumeInput failed: %s\n",
+					PQerrorMessage(conn));
 			exit_nicely();
 		}
 	}
@@ -649,7 +765,7 @@ try_complete_step(Step *step, int flags)
 				}
 				/* Detail may contain xid values, so just show primary. */
 				step->errormsg = malloc(5 +
-										strlen(PQresultErrorField(res, PG_DIAG_SEVERITY)) + 
+										strlen(PQresultErrorField(res, PG_DIAG_SEVERITY)) +
 										strlen(PQresultErrorField(res,
 																  PG_DIAG_MESSAGE_PRIMARY)));
 				sprintf(step->errormsg, "%s:  %s",

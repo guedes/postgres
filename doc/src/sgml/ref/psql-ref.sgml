@@ -482,6 +482,27 @@ PostgreSQL documentation
       </listitem>
     </varlistentry>
 
+    <varlistentry>
+      <term><option>-z</option></term>
+      <term><option>--field-separator-zero</option></term>
+      <listitem>
+      <para>
+      Set the field separator for unaligned output to a zero byte.
+      </para>
+      </listitem>
+    </varlistentry>
+
+    <varlistentry>
+      <term><option>-0</option></term>
+      <term><option>--record-separator-zero</option></term>
+      <listitem>
+      <para>
+      Set the record separator for unaligned output to a zero byte.  This is
+      useful for interfacing, for example, with <literal>xargs -0</literal>.
+      </para>
+      </listitem>
+    </varlistentry>
+
      <varlistentry>
       <term><option>-1</option></term>
       <term><option>--single-transaction</option></term>
@@ -1048,7 +1069,7 @@ testdb=&gt;
         pattern or the <literal>S</literal> modifier to include system
         objects.
         If <literal>+</literal> is appended to the command name, each object
-        is listed with its associated description.
+        is listed with its associated permissions and description.
         </para>
         </listitem>
       </varlistentry>
@@ -1387,8 +1408,8 @@ testdb=&gt;
         If <replaceable class="parameter">pattern</replaceable> is
         specified, only types whose names match the pattern are listed.
         If <literal>+</literal> is appended to the command name, each type is
-        listed with its internal name and size, as well as its allowed values
-        if it is an <type>enum</> type.
+        listed with its internal name and size, its allowed values
+        if it is an <type>enum</> type, and its associated permissions.
         By default, only user-created objects are shown;  supply a
         pattern or the <literal>S</literal> modifier to include system
         objects.
@@ -1860,7 +1881,8 @@ lo_import 152801
           <para>
           Sets the target width for the <literal>wrapped</> format, and also
           the width limit for determining whether output is wide enough to
-          require the pager.
+          require the pager or switch to the vertical display in expanded auto
+          mode.
           Zero (the default) causes the target width to be controlled by the
           environment variable <envar>COLUMNS</>, or the detected screen width
           if <envar>COLUMNS</> is not set.
@@ -1876,15 +1898,19 @@ lo_import 152801
           <term><literal>expanded</literal> (or <literal>x</literal>)</term>
           <listitem>
           <para>
-          If <replaceable class="parameter">value</replaceable> is specified
-          it must be either <literal>on</literal> or <literal>off</literal>
-          which will enable or disable expanded mode.  If <replaceable
-          class="parameter">value</replaceable> is omitted the command toggles
-          between regular and expanded mode.
-          When expanded mode is enabled, query results
-          are displayed in two columns, with the column name on the left and
-          the data on the right. This mode is useful if the data wouldn't fit
-          on the screen in the normal <quote>horizontal</quote> mode.
+          If <replaceable class="parameter">value</replaceable> is specified it
+          must be either <literal>on</literal> or <literal>off</literal>, which
+          will enable or disable expanded mode, or <literal>auto</literal>.
+          If <replaceable class="parameter">value</replaceable> is omitted the
+          command toggles between the on and off settings.  When expanded mode
+          is enabled, query results are displayed in two columns, with the
+          column name on the left and the data on the right. This mode is
+          useful if the data wouldn't fit on the screen in the
+          normal <quote>horizontal</quote> mode.  In the auto setting, the
+          expanded mode is used whenever the query output is wider than the
+          screen, otherwise the regular mode is used.  The auto setting is only
+          effective in the aligned and wrapped formats.  In other formats, it
+          always behaves as if the expanded mode is off.
           </para>
           </listitem>
           </varlistentry>
@@ -1899,6 +1925,16 @@ lo_import 152801
           set a tab as field separator, type <literal>\pset fieldsep
           '\t'</literal>. The default field separator is
           <literal>'|'</literal> (a vertical bar).
+          </para>
+          </listitem>
+          </varlistentry>
+
+          <varlistentry>
+          <term><literal>fieldsep_zero</literal></term>
+          <listitem>
+          <para>
+          Sets the field separator to use in unaligned output format to a zero
+          byte.
           </para>
           </listitem>
           </varlistentry>
@@ -2073,6 +2109,16 @@ lo_import 152801
           </varlistentry>
 
           <varlistentry>
+          <term><literal>recordsep_zero</literal></term>
+          <listitem>
+          <para>
+          Sets the record separator to use in unaligned output format to a zero
+          byte.
+          </para>
+          </listitem>
+          </varlistentry>
+
+          <varlistentry>
           <term><literal>tableattr</literal> (or <literal>T</literal>)</term>
           <listitem>
           <para>
@@ -2237,6 +2283,24 @@ lo_import 152801
 
 
       <varlistentry>
+        <term><literal>\setenv [ <replaceable class="parameter">name</replaceable> [ <replaceable class="parameter">value</replaceable> ] ]</literal></term>
+
+        <listitem>
+        <para>
+        Sets the environment variable <replaceable
+        class="parameter">name</replaceable> to <replaceable
+        class="parameter">value</replaceable>, or if the
+        <replaceable class="parameter">value</replaceable> is
+        not supplied, unsets the environment variable. Example:
+<programlisting>
+testdb=&gt; <userinput>\setenv PAGER less</userinput>
+testdb=&gt; <userinput>\setenv LESS -imx4F</userinput>
+</programlisting>
+        </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><literal>\sf[+] <replaceable class="parameter">function_description</> </literal></term>
 
         <listitem>
@@ -2326,10 +2390,10 @@ lo_import 152801
 
 
       <varlistentry>
-        <term><literal>\x</literal></term>
+        <term><literal>\x [ <replaceable class="parameter">on</replaceable> | <replaceable class="parameter">off</replaceable> | <replaceable class="parameter">auto</replaceable> ]</literal></term>
         <listitem>
         <para>
-        Toggles expanded table formatting mode. As such it is equivalent to
+        Sets or toggles expanded table formatting mode. As such it is equivalent to
         <literal>\pset expanded</literal>.
        </para>
        </listitem>
@@ -3197,7 +3261,8 @@ $endif
      <para>
       If <literal>\pset columns</> is zero, controls the
       width for the <literal>wrapped</> format and width for determining
-      if wide output requires the pager.
+      if wide output requires the pager or should be switched to the
+      vertical format in expanded auto mode.
      </para>
     </listitem>
    </varlistentry>
@@ -3276,6 +3341,26 @@ PSQL_EDITOR_LINENUMBER_ARG='--line '
    </varlistentry>
 
    <varlistentry>
+    <term><envar>PSQL_HISTORY</envar></term>
+
+    <listitem>
+     <para>
+      Alternative location for the command history file. Tilde ("~") expansion is performed.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><envar>PSQLRC</envar></term>
+
+    <listitem>
+     <para>
+      Alternative location of the user's .psqlrc file. Tilde ("~") expansion is performed.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><envar>SHELL</envar></term>
 
     <listitem>
@@ -3325,6 +3410,11 @@ PSQL_EDITOR_LINENUMBER_ARG='--line '
      to set up the client or the server to taste (using the <command>\set
      </command> and <command>SET</command> commands).
     </para>
+    <para>
+     The location of the user's <filename>~/.psqlrc</filename> file can
+     also be set explicitly via the <envar>PSQLRC</envar> environment
+     setting.
+    </para>
    </listitem>
 
    <listitem>
@@ -3345,6 +3435,11 @@ PSQL_EDITOR_LINENUMBER_ARG='--line '
      The command-line history is stored in the file
      <filename>~/.psql_history</filename>, or
      <filename>%APPDATA%\postgresql\psql_history</filename> on Windows.
+    </para>
+    <para>
+     The location of the history file can
+     also be set explicitly via the <envar>PSQL_HISTORY</envar> environment
+     setting.
     </para>
    </listitem>
   </itemizedlist>

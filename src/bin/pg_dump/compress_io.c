@@ -4,7 +4,7 @@
  *	 Routines for archivers to write an uncompressed or compressed data
  *	 stream.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * This file includes two APIs for dealing with compressed data. The first
@@ -53,6 +53,8 @@
  */
 
 #include "compress_io.h"
+#include "dumpmem.h"
+#include "dumputils.h"
 
 /*----------------------
  * Compressor API
@@ -108,8 +110,8 @@ ParseCompressionOption(int compression, CompressionAlgorithm *alg, int *level)
 		*alg = COMPR_ALG_NONE;
 	else
 	{
-		die_horribly(NULL, modulename, "Invalid compression code: %d\n",
-					 compression);
+		exit_horribly(modulename, "Invalid compression code: %d\n",
+					  compression);
 		*alg = COMPR_ALG_NONE;	/* keep compiler quiet */
 	}
 
@@ -132,12 +134,10 @@ AllocateCompressor(int compression, WriteFunc writeF)
 
 #ifndef HAVE_LIBZ
 	if (alg == COMPR_ALG_LIBZ)
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 #endif
 
-	cs = (CompressorState *) calloc(1, sizeof(CompressorState));
-	if (cs == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
+	cs = (CompressorState *) pg_calloc(1, sizeof(CompressorState));
 	cs->writeF = writeF;
 	cs->comprAlg = alg;
 
@@ -170,7 +170,7 @@ ReadDataFromArchive(ArchiveHandle *AH, int compression, ReadFunc readF)
 #ifdef HAVE_LIBZ
 		ReadDataFromArchiveZlib(AH, readF);
 #else
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 #endif
 	}
 }
@@ -188,7 +188,7 @@ WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 #ifdef HAVE_LIBZ
 			return WriteDataToArchiveZlib(AH, cs, data, dLen);
 #else
-			die_horribly(NULL, modulename, "not built with zlib support\n");
+			exit_horribly(modulename, "not built with zlib support\n");
 #endif
 		case COMPR_ALG_NONE:
 			return WriteDataToArchiveNone(AH, cs, data, dLen);
@@ -221,9 +221,7 @@ InitCompressorZlib(CompressorState *cs, int level)
 {
 	z_streamp	zp;
 
-	zp = cs->zp = (z_streamp) malloc(sizeof(z_stream));
-	if (cs->zp == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
+	zp = cs->zp = (z_streamp) pg_malloc(sizeof(z_stream));
 	zp->zalloc = Z_NULL;
 	zp->zfree = Z_NULL;
 	zp->opaque = Z_NULL;
@@ -233,16 +231,13 @@ InitCompressorZlib(CompressorState *cs, int level)
 	 * actually allocate one extra byte because some routines want to append a
 	 * trailing zero byte to the zlib output.
 	 */
-	cs->zlibOut = (char *) malloc(ZLIB_OUT_SIZE + 1);
+	cs->zlibOut = (char *) pg_malloc(ZLIB_OUT_SIZE + 1);
 	cs->zlibOutSize = ZLIB_OUT_SIZE;
 
-	if (cs->zlibOut == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
-
 	if (deflateInit(zp, level) != Z_OK)
-		die_horribly(NULL, modulename,
-					 "could not initialize compression library: %s\n",
-					 zp->msg);
+		exit_horribly(modulename,
+					  "could not initialize compression library: %s\n",
+					  zp->msg);
 
 	/* Just be paranoid - maybe End is called after Start, with no Write */
 	zp->next_out = (void *) cs->zlibOut;
@@ -338,26 +333,20 @@ ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF)
 	char	   *buf;
 	size_t		buflen;
 
-	zp = (z_streamp) malloc(sizeof(z_stream));
-	if (zp == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
+	zp = (z_streamp) pg_malloc(sizeof(z_stream));
 	zp->zalloc = Z_NULL;
 	zp->zfree = Z_NULL;
 	zp->opaque = Z_NULL;
 
-	buf = malloc(ZLIB_IN_SIZE);
-	if (buf == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
+	buf = pg_malloc(ZLIB_IN_SIZE);
 	buflen = ZLIB_IN_SIZE;
 
-	out = malloc(ZLIB_OUT_SIZE + 1);
-	if (out == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
+	out = pg_malloc(ZLIB_OUT_SIZE + 1);
 
 	if (inflateInit(zp) != Z_OK)
-		die_horribly(NULL, modulename,
-					 "could not initialize compression library: %s\n",
-					 zp->msg);
+		exit_horribly(modulename,
+					  "could not initialize compression library: %s\n",
+					  zp->msg);
 
 	/* no minimal chunk size for zlib */
 	while ((cnt = readF(AH, &buf, &buflen)))
@@ -417,9 +406,7 @@ ReadDataFromArchiveNone(ArchiveHandle *AH, ReadFunc readF)
 	char	   *buf;
 	size_t		buflen;
 
-	buf = malloc(ZLIB_OUT_SIZE);
-	if (buf == NULL)
-		die_horribly(NULL, modulename, "out of memory\n");
+	buf = pg_malloc(ZLIB_OUT_SIZE);
 	buflen = ZLIB_OUT_SIZE;
 
 	while ((cnt = readF(AH, &buf, &buflen)))
@@ -491,10 +478,7 @@ cfopen_read(const char *path, const char *mode)
 		if (fp == NULL)
 		{
 			int			fnamelen = strlen(path) + 4;
-			char	   *fname = malloc(fnamelen);
-
-			if (fname == NULL)
-				die_horribly(NULL, modulename, "Out of memory\n");
+			char	   *fname = pg_malloc(fnamelen);
 
 			snprintf(fname, fnamelen, "%s%s", path, ".gz");
 			fp = cfopen(fname, mode, 1);
@@ -525,16 +509,13 @@ cfopen_write(const char *path, const char *mode, int compression)
 	{
 #ifdef HAVE_LIBZ
 		int			fnamelen = strlen(path) + 4;
-		char	   *fname = malloc(fnamelen);
-
-		if (fname == NULL)
-			die_horribly(NULL, modulename, "Out of memory\n");
+		char	   *fname = pg_malloc(fnamelen);
 
 		snprintf(fname, fnamelen, "%s%s", path, ".gz");
 		fp = cfopen(fname, mode, 1);
 		free(fname);
 #else
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 		fp = NULL;				/* keep compiler quiet */
 #endif
 	}
@@ -548,10 +529,7 @@ cfopen_write(const char *path, const char *mode, int compression)
 cfp *
 cfopen(const char *path, const char *mode, int compression)
 {
-	cfp		   *fp = malloc(sizeof(cfp));
-
-	if (fp == NULL)
-		die_horribly(NULL, modulename, "Out of memory\n");
+	cfp		   *fp = pg_malloc(sizeof(cfp));
 
 	if (compression != 0)
 	{
@@ -564,7 +542,7 @@ cfopen(const char *path, const char *mode, int compression)
 			fp = NULL;
 		}
 #else
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 #endif
 	}
 	else

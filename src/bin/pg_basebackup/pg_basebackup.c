@@ -4,7 +4,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_basebackup.c
@@ -63,7 +63,11 @@ static pid_t bgchild = -1;
 
 /* End position for xlog streaming, empty string if unknown yet */
 static XLogRecPtr xlogendptr;
+#ifndef WIN32
 static int	has_xlogendptr = 0;
+#else
+static volatile LONG has_xlogendptr = 0;
+#endif
 
 /* Function headers */
 static void usage(void);
@@ -78,7 +82,7 @@ static bool segment_callback(XLogRecPtr segendpos, uint32 timeline);
 
 #ifdef HAVE_LIBZ
 static const char *
-get_gz_error(gzFile *gzf)
+get_gz_error(gzFile gzf)
 {
 	int			errnum;
 	const char *errmsg;
@@ -101,7 +105,7 @@ usage(void)
 	printf(_("  %s [OPTION]...\n"), progname);
 	printf(_("\nOptions controlling the output:\n"));
 	printf(_("  -D, --pgdata=DIRECTORY   receive base backup into directory\n"));
-	printf(_("  -F, --format=p|t         output format (plain, tar)\n"));
+	printf(_("  -F, --format=p|t         output format (plain (default), tar)\n"));
 	printf(_("  -x, --xlog=fetch|stream  include required WAL files in backup\n"));
 	printf(_("  -z, --gzip               compress tar output\n"));
 	printf(_("  -Z, --compress=0-9       compress tar output with given compression level\n"));
@@ -446,7 +450,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 	FILE	   *tarfile = NULL;
 
 #ifdef HAVE_LIBZ
-	gzFile	   *ztarfile = NULL;
+	gzFile		ztarfile = NULL;
 #endif
 
 	if (PQgetisnull(res, rownum, 0))
@@ -914,10 +918,10 @@ BaseBackup(void)
 				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
-	if (PQntuples(res) != 1)
+	if (PQntuples(res) != 1 || PQnfields(res) != 3)
 	{
-		fprintf(stderr, _("%s: could not identify system, got %i rows\n"),
-				progname, PQntuples(res));
+		fprintf(stderr, _("%s: could not identify system, got %i rows and %i fields\n"),
+				progname, PQntuples(res), PQnfields(res));
 		disconnect_and_exit(1);
 	}
 	sysidentifier = strdup(PQgetvalue(res, 0, 0));
@@ -1070,10 +1074,11 @@ BaseBackup(void)
 
 	if (bgchild > 0)
 	{
-		int			status;
-
 #ifndef WIN32
+		int			status;
 		int			r;
+#else
+		DWORD       status;
 #endif
 
 		if (verbose)
@@ -1125,7 +1130,7 @@ BaseBackup(void)
 		{
 			fprintf(stderr, _("%s: could not parse xlog end position \"%s\"\n"),
 					progname, xlogend);
-			exit(1);
+			disconnect_and_exit(1);
 		}
 		InterlockedIncrement(&has_xlogendptr);
 
@@ -1147,7 +1152,7 @@ BaseBackup(void)
 		if (status != 0)
 		{
 			fprintf(stderr, _("%s: child thread exited with error %u\n"),
-					progname, status);
+					progname, (unsigned int) status);
 			disconnect_and_exit(1);
 		}
 		/* Exited normally, we're happy */
@@ -1157,6 +1162,7 @@ BaseBackup(void)
 	/*
 	 * End of copy data. Final result is already checked inside the loop.
 	 */
+	PQclear(res);
 	PQfinish(conn);
 
 	if (verbose)
@@ -1239,7 +1245,7 @@ main(int argc, char **argv)
 					streamwal = true;
 				else
 				{
-					fprintf(stderr, _("%s: invalid xlog option \"%s\", must be empty, \"fetch\" or \"stream\"\n"),
+					fprintf(stderr, _("%s: invalid xlog option \"%s\", must be empty, \"fetch\", or \"stream\"\n"),
 							progname, optarg);
 					exit(1);
 				}

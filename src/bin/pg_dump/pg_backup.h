@@ -69,11 +69,19 @@ typedef enum _teSection
 	SECTION_POST_DATA			/* stuff to be processed after data */
 } teSection;
 
+typedef enum
+{
+	DUMP_PRE_DATA = 0x01,
+	DUMP_DATA = 0x02,
+	DUMP_POST_DATA = 0x04,
+	DUMP_UNSECTIONED = 0xff
+} DumpSections;
+
 /*
  *	We may want to have some more user-readable data, but in the mean
  *	time this gives us some abstraction and type checking.
  */
-typedef struct _Archive
+struct Archive
 {
 	int			verbose;
 	char	   *remoteVersionStr;		/* server's version string */
@@ -91,7 +99,7 @@ typedef struct _Archive
 	int			n_errors;		/* number of errors (if no die) */
 
 	/* The rest is private */
-} Archive;
+};
 
 typedef int (*DataDumperPtr) (Archive *AH, void *userArg);
 
@@ -109,8 +117,9 @@ typedef struct _restoreOptions
 	char	   *use_role;		/* Issue SET ROLE to this */
 	int			dataOnly;
 	int			dropSchema;
-	char	   *filename;
+	const char *filename;
 	int			schemaOnly;
+	int         dumpSections;
 	int			verbose;
 	int			aclsSkip;
 	int			tocSummary;
@@ -150,19 +159,14 @@ typedef struct _restoreOptions
  * Main archiver interface.
  */
 
-extern void
-exit_horribly(Archive *AH, const char *modulename, const char *fmt,...)
-__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
-
-
-/* Lets the archive know we have a DB connection to shutdown if it dies */
-
-PGconn *ConnectDatabase(Archive *AH,
+extern void ConnectDatabase(Archive *AH,
 				const char *dbname,
 				const char *pghost,
 				const char *pgport,
 				const char *username,
 				enum trivalue prompt_password);
+extern void DisconnectDatabase(Archive *AHX);
+extern PGconn *GetConnection(Archive *AHX);
 
 /* Called to add a TOC entry */
 extern void ArchiveEntry(Archive *AHX,

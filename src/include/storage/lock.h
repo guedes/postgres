@@ -4,7 +4,7 @@
  *	  POSTGRES low-level lock mechanism
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/lock.h
@@ -34,6 +34,7 @@ extern int	max_locks_per_xact;
 #ifdef LOCK_DEBUG
 extern int	Trace_lock_oidmin;
 extern bool Trace_locks;
+extern bool Trace_userlocks;
 extern int	Trace_lock_table;
 extern bool Debug_deadlocks;
 #endif   /* LOCK_DEBUG */

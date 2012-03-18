@@ -3,7 +3,7 @@
  * dict_xsyn.c
  *	  Extended synonym dictionary
  *
- * Copyright (c) 2007-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2007-2012, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/dict_xsyn/dict_xsyn.c
@@ -244,6 +244,8 @@ dxsyn_lexize(PG_FUNCTION_ARGS)
 			if (pos != value || d->keeporig)
 			{
 				res[nsyns].lexeme = pnstrdup(syn, end - syn);
+				res[nsyns].nvariant = 0;
+				res[nsyns].flags = 0;
 				nsyns++;
 			}
 

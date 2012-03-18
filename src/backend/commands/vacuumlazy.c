@@ -24,7 +24,7 @@
  * the TID array, just enough to hold as many heap tuples as fit on one page.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -117,6 +117,7 @@ static BufferAccessStrategy vac_strategy;
 static void lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 			   Relation *Irel, int nindexes, bool scan_all);
 static void lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats);
+static bool lazy_check_needs_freeze(Buffer buf);
 static void lazy_vacuum_index(Relation indrel,
 				  IndexBulkDeleteResult **stats,
 				  LVRelStats *vacrelstats);
@@ -154,6 +155,10 @@ lazy_vacuum_rel(Relation onerel, VacuumStmt *vacstmt,
 	BlockNumber possibly_freeable;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
+ 	long		secs;
+ 	int			usecs;
+ 	double		read_rate,
+				write_rate;
 	bool		scan_all;
 	TransactionId freezeTableLimit;
 	BlockNumber new_rel_pages;
@@ -165,8 +170,7 @@ lazy_vacuum_rel(Relation onerel, VacuumStmt *vacstmt,
 	if (IsAutoVacuumWorkerProcess() && Log_autovacuum_min_duration >= 0)
 	{
 		pg_rusage_init(&ru0);
-		if (Log_autovacuum_min_duration > 0)
-			starttime = GetCurrentTimestamp();
+		starttime = GetCurrentTimestamp();
 	}
 
 	if (vacstmt->options & VACOPT_VERBOSE)
@@ -261,13 +265,29 @@ lazy_vacuum_rel(Relation onerel, VacuumStmt *vacstmt,
 	/* and log the action if appropriate */
 	if (IsAutoVacuumWorkerProcess() && Log_autovacuum_min_duration >= 0)
 	{
+		TimestampTz	endtime = GetCurrentTimestamp();
+
 		if (Log_autovacuum_min_duration == 0 ||
-			TimestampDifferenceExceeds(starttime, GetCurrentTimestamp(),
+			TimestampDifferenceExceeds(starttime, endtime,
 									   Log_autovacuum_min_duration))
+		{
+			TimestampDifference(starttime, endtime, &secs, &usecs);
+
+			read_rate = 0;
+			write_rate = 0;
+			if ((secs > 0) || (usecs > 0))
+			{
+				read_rate = (double) BLCKSZ * VacuumPageMiss / (1024 * 1024) /
+					(secs + usecs / 1000000.0);
+				write_rate = (double) BLCKSZ * VacuumPageDirty / (1024 * 1024) /
+ 					(secs + usecs / 1000000.0);
+			}
 			ereport(LOG,
 					(errmsg("automatic vacuum of table \"%s.%s.%s\": index scans: %d\n"
 							"pages: %d removed, %d remain\n"
 							"tuples: %.0f removed, %.0f remain\n"
+							"buffer usage: %d hits, %d misses, %d dirtied\n"
+							"avg read rate: %.3f MiB/s, avg write rate: %.3f MiB/s\n"
 							"system usage: %s",
 							get_database_name(MyDatabaseId),
 							get_namespace_name(RelationGetNamespace(onerel)),
@@ -276,8 +296,13 @@ lazy_vacuum_rel(Relation onerel, VacuumStmt *vacstmt,
 							vacrelstats->pages_removed,
 							vacrelstats->rel_pages,
 							vacrelstats->tuples_deleted,
-							new_rel_tuples,
+							vacrelstats->new_rel_tuples,
+							VacuumPageHit,
+							VacuumPageMiss,
+							VacuumPageDirty,
+							read_rate,write_rate,
 							pg_rusage_show(&ru0))));
+		}
 	}
 }
 
@@ -453,8 +478,6 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 
 		vacuum_delay_point();
 
-		vacrelstats->scanned_pages++;
-
 		/*
 		 * If we are close to overrunning the available space for dead-tuple
 		 * TIDs, pause and do a cycle of vacuuming before we tackle this page.
@@ -486,7 +509,42 @@ lazy_scan_heap(Relation onerel, LVRelStats *vacrelstats,
 								 RBM_NORMAL, vac_strategy);
 
 		/* We need buffer cleanup lock so that we can prune HOT chains. */
-		LockBufferForCleanup(buf);
+		if (!ConditionalLockBufferForCleanup(buf))
+		{
+			/*
+			 * If we're not scanning the whole relation to guard against XID
+			 * wraparound, it's OK to skip vacuuming a page.  The next vacuum
+			 * will clean it up.
+			 */
+			if (!scan_all)
+			{
+				ReleaseBuffer(buf);
+				continue;
+			}
+
+			/*
+			 * If this is a wraparound checking vacuum, then we read the page
+			 * with share lock to see if any xids need to be frozen. If the
+			 * page doesn't need attention we just skip and continue. If it
+			 * does, we wait for cleanup lock.
+			 *
+			 * We could defer the lock request further by remembering the page
+			 * and coming back to it later, of we could even register
+			 * ourselves for multiple buffers and then service whichever one
+			 * is received first.  For now, this seems good enough.
+			 */
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			if (!lazy_check_needs_freeze(buf))
+			{
+				UnlockReleaseBuffer(buf);
+				continue;
+			}
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+			LockBufferForCleanup(buf);
+			/* drop through to normal processing */
+		}
+
+		vacrelstats->scanned_pages++;
 
 		page = BufferGetPage(buf);
 
@@ -932,7 +990,12 @@ lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
 		tblk = ItemPointerGetBlockNumber(&vacrelstats->dead_tuples[tupindex]);
 		buf = ReadBufferExtended(onerel, MAIN_FORKNUM, tblk, RBM_NORMAL,
 								 vac_strategy);
-		LockBufferForCleanup(buf);
+		if (!ConditionalLockBufferForCleanup(buf))
+		{
+			ReleaseBuffer(buf);
+			++tupindex;
+			continue;
+		}
 		tupindex = lazy_vacuum_page(onerel, tblk, buf, tupindex, vacrelstats);
 
 		/* Now that we've compacted the page, record its available space */
@@ -1008,6 +1071,50 @@ lazy_vacuum_page(Relation onerel, BlockNumber blkno, Buffer buffer,
 
 	return tupindex;
 }
+
+/*
+ *	lazy_check_needs_freeze() -- scan page to see if any tuples
+ *					 need to be cleaned to avoid wraparound
+ *
+ * Returns true if the page needs to be vacuumed using cleanup lock.
+ */
+static bool
+lazy_check_needs_freeze(Buffer buf)
+{
+	Page		page;
+	OffsetNumber offnum,
+				maxoff;
+	HeapTupleHeader tupleheader;
+
+	page = BufferGetPage(buf);
+
+	if (PageIsNew(page) || PageIsEmpty(page))
+	{
+		/* PageIsNew probably shouldn't happen... */
+		return false;
+	}
+
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (offnum = FirstOffsetNumber;
+		 offnum <= maxoff;
+		 offnum = OffsetNumberNext(offnum))
+	{
+		ItemId		itemid;
+
+		itemid = PageGetItemId(page, offnum);
+
+		if (!ItemIdIsNormal(itemid))
+			continue;
+
+		tupleheader = (HeapTupleHeader) PageGetItem(page, itemid);
+
+		if (heap_tuple_needs_freeze(tupleheader, FreezeLimit, buf))
+			return true;
+	}						/* scan along page */
+
+	return false;
+}
+
 
 /*
  *	lazy_vacuum_index() -- vacuum one index relation.

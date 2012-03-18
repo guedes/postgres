@@ -3,7 +3,7 @@
  * bgwriter.h
  *	  Exports from postmaster/bgwriter.c.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  *
  * src/include/postmaster/bgwriter.h
  *
@@ -23,6 +23,7 @@ extern int	CheckPointWarning;
 extern double CheckPointCompletionTarget;
 
 extern void BackgroundWriterMain(void);
+extern void CheckpointerMain(void);
 
 extern void RequestCheckpoint(int flags);
 extern void CheckpointWriteDelay(int flags, double progress);

@@ -3,7 +3,7 @@
  * relnode.c
  *	  Relation-node lookup/construction routines
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -103,6 +103,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 	rel->cheapest_startup_path = NULL;
 	rel->cheapest_total_path = NULL;
 	rel->cheapest_unique_path = NULL;
+	rel->cheapest_parameterized_paths = NIL;
 	rel->relid = relid;
 	rel->rtekind = rte->rtekind;
 	/* min_attr, max_attr, attr_needed, attr_widths are set below */
@@ -112,13 +113,13 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 	rel->allvisfrac = 0;
 	rel->subplan = NULL;
 	rel->subroot = NULL;
+	rel->fdwroutine = NULL;
+	rel->fdw_private = NULL;
 	rel->baserestrictinfo = NIL;
 	rel->baserestrictcost.startup = 0;
 	rel->baserestrictcost.per_tuple = 0;
 	rel->joininfo = NIL;
 	rel->has_eclass_joins = false;
-	rel->index_outer_relids = NULL;
-	rel->index_inner_paths = NIL;
 
 	/* Check type of rtable entry */
 	switch (rte->rtekind)
@@ -354,6 +355,7 @@ build_join_rel(PlannerInfo *root,
 	joinrel->cheapest_startup_path = NULL;
 	joinrel->cheapest_total_path = NULL;
 	joinrel->cheapest_unique_path = NULL;
+	joinrel->cheapest_parameterized_paths = NIL;
 	joinrel->relid = 0;			/* indicates not a baserel */
 	joinrel->rtekind = RTE_JOIN;
 	joinrel->min_attr = 0;
@@ -366,13 +368,13 @@ build_join_rel(PlannerInfo *root,
 	joinrel->allvisfrac = 0;
 	joinrel->subplan = NULL;
 	joinrel->subroot = NULL;
+	joinrel->fdwroutine = NULL;
+	joinrel->fdw_private = NULL;
 	joinrel->baserestrictinfo = NIL;
 	joinrel->baserestrictcost.startup = 0;
 	joinrel->baserestrictcost.per_tuple = 0;
 	joinrel->joininfo = NIL;
 	joinrel->has_eclass_joins = false;
-	joinrel->index_outer_relids = NULL;
-	joinrel->index_inner_paths = NIL;
 
 	/*
 	 * Create a new tlist containing just the vars that need to be output from

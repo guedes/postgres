@@ -3,7 +3,7 @@
  * fe-connect.c
  *	  functions related to setting up a connection to the backend
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -221,6 +221,9 @@ static const PQconninfoOption PQconninfoOptions[] = {
 	 */
 	{"sslmode", "PGSSLMODE", DefaultSSLMode, NULL,
 	"SSL-Mode", "", 8},			/* sizeof("disable") == 8 */
+
+	{"sslcompression", "PGSSLCOMPRESSION", "1", NULL,
+	"SSL-Compression", "", 1},
 
 	{"sslcert", "PGSSLCERT", NULL, NULL,
 	"SSL-Client-Cert", "", 64},
@@ -621,6 +624,8 @@ fillPGconn(PGconn *conn, PQconninfoOption *connOptions)
 	conn->keepalives_count = tmp ? strdup(tmp) : NULL;
 	tmp = conninfo_getval(connOptions, "sslmode");
 	conn->sslmode = tmp ? strdup(tmp) : NULL;
+	tmp = conninfo_getval(connOptions, "sslcompression");
+	conn->sslcompression = tmp ? strdup(tmp) : NULL;
 	tmp = conninfo_getval(connOptions, "sslkey");
 	conn->sslkey = tmp ? strdup(tmp) : NULL;
 	tmp = conninfo_getval(connOptions, "sslcert");
@@ -2744,6 +2749,8 @@ freePGconn(PGconn *conn)
 		free(conn->events[i].name);
 	}
 
+	if (conn->client_encoding_initial)
+		free(conn->client_encoding_initial);
 	if (conn->events)
 		free(conn->events);
 	if (conn->pghost)
@@ -2790,6 +2797,8 @@ freePGconn(PGconn *conn)
 		free(conn->sslrootcert);
 	if (conn->sslcrl)
 		free(conn->sslcrl);
+	if (conn->sslcompression)
+		free(conn->sslcompression);
 	if (conn->requirepeer)
 		free(conn->requirepeer);
 #if defined(KRB5) || defined(ENABLE_GSS) || defined(ENABLE_SSPI)
@@ -4294,6 +4303,7 @@ conninfo_array_parse(const char *const * keywords, const char *const * values,
 	{
 		printfPQExpBuffer(errorMessage,
 						  libpq_gettext("out of memory\n"));
+		PQconninfoFree(str_options);
 		return NULL;
 	}
 	memcpy(options, PQconninfoOptions, sizeof(PQconninfoOptions));
@@ -4321,6 +4331,7 @@ conninfo_array_parse(const char *const * keywords, const char *const * values,
 						 libpq_gettext("invalid connection option \"%s\"\n"),
 								  pname);
 				PQconninfoFree(options);
+				PQconninfoFree(str_options);
 				return NULL;
 			}
 
@@ -4365,6 +4376,7 @@ conninfo_array_parse(const char *const * keywords, const char *const * values,
 					printfPQExpBuffer(errorMessage,
 									  libpq_gettext("out of memory\n"));
 					PQconninfoFree(options);
+					PQconninfoFree(str_options);
 					return NULL;
 				}
 			}
@@ -4899,7 +4911,9 @@ PasswordFromFile(char *hostname, char *port, char *dbname, char *username)
 	while (!feof(fp) && !ferror(fp))
 	{
 		char	   *t = buf,
-				   *ret;
+				   *ret,
+				   *p1,
+				   *p2;
 		int			len;
 
 		if (fgets(buf, sizeof(buf), fp) == NULL)
@@ -4920,6 +4934,16 @@ PasswordFromFile(char *hostname, char *port, char *dbname, char *username)
 			continue;
 		ret = strdup(t);
 		fclose(fp);
+
+		/* De-escape password. */
+		for (p1 = p2 = ret; *p1 != ':' && *p1 != '\0'; ++p1, ++p2)
+		{
+			if (*p1 == '\\' && p1[1] != '\0')
+				++p1;
+			*p2 = *p1;
+		}
+		*p2 = '\0';
+
 		return ret;
 	}
 

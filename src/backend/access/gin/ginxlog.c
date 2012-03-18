@@ -4,7 +4,7 @@
  *	  WAL replay logic for inverted index.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -58,9 +58,12 @@ forgetIncompleteSplit(RelFileNode node, BlockNumber leftBlkno, BlockNumber updat
 	{
 		ginIncompleteSplit *split = (ginIncompleteSplit *) lfirst(l);
 
-		if (RelFileNodeEquals(node, split->node) && leftBlkno == split->leftBlkno && updateBlkno == split->rightBlkno)
+		if (RelFileNodeEquals(node, split->node) &&
+			leftBlkno == split->leftBlkno &&
+			updateBlkno == split->rightBlkno)
 		{
 			incomplete_splits = list_delete_ptr(incomplete_splits, split);
+			pfree(split);
 			break;
 		}
 	}
@@ -486,7 +489,7 @@ ginRedoUpdateMetapage(XLogRecPtr lsn, XLogRecord *record)
 
 	metabuffer = XLogReadBuffer(data->node, GIN_METAPAGE_BLKNO, false);
 	if (!BufferIsValid(metabuffer))
-		elog(PANIC, "GIN metapage disappeared");
+		return;					/* assume index was deleted, nothing to do */
 	metapage = BufferGetPage(metabuffer);
 
 	if (!XLByteLE(lsn, PageGetLSN(metapage)))
@@ -528,6 +531,8 @@ ginRedoUpdateMetapage(XLogRecPtr lsn, XLogRecord *record)
 							elog(ERROR, "failed to add item to index page");
 
 						tuples = (IndexTuple) (((char *) tuples) + tupsize);
+
+						off++;
 					}
 
 					/*
@@ -629,7 +634,7 @@ ginRedoDeleteListPages(XLogRecPtr lsn, XLogRecord *record)
 
 	metabuffer = XLogReadBuffer(data->node, GIN_METAPAGE_BLKNO, false);
 	if (!BufferIsValid(metabuffer))
-		elog(PANIC, "GIN metapage disappeared");
+		return;					/* assume index was deleted, nothing to do */
 	metapage = BufferGetPage(metabuffer);
 
 	if (!XLByteLE(lsn, PageGetLSN(metapage)))
@@ -669,9 +674,10 @@ gin_redo(XLogRecPtr lsn, XLogRecord *record)
 	uint8		info = record->xl_info & ~XLR_INFO_MASK;
 
 	/*
-	 * GIN indexes do not require any conflict processing.
+	 * GIN indexes do not require any conflict processing. NB: If we ever
+	 * implement a similar optimization as we have in b-tree, and remove
+	 * killed tuples outside VACUUM, we'll need to handle that here.
 	 */
-
 	RestoreBkpBlocks(lsn, record, false);
 
 	topCtx = MemoryContextSwitchTo(opCtx);

@@ -3,7 +3,7 @@
  *
  *	information support functions
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/info.c
  */
 
@@ -132,19 +132,19 @@ create_rel_filename_map(const char *old_data, const char *new_data,
 void
 print_maps(FileNameMap *maps, int n_maps, const char *db_name)
 {
-	if (log_opts.debug)
+	if (log_opts.verbose)
 	{
 		int			mapnum;
 
-		pg_log(PG_DEBUG, "mappings for database \"%s\":\n", db_name);
+		pg_log(PG_VERBOSE, "mappings for database \"%s\":\n", db_name);
 
 		for (mapnum = 0; mapnum < n_maps; mapnum++)
-			pg_log(PG_DEBUG, "%s.%s: %u to %u\n",
+			pg_log(PG_VERBOSE, "%s.%s: %u to %u\n",
 				   maps[mapnum].nspname, maps[mapnum].relname,
 				   maps[mapnum].old_relfilenode,
 				   maps[mapnum].new_relfilenode);
 
-		pg_log(PG_DEBUG, "\n\n");
+		pg_log(PG_VERBOSE, "\n\n");
 	}
 }
 
@@ -168,11 +168,9 @@ get_db_and_rel_infos(ClusterInfo *cluster)
 	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
 		get_rel_infos(cluster, &cluster->dbarr.dbs[dbnum]);
 
-	if (log_opts.debug)
-	{
-		pg_log(PG_DEBUG, "\n%s databases:\n", CLUSTER_NAME(cluster));
+	pg_log(PG_VERBOSE, "\n%s databases:\n", CLUSTER_NAME(cluster));
+	if (log_opts.verbose)
 		print_db_infos(&cluster->dbarr);
-	}
 }
 
 
@@ -193,15 +191,21 @@ get_db_infos(ClusterInfo *cluster)
 	int			i_datname,
 				i_oid,
 				i_spclocation;
+	char		query[QUERY_ALLOC];
 
-	res = executeQueryOrDie(conn,
-							"SELECT d.oid, d.datname, t.spclocation "
-							"FROM pg_catalog.pg_database d "
-							" LEFT OUTER JOIN pg_catalog.pg_tablespace t "
-							" ON d.dattablespace = t.oid "
-							"WHERE d.datallowconn = true "
+	snprintf(query, sizeof(query),
+			"SELECT d.oid, d.datname, %s "
+			"FROM pg_catalog.pg_database d "
+			" LEFT OUTER JOIN pg_catalog.pg_tablespace t "
+			" ON d.dattablespace = t.oid "
+			"WHERE d.datallowconn = true "
 	/* we don't preserve pg_database.oid so we sort by name */
-							"ORDER BY 2");
+			"ORDER BY 2",
+	/* 9.2 removed the spclocation column */
+			(GET_MAJOR_VERSION(cluster->major_version) <= 901) ?
+			"t.spclocation" : "pg_catalog.pg_tablespace_location(t.oid) AS spclocation");
+
+	res = executeQueryOrDie(conn, "%s", query);
 
 	i_oid = PQfnumber(res, "oid");
 	i_datname = PQfnumber(res, "datname");
@@ -265,7 +269,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 
 	snprintf(query, sizeof(query),
 			 "SELECT c.oid, n.nspname, c.relname, "
-			 "	c.relfilenode, t.spclocation "
+			 "	c.relfilenode, %s "
 			 "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n "
 			 "	   ON c.relnamespace = n.oid "
 			 "  LEFT OUTER JOIN pg_catalog.pg_tablespace t "
@@ -280,6 +284,9 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	"    relname IN ('pg_largeobject', 'pg_largeobject_loid_pn_index'%s) )) "
 	/* we preserve pg_class.oid so we sort by it to match old/new */
 			 "ORDER BY 1;",
+	/* 9.2 removed the spclocation column */
+			 (GET_MAJOR_VERSION(cluster->major_version) <= 901) ?
+			 "t.spclocation" : "pg_catalog.pg_tablespace_location(t.oid) AS spclocation",
 	/* see the comment at the top of old_8_3_create_sequence_script() */
 			 (GET_MAJOR_VERSION(old_cluster.major_version) <= 803) ?
 			 "" : ", 'S'",
@@ -359,9 +366,9 @@ print_db_infos(DbInfoArr *db_arr)
 
 	for (dbnum = 0; dbnum < db_arr->ndbs; dbnum++)
 	{
-		pg_log(PG_DEBUG, "Database: %s\n", db_arr->dbs[dbnum].db_name);
+		pg_log(PG_VERBOSE, "Database: %s\n", db_arr->dbs[dbnum].db_name);
 		print_rel_infos(&db_arr->dbs[dbnum].rel_arr);
-		pg_log(PG_DEBUG, "\n\n");
+		pg_log(PG_VERBOSE, "\n\n");
 	}
 }
 
@@ -372,7 +379,7 @@ print_rel_infos(RelInfoArr *arr)
 	int			relnum;
 
 	for (relnum = 0; relnum < arr->nrels; relnum++)
-		pg_log(PG_DEBUG, "relname: %s.%s: reloid: %u reltblspace: %s\n",
+		pg_log(PG_VERBOSE, "relname: %s.%s: reloid: %u reltblspace: %s\n",
 			   arr->rels[relnum].nspname, arr->rels[relnum].relname,
 			   arr->rels[relnum].reloid, arr->rels[relnum].tablespace);
 }

@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2012, PostgreSQL Global Development Group
  *
  * src/bin/psql/print.c
  */
@@ -122,8 +122,10 @@ const printTextFormat pg_utf8format =
 
 /* Local functions */
 static int	strlen_max_width(unsigned char *str, int *target_width, int encoding);
-static void IsPagerNeeded(const printTableContent *cont, const int extra_lines,
+static void IsPagerNeeded(const printTableContent *cont, const int extra_lines, bool expanded,
 			  FILE **fout, bool *is_pager);
+
+static void print_aligned_vertical(const printTableContent *cont, FILE *fout);
 
 
 static void *
@@ -205,7 +207,7 @@ format_numeric_locale(const char *my_str)
 				leading_digits;
 	int			groupdigits = atoi(grouping);
 	int			new_str_start = 0;
-	char	   *new_str = new_str = pg_local_malloc(
+	char	   *new_str = pg_local_malloc(
 									 strlen_with_numeric_locale(my_str) + 1);
 
 	leading_digits = (int_len % groupdigits != 0) ?
@@ -266,6 +268,16 @@ fputnbytes(FILE *f, const char *str, size_t n)
 }
 
 
+static void
+print_separator(struct separator sep, FILE *fout)
+{
+	if (sep.separator_zero)
+		fputc('\000', fout);
+	else if (sep.separator)
+		fputs(sep.separator, fout);
+}
+
+
 /*************************/
 /* Unaligned text		 */
 /*************************/
@@ -274,8 +286,6 @@ fputnbytes(FILE *f, const char *str, size_t n)
 static void
 print_unaligned_text(const printTableContent *cont, FILE *fout)
 {
-	const char *opt_fieldsep = cont->opt->fieldSep;
-	const char *opt_recordsep = cont->opt->recordSep;
 	bool		opt_tuples_only = cont->opt->tuples_only;
 	unsigned int i;
 	const char *const * ptr;
@@ -284,16 +294,14 @@ print_unaligned_text(const printTableContent *cont, FILE *fout)
 	if (cancel_pressed)
 		return;
 
-	if (!opt_fieldsep)
-		opt_fieldsep = "";
-	if (!opt_recordsep)
-		opt_recordsep = "";
-
 	if (cont->opt->start_table)
 	{
 		/* print title */
 		if (!opt_tuples_only && cont->title)
-			fprintf(fout, "%s%s", cont->title, opt_recordsep);
+		{
+			fputs(cont->title, fout);
+			print_separator(cont->opt->recordSep, fout);
+		}
 
 		/* print headers */
 		if (!opt_tuples_only)
@@ -301,7 +309,7 @@ print_unaligned_text(const printTableContent *cont, FILE *fout)
 			for (ptr = cont->headers; *ptr; ptr++)
 			{
 				if (ptr != cont->headers)
-					fputs(opt_fieldsep, fout);
+					print_separator(cont->opt->fieldSep, fout);
 				fputs(*ptr, fout);
 			}
 			need_recordsep = true;
@@ -316,7 +324,7 @@ print_unaligned_text(const printTableContent *cont, FILE *fout)
 	{
 		if (need_recordsep)
 		{
-			fputs(opt_recordsep, fout);
+			print_separator(cont->opt->recordSep, fout);
 			need_recordsep = false;
 			if (cancel_pressed)
 				break;
@@ -324,7 +332,7 @@ print_unaligned_text(const printTableContent *cont, FILE *fout)
 		fputs(*ptr, fout);
 
 		if ((i + 1) % cont->ncolumns)
-			fputs(opt_fieldsep, fout);
+			print_separator(cont->opt->fieldSep, fout);
 		else
 			need_recordsep = true;
 	}
@@ -340,16 +348,25 @@ print_unaligned_text(const printTableContent *cont, FILE *fout)
 			{
 				if (need_recordsep)
 				{
-					fputs(opt_recordsep, fout);
+					print_separator(cont->opt->recordSep, fout);
 					need_recordsep = false;
 				}
 				fputs(f->data, fout);
 				need_recordsep = true;
 			}
 		}
-		/* the last record needs to be concluded with a newline */
+		/*
+		 * The last record is terminated by a newline, independent of the set
+		 * record separator.  But when the record separator is a zero byte, we
+		 * use that (compatible with find -print0 and xargs).
+		 */
 		if (need_recordsep)
-			fputc('\n', fout);
+		{
+			if (cont->opt->recordSep.separator_zero)
+				print_separator(cont->opt->recordSep, fout);
+			else
+				fputc('\n', fout);
+		}
 	}
 }
 
@@ -357,8 +374,6 @@ print_unaligned_text(const printTableContent *cont, FILE *fout)
 static void
 print_unaligned_vertical(const printTableContent *cont, FILE *fout)
 {
-	const char *opt_fieldsep = cont->opt->fieldSep;
-	const char *opt_recordsep = cont->opt->recordSep;
 	bool		opt_tuples_only = cont->opt->tuples_only;
 	unsigned int i;
 	const char *const * ptr;
@@ -366,11 +381,6 @@ print_unaligned_vertical(const printTableContent *cont, FILE *fout)
 
 	if (cancel_pressed)
 		return;
-
-	if (!opt_fieldsep)
-		opt_fieldsep = "";
-	if (!opt_recordsep)
-		opt_recordsep = "";
 
 	if (cont->opt->start_table)
 	{
@@ -391,19 +401,19 @@ print_unaligned_vertical(const printTableContent *cont, FILE *fout)
 		if (need_recordsep)
 		{
 			/* record separator is 2 occurrences of recordsep in this mode */
-			fputs(opt_recordsep, fout);
-			fputs(opt_recordsep, fout);
+			print_separator(cont->opt->recordSep, fout);
+			print_separator(cont->opt->recordSep, fout);
 			need_recordsep = false;
 			if (cancel_pressed)
 				break;
 		}
 
 		fputs(cont->headers[i % cont->ncolumns], fout);
-		fputs(opt_fieldsep, fout);
+		print_separator(cont->opt->fieldSep, fout);
 		fputs(*ptr, fout);
 
 		if ((i + 1) % cont->ncolumns)
-			fputs(opt_recordsep, fout);
+			print_separator(cont->opt->recordSep, fout);
 		else
 			need_recordsep = true;
 	}
@@ -415,15 +425,19 @@ print_unaligned_vertical(const printTableContent *cont, FILE *fout)
 		{
 			printTableFooter *f;
 
-			fputs(opt_recordsep, fout);
+			print_separator(cont->opt->recordSep, fout);
 			for (f = cont->footers; f; f = f->next)
 			{
-				fputs(opt_recordsep, fout);
+				print_separator(cont->opt->recordSep, fout);
 				fputs(f->data, fout);
 			}
 		}
 
-		fputc('\n', fout);
+		/* see above in print_unaligned_text() */
+		if (cont->opt->recordSep.separator_zero)
+			print_separator(cont->opt->recordSep, fout);
+		else
+			fputc('\n', fout);
 	}
 }
 
@@ -713,6 +727,17 @@ print_aligned_text(const printTableContent *cont, FILE *fout)
 		}
 	}
 
+	/*
+	 * If in expanded auto mode, we have now calculated the expected width, so
+	 * we can now escape to vertical mode if necessary.
+	 */
+	if (cont->opt->expanded == 2 && output_columns > 0 &&
+		(output_columns < total_header_width || output_columns < width_total))
+	{
+		print_aligned_vertical(cont, fout);
+		goto cleanup;
+	}
+
 	/* If we wrapped beyond the display width, use the pager */
 	if (!is_pager && fout == stdout && output_columns > 0 &&
 		(output_columns < total_header_width || output_columns < width_total))
@@ -756,7 +781,7 @@ print_aligned_text(const printTableContent *cont, FILE *fout)
 				extra_row_output_lines = 0;
 			}
 		}
-		IsPagerNeeded(cont, extra_output_lines, &fout, &is_pager);
+		IsPagerNeeded(cont, extra_output_lines, false, &fout, &is_pager);
 	}
 
 	/* time to output */
@@ -1025,6 +1050,7 @@ print_aligned_text(const printTableContent *cont, FILE *fout)
 		fputc('\n', fout);
 	}
 
+cleanup:
 	/* clean up */
 	for (i = 0; i < col_count; i++)
 	{
@@ -1125,6 +1151,7 @@ print_aligned_vertical(const printTableContent *cont, FILE *fout)
 				dformatsize = 0;
 	struct lineptr *hlineptr,
 			   *dlineptr;
+	bool		is_pager = false;
 
 	if (cancel_pressed)
 		return;
@@ -1138,6 +1165,13 @@ print_aligned_vertical(const printTableContent *cont, FILE *fout)
 		fprintf(fout, _("(No rows)\n"));
 		return;
 	}
+
+	/*
+	 * Deal with the pager here instead of in printTable(), because we could
+	 * get here via print_aligned_text() in expanded auto mode, and so we have
+	 * to recalcuate the pager requirement based on vertical output.
+	 */
+	IsPagerNeeded(cont, 0, true, &fout, &is_pager);
 
 	/* Find the maximum dimensions for the headers */
 	for (i = 0; i < cont->ncolumns; i++)
@@ -1177,8 +1211,8 @@ print_aligned_vertical(const printTableContent *cont, FILE *fout)
 	 * We now have all the information we need to setup the formatting
 	 * structures
 	 */
-	dlineptr = pg_local_malloc((sizeof(*dlineptr) + 1) * dheight);
-	hlineptr = pg_local_malloc((sizeof(*hlineptr) + 1) * hheight);
+	dlineptr = pg_local_malloc((sizeof(*dlineptr)) * (dheight + 1));
+	hlineptr = pg_local_malloc((sizeof(*hlineptr)) * (hheight + 1));
 
 	dlineptr->ptr = pg_local_malloc(dformatsize);
 	hlineptr->ptr = pg_local_malloc(hformatsize);
@@ -1295,6 +1329,9 @@ print_aligned_vertical(const printTableContent *cont, FILE *fout)
 	free(dlineptr->ptr);
 	free(hlineptr);
 	free(dlineptr);
+
+	if (is_pager)
+		ClosePager(fout);
 }
 
 
@@ -2085,7 +2122,7 @@ printTableInit(printTableContent *const content, const printTableOpt *opt,
  * column.
  */
 void
-printTableAddHeader(printTableContent *const content, const char *header,
+printTableAddHeader(printTableContent *const content, char *header,
 					const bool translate, const char align)
 {
 #ifndef ENABLE_NLS
@@ -2125,7 +2162,7 @@ printTableAddHeader(printTableContent *const content, const char *header,
  * Note: Automatic freeing of translatable strings is not supported.
  */
 void
-printTableAddCell(printTableContent *const content, const char *cell,
+printTableAddCell(printTableContent *const content, char *cell,
 				  const bool translate, const bool mustfree)
 {
 #ifndef ENABLE_NLS
@@ -2265,14 +2302,14 @@ printTableCleanup(printTableContent *const content)
  * Setup pager if required
  */
 static void
-IsPagerNeeded(const printTableContent *cont, const int extra_lines, FILE **fout,
+IsPagerNeeded(const printTableContent *cont, const int extra_lines, bool expanded, FILE **fout,
 			  bool *is_pager)
 {
 	if (*fout == stdout)
 	{
 		int			lines;
 
-		if (cont->opt->expanded)
+		if (expanded)
 			lines = (cont->ncolumns + 1) * cont->nrows;
 		else
 			lines = cont->nrows + 1;
@@ -2310,11 +2347,10 @@ printTable(const printTableContent *cont, FILE *fout, FILE *flog)
 	if (cont->opt->format == PRINT_NOTHING)
 		return;
 
-	/* print_aligned_text() handles the pager itself */
-	if ((cont->opt->format != PRINT_ALIGNED &&
-		 cont->opt->format != PRINT_WRAPPED) ||
-		cont->opt->expanded)
-		IsPagerNeeded(cont, 0, &fout, &is_pager);
+	/* print_aligned_*() handles the pager themselves */
+	if (cont->opt->format != PRINT_ALIGNED &&
+		cont->opt->format != PRINT_WRAPPED)
+		IsPagerNeeded(cont, 0, (cont->opt->expanded == 1), &fout, &is_pager);
 
 	/* print the stuff */
 
@@ -2324,32 +2360,32 @@ printTable(const printTableContent *cont, FILE *fout, FILE *flog)
 	switch (cont->opt->format)
 	{
 		case PRINT_UNALIGNED:
-			if (cont->opt->expanded)
+			if (cont->opt->expanded == 1)
 				print_unaligned_vertical(cont, fout);
 			else
 				print_unaligned_text(cont, fout);
 			break;
 		case PRINT_ALIGNED:
 		case PRINT_WRAPPED:
-			if (cont->opt->expanded)
+			if (cont->opt->expanded == 1)
 				print_aligned_vertical(cont, fout);
 			else
 				print_aligned_text(cont, fout);
 			break;
 		case PRINT_HTML:
-			if (cont->opt->expanded)
+			if (cont->opt->expanded == 1)
 				print_html_vertical(cont, fout);
 			else
 				print_html_text(cont, fout);
 			break;
 		case PRINT_LATEX:
-			if (cont->opt->expanded)
+			if (cont->opt->expanded == 1)
 				print_latex_vertical(cont, fout);
 			else
 				print_latex_text(cont, fout);
 			break;
 		case PRINT_TROFF_MS:
-			if (cont->opt->expanded)
+			if (cont->opt->expanded == 1)
 				print_troff_ms_vertical(cont, fout);
 			else
 				print_troff_ms_text(cont, fout);

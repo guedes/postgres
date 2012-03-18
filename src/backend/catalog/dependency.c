@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,6 +20,7 @@
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
+#include "catalog/objectaccess.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_amproc.h"
 #include "catalog/pg_attrdef.h"
@@ -171,7 +172,8 @@ static void reportDependentObjects(const ObjectAddresses *targetObjects,
 					   DropBehavior behavior,
 					   int msglevel,
 					   const ObjectAddress *origObject);
-static void deleteOneObject(const ObjectAddress *object, Relation depRel);
+static void deleteOneObject(const ObjectAddress *object,
+							Relation depRel, int32 flags);
 static void doDeletion(const ObjectAddress *object);
 static void AcquireDeletionLock(const ObjectAddress *object);
 static void ReleaseDeletionLock(const ObjectAddress *object);
@@ -205,10 +207,17 @@ static void getOpFamilyDescription(StringInfo buffer, Oid opfid);
  * that can participate in dependencies.  Note that the next two routines
  * are variants on the same theme; if you change anything here you'll likely
  * need to fix them too.
+ *
+ * flags should include PERFORM_DELETION_INTERNAL when the drop operation is
+ * not the direct result of a user-initiated action.  For example, when a
+ * temporary schema is cleaned out so that a new backend can use it, or when
+ * a column default is dropped as an intermediate step while adding a new one,
+ * that's an internal operation.  On the other hand, when the we drop something
+ * because the user issued a DROP statement against it, that's not internal.
  */
 void
 performDeletion(const ObjectAddress *object,
-				DropBehavior behavior)
+				DropBehavior behavior, int flags)
 {
 	Relation	depRel;
 	ObjectAddresses *targetObjects;
@@ -254,7 +263,7 @@ performDeletion(const ObjectAddress *object,
 	{
 		ObjectAddress *thisobj = targetObjects->refs + i;
 
-		deleteOneObject(thisobj, depRel);
+		deleteOneObject(thisobj, depRel, flags);
 	}
 
 	/* And clean up */
@@ -274,7 +283,7 @@ performDeletion(const ObjectAddress *object,
  */
 void
 performMultipleDeletions(const ObjectAddresses *objects,
-						 DropBehavior behavior)
+						 DropBehavior behavior, int flags)
 {
 	Relation	depRel;
 	ObjectAddresses *targetObjects;
@@ -336,7 +345,7 @@ performMultipleDeletions(const ObjectAddresses *objects,
 	{
 		ObjectAddress *thisobj = targetObjects->refs + i;
 
-		deleteOneObject(thisobj, depRel);
+		deleteOneObject(thisobj, depRel, flags);
 	}
 
 	/* And clean up */
@@ -407,7 +416,14 @@ deleteWhatDependsOn(const ObjectAddress *object,
 		if (thisextra->flags & DEPFLAG_ORIGINAL)
 			continue;
 
-		deleteOneObject(thisobj, depRel);
+		/*
+		 * Since this function is currently only used to clean out temporary
+		 * schemas, we pass PERFORM_DELETION_INTERNAL here, indicating that
+		 * the operation is an automatic system operation rather than a user
+		 * action.  If, in the future, this function is used for other
+		 * purposes, we might need to revisit this.
+		 */
+		deleteOneObject(thisobj, depRel, PERFORM_DELETION_INTERNAL);
 	}
 
 	/* And clean up */
@@ -545,17 +561,21 @@ findDependentObjects(const ObjectAddress *object,
 				 * another object, or is part of the extension that is the
 				 * other object.  We have three cases:
 				 *
-				 * 1. At the outermost recursion level, disallow the DROP. (We
-				 * just ereport here, rather than proceeding, since no other
-				 * dependencies are likely to be interesting.)	However, if
-				 * the owning object is listed in pendingObjects, just release
-				 * the caller's lock and return; we'll eventually complete the
-				 * DROP when we reach that entry in the pending list.
+				 * 1. At the outermost recursion level, we normally disallow
+				 * the DROP.  (We just ereport here, rather than proceeding,
+				 * since no other dependencies are likely to be interesting.)
+				 * However, there are exceptions.
 				 */
 				if (stack == NULL)
 				{
 					char	   *otherObjDesc;
 
+					/*
+					 * Exception 1a: if the owning object is listed in
+					 * pendingObjects, just release the caller's lock and
+					 * return.  We'll eventually complete the DROP when we
+					 * reach that entry in the pending list.
+					 */
 					if (pendingObjects &&
 						object_address_present(&otherObject, pendingObjects))
 					{
@@ -564,6 +584,21 @@ findDependentObjects(const ObjectAddress *object,
 						ReleaseDeletionLock(object);
 						return;
 					}
+
+					/*
+					 * Exception 1b: if the owning object is the extension
+					 * currently being created/altered, it's okay to continue
+					 * with the deletion.  This allows dropping of an
+					 * extension's objects within the extension's scripts,
+					 * as well as corner cases such as dropping a transient
+					 * object created within such a script.
+					 */
+					if (creating_extension &&
+						otherObject.classId == ExtensionRelationId &&
+						otherObject.objectId == CurrentExtensionObject)
+						break;
+
+					/* No exception applies, so throw the error */
 					otherObjDesc = getObjectDescription(&otherObject);
 					ereport(ERROR,
 							(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
@@ -950,12 +985,21 @@ reportDependentObjects(const ObjectAddresses *targetObjects,
  * depRel is the already-open pg_depend relation.
  */
 static void
-deleteOneObject(const ObjectAddress *object, Relation depRel)
+deleteOneObject(const ObjectAddress *object, Relation depRel, int flags)
 {
 	ScanKeyData key[3];
 	int			nkeys;
 	SysScanDesc scan;
 	HeapTuple	tup;
+
+	/* DROP hook of the objects being removed */
+	if (object_access_hook)
+	{
+		ObjectAccessDrop	drop_arg;
+		drop_arg.dropflags = flags;
+		InvokeObjectAccessHook(OAT_DROP, object->classId, object->objectId,
+							   object->objectSubId, &drop_arg);
+	}
 
 	/*
 	 * First remove any pg_depend records that link from this object to
@@ -1696,6 +1740,37 @@ find_expr_references_walker(Node *node,
 					break;
 				default:
 					break;
+			}
+		}
+
+		/*
+		 * If the query is an INSERT or UPDATE, we should create a dependency
+		 * on each target column, to prevent the specific target column from
+		 * being dropped.  Although we will visit the TargetEntry nodes again
+		 * during query_tree_walker, we won't have enough context to do this
+		 * conveniently, so do it here.
+		 */
+		if (query->commandType == CMD_INSERT ||
+			query->commandType == CMD_UPDATE)
+		{
+			RangeTblEntry *rte;
+
+			if (query->resultRelation <= 0 ||
+				query->resultRelation > list_length(query->rtable))
+				elog(ERROR, "invalid resultRelation %d",
+					 query->resultRelation);
+			rte = rt_fetch(query->resultRelation, query->rtable);
+			if (rte->rtekind == RTE_RELATION)
+			{
+				foreach(lc, query->targetList)
+				{
+					TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+					if (tle->resjunk)
+						continue;		/* ignore junk tlist items */
+					add_object_address(OCLASS_CLASS, rte->relid, tle->resno,
+									   context->addrs);
+				}
 			}
 		}
 

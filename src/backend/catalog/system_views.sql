@@ -1,7 +1,7 @@
 /*
  * PostgreSQL System Views
  *
- * Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2012, PostgreSQL Global Development Group
  *
  * src/backend/catalog/system_views.sql
  */
@@ -117,29 +117,54 @@ CREATE VIEW pg_stats AS
         stawidth AS avg_width,
         stadistinct AS n_distinct,
         CASE
-            WHEN stakind1 IN (1, 4) THEN stavalues1
-            WHEN stakind2 IN (1, 4) THEN stavalues2
-            WHEN stakind3 IN (1, 4) THEN stavalues3
-            WHEN stakind4 IN (1, 4) THEN stavalues4
+            WHEN stakind1 = 1 THEN stavalues1
+            WHEN stakind2 = 1 THEN stavalues2
+            WHEN stakind3 = 1 THEN stavalues3
+            WHEN stakind4 = 1 THEN stavalues4
+            WHEN stakind5 = 1 THEN stavalues5
         END AS most_common_vals,
         CASE
-            WHEN stakind1 IN (1, 4) THEN stanumbers1
-            WHEN stakind2 IN (1, 4) THEN stanumbers2
-            WHEN stakind3 IN (1, 4) THEN stanumbers3
-            WHEN stakind4 IN (1, 4) THEN stanumbers4
+            WHEN stakind1 = 1 THEN stanumbers1
+            WHEN stakind2 = 1 THEN stanumbers2
+            WHEN stakind3 = 1 THEN stanumbers3
+            WHEN stakind4 = 1 THEN stanumbers4
+            WHEN stakind5 = 1 THEN stanumbers5
         END AS most_common_freqs,
         CASE
             WHEN stakind1 = 2 THEN stavalues1
             WHEN stakind2 = 2 THEN stavalues2
             WHEN stakind3 = 2 THEN stavalues3
             WHEN stakind4 = 2 THEN stavalues4
+            WHEN stakind5 = 2 THEN stavalues5
         END AS histogram_bounds,
         CASE
             WHEN stakind1 = 3 THEN stanumbers1[1]
             WHEN stakind2 = 3 THEN stanumbers2[1]
             WHEN stakind3 = 3 THEN stanumbers3[1]
             WHEN stakind4 = 3 THEN stanumbers4[1]
-        END AS correlation
+            WHEN stakind5 = 3 THEN stanumbers5[1]
+        END AS correlation,
+        CASE
+            WHEN stakind1 = 4 THEN stavalues1
+            WHEN stakind2 = 4 THEN stavalues2
+            WHEN stakind3 = 4 THEN stavalues3
+            WHEN stakind4 = 4 THEN stavalues4
+            WHEN stakind5 = 4 THEN stavalues5
+        END AS most_common_elems,
+        CASE
+            WHEN stakind1 = 4 THEN stanumbers1
+            WHEN stakind2 = 4 THEN stanumbers2
+            WHEN stakind3 = 4 THEN stanumbers3
+            WHEN stakind4 = 4 THEN stanumbers4
+            WHEN stakind5 = 4 THEN stanumbers5
+        END AS most_common_elem_freqs,
+        CASE
+            WHEN stakind1 = 5 THEN stanumbers1
+            WHEN stakind2 = 5 THEN stanumbers2
+            WHEN stakind3 = 5 THEN stanumbers3
+            WHEN stakind4 = 5 THEN stanumbers4
+            WHEN stakind5 = 5 THEN stanumbers5
+        END AS elem_count_histogram
     FROM pg_statistic s JOIN pg_class c ON (c.oid = s.starelid)
          JOIN pg_attribute a ON (c.oid = attrelid AND attnum = s.staattnum)
          LEFT JOIN pg_namespace n ON (n.oid = c.relnamespace)
@@ -520,7 +545,7 @@ CREATE VIEW pg_stat_activity AS
     SELECT
             S.datid AS datid,
             D.datname AS datname,
-            S.procpid,
+            S.pid,
             S.usesysid,
             U.rolname AS usename,
             S.application_name,
@@ -530,15 +555,17 @@ CREATE VIEW pg_stat_activity AS
             S.backend_start,
             S.xact_start,
             S.query_start,
+            S.state_change,
             S.waiting,
-            S.current_query
+            S.state,
+            S.query
     FROM pg_database D, pg_stat_get_activity(NULL) AS S, pg_authid U
     WHERE S.datid = D.oid AND
             S.usesysid = U.oid;
 
 CREATE VIEW pg_stat_replication AS
     SELECT
-            S.procpid,
+            S.pid,
             S.usesysid,
             U.rolname AS usename,
             S.application_name,
@@ -556,7 +583,7 @@ CREATE VIEW pg_stat_replication AS
     FROM pg_stat_get_activity(NULL) AS S, pg_authid U,
             pg_stat_get_wal_senders() AS W
     WHERE S.usesysid = U.oid AND
-            S.procpid = W.procpid;
+            S.pid = W.pid;
 
 CREATE VIEW pg_stat_database AS
     SELECT
@@ -574,6 +601,9 @@ CREATE VIEW pg_stat_database AS
             pg_stat_get_db_tuples_updated(D.oid) AS tup_updated,
             pg_stat_get_db_tuples_deleted(D.oid) AS tup_deleted,
             pg_stat_get_db_conflict_all(D.oid) AS conflicts,
+            pg_stat_get_db_temp_files(D.oid) AS temp_files,
+            pg_stat_get_db_temp_bytes(D.oid) AS temp_bytes,
+            pg_stat_get_db_deadlocks(D.oid) AS deadlocks,
             pg_stat_get_db_stat_reset_time(D.oid) AS stats_reset
     FROM pg_database D;
 

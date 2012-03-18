@@ -3,7 +3,7 @@
  * timestamp.h
  *	  Definitions for the SQL92 "timestamp" and "interval" types.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/timestamp.h
@@ -100,6 +100,7 @@ extern Datum timestamp_recv(PG_FUNCTION_ARGS);
 extern Datum timestamp_send(PG_FUNCTION_ARGS);
 extern Datum timestamptypmodin(PG_FUNCTION_ARGS);
 extern Datum timestamptypmodout(PG_FUNCTION_ARGS);
+extern Datum timestamp_transform(PG_FUNCTION_ARGS);
 extern Datum timestamp_scale(PG_FUNCTION_ARGS);
 extern Datum timestamp_eq(PG_FUNCTION_ARGS);
 extern Datum timestamp_ne(PG_FUNCTION_ARGS);
@@ -109,6 +110,7 @@ extern Datum timestamp_ge(PG_FUNCTION_ARGS);
 extern Datum timestamp_gt(PG_FUNCTION_ARGS);
 extern Datum timestamp_finite(PG_FUNCTION_ARGS);
 extern Datum timestamp_cmp(PG_FUNCTION_ARGS);
+extern Datum timestamp_sortsupport(PG_FUNCTION_ARGS);
 extern Datum timestamp_hash(PG_FUNCTION_ARGS);
 extern Datum timestamp_smaller(PG_FUNCTION_ARGS);
 extern Datum timestamp_larger(PG_FUNCTION_ARGS);
@@ -135,6 +137,7 @@ extern Datum interval_recv(PG_FUNCTION_ARGS);
 extern Datum interval_send(PG_FUNCTION_ARGS);
 extern Datum intervaltypmodin(PG_FUNCTION_ARGS);
 extern Datum intervaltypmodout(PG_FUNCTION_ARGS);
+extern Datum interval_transform(PG_FUNCTION_ARGS);
 extern Datum interval_scale(PG_FUNCTION_ARGS);
 extern Datum interval_eq(PG_FUNCTION_ARGS);
 extern Datum interval_ne(PG_FUNCTION_ARGS);
@@ -219,7 +222,7 @@ extern const char *timestamptz_to_str(TimestampTz t);
 
 extern int	tm2timestamp(struct pg_tm * tm, fsec_t fsec, int *tzp, Timestamp *dt);
 extern int timestamp2tm(Timestamp dt, int *tzp, struct pg_tm * tm,
-			 fsec_t *fsec, char **tzn, pg_tz *attimezone);
+			 fsec_t *fsec, const char **tzn, pg_tz *attimezone);
 extern void dt2time(Timestamp dt, int *hour, int *min, int *sec, fsec_t *fsec);
 
 extern int	interval2tm(Interval span, struct pg_tm * tm, fsec_t *fsec);

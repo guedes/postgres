@@ -6,7 +6,7 @@
  * See src/backend/utils/misc/README for more information.
  *
  *
- * Copyright (c) 2000-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2012, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
  * IDENTIFICATION
@@ -39,6 +39,7 @@
 #include "funcapi.h"
 #include "libpq/auth.h"
 #include "libpq/be-fsstubs.h"
+#include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "optimizer/cost.h"
@@ -130,7 +131,6 @@ extern int	CommitSiblings;
 extern char *default_tablespace;
 extern char *temp_tablespaces;
 extern bool synchronize_seqscans;
-extern bool fullPageWrites;
 extern int	ssl_renegotiation_limit;
 extern char *SSLCipherSuites;
 
@@ -370,11 +370,12 @@ static const struct config_enum_entry constraint_exclusion_options[] = {
 };
 
 /*
- * Although only "on", "off", and "local" are documented, we
+ * Although only "on", "off", "write", and "local" are documented, we
  * accept all the likely variants of "on" and "off".
  */
 static const struct config_enum_entry synchronous_commit_options[] = {
 	{"local", SYNCHRONOUS_COMMIT_LOCAL_FLUSH, false},
+	{"write", SYNCHRONOUS_COMMIT_REMOTE_WRITE, false},
 	{"on", SYNCHRONOUS_COMMIT_ON, false},
 	{"off", SYNCHRONOUS_COMMIT_OFF, false},
 	{"true", SYNCHRONOUS_COMMIT_ON, true},
@@ -1057,6 +1058,16 @@ static struct config_bool ConfigureNamesBool[] =
 			GUC_NOT_IN_SAMPLE
 		},
 		&Trace_locks,
+		false,
+		NULL, NULL, NULL
+	},
+	{
+		{"trace_userlocks", PGC_SUSET, DEVELOPER_OPTIONS,
+			gettext_noop("No description available."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&Trace_userlocks,
 		false,
 		NULL, NULL, NULL
 	},
@@ -2229,7 +2240,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 	{
 		{"autovacuum_analyze_threshold", PGC_SIGHUP, AUTOVACUUM,
-			gettext_noop("Minimum number of tuple inserts, updates or deletes prior to analyze."),
+			gettext_noop("Minimum number of tuple inserts, updates, or deletes prior to analyze."),
 			NULL
 		},
 		&autovacuum_anl_thresh,
@@ -2352,7 +2363,7 @@ static struct config_int ConfigureNamesInt[] =
 
 	{
 		{"track_activity_query_size", PGC_POSTMASTER, RESOURCES_MEM,
-			gettext_noop("Sets the size reserved for pg_stat_activity.current_query, in bytes."),
+			gettext_noop("Sets the size reserved for pg_stat_activity.query, in bytes."),
 			NULL,
 		},
 		&pgstat_track_activity_query_size,
@@ -2483,7 +2494,7 @@ static struct config_real ConfigureNamesReal[] =
 	},
 	{
 		{"autovacuum_analyze_scale_factor", PGC_SIGHUP, AUTOVACUUM,
-			gettext_noop("Number of tuple inserts, updates or deletes prior to analyze as a fraction of reltuples."),
+			gettext_noop("Number of tuple inserts, updates, or deletes prior to analyze as a fraction of reltuples."),
 			NULL
 		},
 		&autovacuum_anl_scale,
@@ -2951,6 +2962,46 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
+		{"ssl_cert_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+			gettext_noop("Location of the SSL server certificate file."),
+			NULL
+		},
+		&ssl_cert_file,
+		"server.crt",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"ssl_key_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+			gettext_noop("Location of the SSL server private key file."),
+			NULL
+		},
+		&ssl_key_file,
+		"server.key",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"ssl_ca_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+			gettext_noop("Location of the SSL certificate authority file."),
+			NULL
+		},
+		&ssl_ca_file,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"ssl_crl_file", PGC_POSTMASTER, CONN_AUTH_SECURITY,
+			gettext_noop("Location of the SSL certificate revocation list file."),
+			NULL
+		},
+		&ssl_crl_file,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
 		{"stats_temp_directory", PGC_SIGHUP, STATS_COLLECTOR,
 			gettext_noop("Writes temporary statistics files to the specified directory."),
 			NULL,
@@ -3154,7 +3205,7 @@ static struct config_enum ConfigureNamesEnum[] =
 		},
 		&synchronous_commit,
 		SYNCHRONOUS_COMMIT_ON, synchronous_commit_options,
-		NULL, NULL, NULL
+		NULL, assign_synchronous_commit, NULL
 	},
 
 	{
@@ -3729,8 +3780,8 @@ find_option(const char *name, bool create_placeholders, int elevel)
 static int
 guc_var_compare(const void *a, const void *b)
 {
-	struct config_generic *confa = *(struct config_generic **) a;
-	struct config_generic *confb = *(struct config_generic **) b;
+	const struct config_generic *confa = *(struct config_generic * const *) a;
+	const struct config_generic *confb = *(struct config_generic * const *) b;
 
 	return guc_name_compare(confa->name, confb->name);
 }
@@ -4044,6 +4095,7 @@ SelectConfigFiles(const char *userDoption, const char *progname)
 	{
 		write_stderr("%s cannot access the server configuration file \"%s\": %s\n",
 					 progname, ConfigFileName, strerror(errno));
+		free(configdir);
 		return false;
 	}
 

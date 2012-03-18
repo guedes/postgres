@@ -10,7 +10,7 @@
  * the location.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/parsenodes.h
@@ -504,16 +504,16 @@ typedef struct ColumnDef
 } ColumnDef;
 
 /*
- * inhRelation - Relation a CREATE TABLE is to inherit attributes of
+ * TableLikeClause - CREATE TABLE ( ... LIKE ... ) clause
  */
-typedef struct InhRelation
+typedef struct TableLikeClause
 {
 	NodeTag		type;
 	RangeVar   *relation;
-	bits32		options;		/* OR of CreateStmtLikeOption flags */
-} InhRelation;
+	bits32		options;		/* OR of TableLikeOption flags */
+} TableLikeClause;
 
-typedef enum CreateStmtLikeOption
+typedef enum TableLikeOption
 {
 	CREATE_TABLE_LIKE_DEFAULTS = 1 << 0,
 	CREATE_TABLE_LIKE_CONSTRAINTS = 1 << 1,
@@ -521,7 +521,7 @@ typedef enum CreateStmtLikeOption
 	CREATE_TABLE_LIKE_STORAGE = 1 << 3,
 	CREATE_TABLE_LIKE_COMMENTS = 1 << 4,
 	CREATE_TABLE_LIKE_ALL = 0x7FFFFFFF
-} CreateStmtLikeOption;
+} TableLikeOption;
 
 /*
  * IndexElem - index parameters (used in CREATE INDEX)
@@ -706,6 +706,7 @@ typedef struct RangeTblEntry
 	 * Fields valid for a subquery RTE (else NULL):
 	 */
 	Query	   *subquery;		/* the sub-query */
+	bool		security_barrier;	/* subquery from security_barrier view */
 
 	/*
 	 * Fields valid for a join RTE (else NULL/zero):
@@ -1170,6 +1171,7 @@ typedef struct AlterTableStmt
 	RangeVar   *relation;		/* table to work on */
 	List	   *cmds;			/* list of subcommands */
 	ObjectType	relkind;		/* type of object */
+	bool	   missing_ok;		/* skip error if table missing */
 } AlterTableStmt;
 
 typedef enum AlterTableType
@@ -1208,6 +1210,7 @@ typedef enum AlterTableType
 	AT_SetTableSpace,			/* SET TABLESPACE */
 	AT_SetRelOptions,			/* SET (...) -- AM specific parameters */
 	AT_ResetRelOptions,			/* RESET (...) -- AM specific parameters */
+	AT_ReplaceRelOptions,		/* replace reloption list in its entirety */
 	AT_EnableTrig,				/* ENABLE TRIGGER name */
 	AT_EnableAlwaysTrig,		/* ENABLE ALWAYS TRIGGER name */
 	AT_EnableReplicaTrig,		/* ENABLE REPLICA TRIGGER name */
@@ -1262,6 +1265,7 @@ typedef struct AlterDomainStmt
 	char	   *name;			/* column or constraint name to act on */
 	Node	   *def;			/* definition of default or constraint */
 	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
+	bool		missing_ok;		/* skip error if missing? */
 } AlterDomainStmt;
 
 
@@ -1282,13 +1286,15 @@ typedef enum GrantObjectType
 	ACL_OBJECT_RELATION,		/* table, view */
 	ACL_OBJECT_SEQUENCE,		/* sequence */
 	ACL_OBJECT_DATABASE,		/* database */
+	ACL_OBJECT_DOMAIN,			/* domain */
 	ACL_OBJECT_FDW,				/* foreign-data wrapper */
 	ACL_OBJECT_FOREIGN_SERVER,	/* foreign server */
 	ACL_OBJECT_FUNCTION,		/* function */
 	ACL_OBJECT_LANGUAGE,		/* procedural language */
 	ACL_OBJECT_LARGEOBJECT,		/* largeobject */
 	ACL_OBJECT_NAMESPACE,		/* namespace */
-	ACL_OBJECT_TABLESPACE		/* tablespace */
+	ACL_OBJECT_TABLESPACE,		/* tablespace */
+	ACL_OBJECT_TYPE				/* type */
 } GrantObjectType;
 
 typedef struct GrantStmt
@@ -1546,6 +1552,7 @@ typedef struct Constraint
 	char		fk_matchtype;	/* FULL, PARTIAL, UNSPECIFIED */
 	char		fk_upd_action;	/* ON UPDATE action */
 	char		fk_del_action;	/* ON DELETE action */
+	List	   *old_conpfeqop;	/* pg_constraint.conpfeqop of my former self */
 
 	/* Fields used for constraints that allow a NOT VALID specification */
 	bool		skip_validation;	/* skip validation of existing rows? */
@@ -1612,7 +1619,7 @@ typedef struct AlterExtensionContentsStmt
 } AlterExtensionContentsStmt;
 
 /* ----------------------
- *		Create/Drop FOREIGN DATA WRAPPER Statements
+ *		Create/Alter FOREIGN DATA WRAPPER Statements
  * ----------------------
  */
 
@@ -1632,16 +1639,8 @@ typedef struct AlterFdwStmt
 	List	   *options;		/* generic options to FDW */
 } AlterFdwStmt;
 
-typedef struct DropFdwStmt
-{
-	NodeTag		type;
-	char	   *fdwname;		/* foreign-data wrapper name */
-	bool		missing_ok;		/* don't complain if missing */
-	DropBehavior behavior;		/* drop behavior - cascade/restrict */
-} DropFdwStmt;
-
 /* ----------------------
- *		Create/Drop FOREIGN SERVER Statements
+ *		Create/Alter FOREIGN SERVER Statements
  * ----------------------
  */
 
@@ -1663,14 +1662,6 @@ typedef struct AlterForeignServerStmt
 	List	   *options;		/* generic options to server */
 	bool		has_version;	/* version specified */
 } AlterForeignServerStmt;
-
-typedef struct DropForeignServerStmt
-{
-	NodeTag		type;
-	char	   *servername;		/* server name */
-	bool		missing_ok;		/* ignore missing servers */
-	DropBehavior behavior;		/* drop behavior - cascade/restrict */
-} DropForeignServerStmt;
 
 /* ----------------------
  *		Create FOREIGN TABLE Statements
@@ -1739,7 +1730,7 @@ typedef struct CreateTrigStmt
 } CreateTrigStmt;
 
 /* ----------------------
- *		Create/Drop PROCEDURAL LANGUAGE Statements
+ *		Create PROCEDURAL LANGUAGE Statements
  * ----------------------
  */
 typedef struct CreatePLangStmt
@@ -1752,14 +1743,6 @@ typedef struct CreatePLangStmt
 	List	   *plvalidator;	/* optional validator function (qual. name) */
 	bool		pltrusted;		/* PL is trusted */
 } CreatePLangStmt;
-
-typedef struct DropPLangStmt
-{
-	NodeTag		type;
-	char	   *plname;			/* PL name */
-	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
-	bool		missing_ok;		/* skip error if missing? */
-} DropPLangStmt;
 
 /* ----------------------
  *	Create/Alter/Drop Role Statements
@@ -1826,6 +1809,7 @@ typedef struct AlterSeqStmt
 	NodeTag		type;
 	RangeVar   *sequence;		/* the sequence to alter */
 	List	   *options;
+	bool		missing_ok;		/* skip error if a role is missing? */
 } AlterSeqStmt;
 
 /* ----------------------
@@ -1921,28 +1905,11 @@ typedef struct DropStmt
 {
 	NodeTag		type;
 	List	   *objects;		/* list of sublists of names (as Values) */
+	List	   *arguments;		/* list of sublists of arguments (as Values) */
 	ObjectType	removeType;		/* object type */
 	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
 	bool		missing_ok;		/* skip error if object is missing? */
 } DropStmt;
-
-/* ----------------------
- *		Drop Rule|Trigger Statement
- *
- * In general this may be used for dropping any property of a relation;
- * for example, someday soon we may have DROP ATTRIBUTE.
- * ----------------------
- */
-
-typedef struct DropPropertyStmt
-{
-	NodeTag		type;
-	RangeVar   *relation;		/* owning relation */
-	char	   *property;		/* name of rule, trigger, etc */
-	ObjectType	removeType;		/* OBJECT_RULE or OBJECT_TRIGGER */
-	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
-	bool		missing_ok;		/* skip error if missing? */
-} DropPropertyStmt;
 
 /* ----------------------
  *				Truncate Table Statement
@@ -2118,20 +2085,6 @@ typedef struct AlterFunctionStmt
 } AlterFunctionStmt;
 
 /* ----------------------
- *		Drop {Function|Aggregate|Operator} Statement
- * ----------------------
- */
-typedef struct RemoveFuncStmt
-{
-	NodeTag		type;
-	ObjectType	kind;			/* function, aggregate, operator */
-	List	   *name;			/* qualified name of object to drop */
-	List	   *args;			/* types of the arguments */
-	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
-	bool		missing_ok;		/* skip error if missing? */
-} RemoveFuncStmt;
-
-/* ----------------------
  *		DO Statement
  *
  * DoStmt is the raw parser output, InlineCodeBlock is the execution-time API
@@ -2152,32 +2105,6 @@ typedef struct InlineCodeBlock
 } InlineCodeBlock;
 
 /* ----------------------
- *		Drop Operator Class Statement
- * ----------------------
- */
-typedef struct RemoveOpClassStmt
-{
-	NodeTag		type;
-	List	   *opclassname;	/* qualified name (list of Value strings) */
-	char	   *amname;			/* name of index AM opclass is for */
-	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
-	bool		missing_ok;		/* skip error if missing? */
-} RemoveOpClassStmt;
-
-/* ----------------------
- *		Drop Operator Family Statement
- * ----------------------
- */
-typedef struct RemoveOpFamilyStmt
-{
-	NodeTag		type;
-	List	   *opfamilyname;	/* qualified name (list of Value strings) */
-	char	   *amname;			/* name of index AM opfamily is for */
-	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
-	bool		missing_ok;		/* skip error if missing? */
-} RemoveOpFamilyStmt;
-
-/* ----------------------
  *		Alter Object Rename Statement
  * ----------------------
  */
@@ -2193,6 +2120,7 @@ typedef struct RenameStmt
 								 * trigger, etc) */
 	char	   *newname;		/* the new name */
 	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
+	bool		missing_ok;	/* skip error if missing? */
 } RenameStmt;
 
 /* ----------------------
@@ -2208,6 +2136,7 @@ typedef struct AlterObjectSchemaStmt
 	List	   *objarg;			/* argument types, if applicable */
 	char	   *addname;		/* additional name if needed */
 	char	   *newschema;		/* the new schema */
+	bool		missing_ok;	/* skip error if missing? */
 } AlterObjectSchemaStmt;
 
 /* ----------------------
@@ -2322,6 +2251,17 @@ typedef struct CreateEnumStmt
 } CreateEnumStmt;
 
 /* ----------------------
+ *		Create Type Statement, range types
+ * ----------------------
+ */
+typedef struct CreateRangeStmt
+{
+	NodeTag		type;
+	List	   *typeName;		/* qualified name (list of Value strings) */
+	List	   *params;			/* range parameters (list of DefElem) */
+} CreateRangeStmt;
+
+/* ----------------------
  *		Alter Type Statement, enum types
  * ----------------------
  */
@@ -2345,6 +2285,7 @@ typedef struct ViewStmt
 	List	   *aliases;		/* target column names */
 	Node	   *query;			/* the SELECT query */
 	bool		replace;		/* replace an existing view? */
+	List	   *options;		/* options from WITH clause */
 } ViewStmt;
 
 /* ----------------------
@@ -2545,20 +2486,6 @@ typedef struct CreateCastStmt
 	CoercionContext context;
 	bool		inout;
 } CreateCastStmt;
-
-/* ----------------------
- *	DROP CAST Statement
- * ----------------------
- */
-typedef struct DropCastStmt
-{
-	NodeTag		type;
-	TypeName   *sourcetype;
-	TypeName   *targettype;
-	DropBehavior behavior;
-	bool		missing_ok;		/* skip error if missing? */
-} DropCastStmt;
-
 
 /* ----------------------
  *		PREPARE Statement

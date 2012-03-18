@@ -6,7 +6,7 @@
  * with servers of versions 7.4 and up.  It's okay to omit irrelevant
  * information for an old server, but not to fail outright.
  *
- * Copyright (c) 2000-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2012, PostgreSQL Global Development Group
  *
  * src/bin/psql/describe.c
  */
@@ -139,13 +139,22 @@ describeTablespaces(const char *pattern, bool verbose)
 
 	initPQExpBuffer(&buf);
 
-	printfPQExpBuffer(&buf,
-					  "SELECT spcname AS \"%s\",\n"
-					  "  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
-					  "  spclocation AS \"%s\"",
-					  gettext_noop("Name"),
-					  gettext_noop("Owner"),
-					  gettext_noop("Location"));
+	if (pset.sversion >= 90200)
+		printfPQExpBuffer(&buf,
+						  "SELECT spcname AS \"%s\",\n"
+						  "  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
+						  "  pg_catalog.pg_tablespace_location(oid) AS \"%s\"",
+						  gettext_noop("Name"),
+						  gettext_noop("Owner"),
+						  gettext_noop("Location"));
+	else
+		printfPQExpBuffer(&buf,
+						  "SELECT spcname AS \"%s\",\n"
+						  "  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
+						  "  spclocation AS \"%s\"",
+						  gettext_noop("Name"),
+						  gettext_noop("Owner"),
+						  gettext_noop("Location"));
 
 	if (verbose)
 	{
@@ -494,6 +503,11 @@ describeTypes(const char *pattern, bool verbose, bool showSystem)
 						  "      E'\\n'\n"
 						  "  ) AS \"%s\",\n",
 						  gettext_noop("Elements"));
+	}
+	if (verbose && pset.sversion >= 90200)
+	{
+		printACLColumn(&buf, "t.typacl");
+		appendPQExpBuffer(&buf, ",\n  ");
 	}
 
 	appendPQExpBuffer(&buf,
@@ -876,8 +890,7 @@ objectDescription(const char *pattern, bool showSystem)
 						  "pg_catalog.pg_table_is_visible(c.oid)");
 
 	/*
-	 * pg_opclass.opcmethod only available in 8.3+, and comment on operator
-	 * family only available in 8.3+
+	 * pg_opclass.opcmethod only available in 8.3+
 	 */
 	if (pset.sversion >= 80300)
 	{
@@ -902,7 +915,14 @@ objectDescription(const char *pattern, bool showSystem)
 		processSQLNamePattern(pset.db, &buf, pattern, true, false,
 							  "n.nspname", "o.opcname", NULL,
 							  "pg_catalog.pg_opclass_is_visible(o.oid)");
+	}
 
+	/*
+	 * although operator family comments have been around since 8.3,
+	 * pg_opfamily_is_visible is only available in 9.2+
+	 */
+	if (pset.sversion >= 90200)
+	{
 		/* Operator family descriptions */
 		appendPQExpBuffer(&buf,
 						  "UNION ALL\n"
@@ -1253,7 +1273,7 @@ describeOneTableDetails(const char *schemaname,
 	/*
 	 * Get column info
 	 *
-	 * You need to modify value of "firstvcol" which willbe defined below if
+	 * You need to modify value of "firstvcol" which will be defined below if
 	 * you are adding column(s) preceding to verbose-only columns.
 	 */
 	printfPQExpBuffer(&buf, "SELECT a.attname,");
@@ -1280,6 +1300,7 @@ describeOneTableDetails(const char *schemaname,
 	if (verbose)
 	{
 		appendPQExpBuffer(&buf, ",\n  a.attstorage");
+		appendPQExpBuffer(&buf, ",\n  CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget");
 		/*
 		 * In 9.0+, we have column comments for: relations, views, composite
 		 * types, and foreign tables (c.f. CommentObject() in comment.c).
@@ -1374,6 +1395,8 @@ describeOneTableDetails(const char *schemaname,
 	if (verbose)
 	{
 		headers[cols++] = gettext_noop("Storage");
+		if (tableinfo.relkind == 'r')
+			headers[cols++] = gettext_noop("Stats target");
 		/* Column comments, if the relkind supports this feature. */
 		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
 			tableinfo.relkind == 'c' || tableinfo.relkind == 'f')
@@ -1473,10 +1496,18 @@ describeOneTableDetails(const char *schemaname,
 										(storage[0] == 'e' ? "external" :
 										 "???")))),
 							  false, false);
+
+			/* Statistics target, if the relkind supports this feature */
+			if (tableinfo.relkind == 'r')
+			{
+				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 1),
+								  false, false);
+			}
+
 			/* Column comments, if the relkind supports this feature. */
 			if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
 				tableinfo.relkind == 'c' || tableinfo.relkind == 'f')
-				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 1),
+				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 2),
 								  false, false);
 		}
 	}
@@ -1609,6 +1640,43 @@ describeOneTableDetails(const char *schemaname,
 			PQclear(result);
 		}
 	}
+	else if (tableinfo.relkind == 'S')
+	{
+		/* Footer information about a sequence */
+		PGresult   *result = NULL;
+
+		/* Get the column that owns this sequence */
+		printfPQExpBuffer(&buf, "SELECT pg_catalog.quote_ident(nspname) || '.' ||"
+						  "\n   pg_catalog.quote_ident(relname) || '.' ||"
+						  "\n   pg_catalog.quote_ident(attname)"
+						  "\nFROM pg_catalog.pg_class c"
+						  "\nINNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid"
+						  "\nINNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace"
+						  "\nINNER JOIN pg_catalog.pg_attribute a ON ("
+						  "\n a.attrelid=c.oid AND"
+						  "\n a.attnum=d.refobjsubid)"
+						  "\nWHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass"
+						  "\n AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass"
+						  "\n AND d.objid=%s"
+						  "\n AND d.deptype='a'",
+						  oid);
+
+		result = PSQLexec(buf.data, false);
+		if (!result)
+			goto error_return;
+		else if (PQntuples(result) == 1)
+		{
+			printfPQExpBuffer(&buf, _("Owned by: %s"),
+							  PQgetvalue(result, 0, 0));
+			printTableAddFooter(&cont, buf.data);
+		}
+		/*
+		 * If we get no rows back, don't show anything (obviously).
+		 * We should never get more than one row back, but if we do,
+		 * just ignore it and don't print anything.
+		 */
+		PQclear(result);
+	}
 	else if (tableinfo.relkind == 'r' || tableinfo.relkind == 'f')
 	{
 		/* Footer information about a table */
@@ -1718,12 +1786,20 @@ describeOneTableDetails(const char *schemaname,
 		/* print table (and column) check constraints */
 		if (tableinfo.checks)
 		{
+			char *is_only;
+
+			if (pset.sversion >= 90200)
+				is_only = "r.conisonly";
+			else
+				is_only = "false AS conisonly";
+
 			printfPQExpBuffer(&buf,
-							  "SELECT r.conname, "
+							  "SELECT r.conname, %s, "
 							  "pg_catalog.pg_get_constraintdef(r.oid, true)\n"
 							  "FROM pg_catalog.pg_constraint r\n"
-				   "WHERE r.conrelid = '%s' AND r.contype = 'c'\nORDER BY 1;",
-							  oid);
+				   "WHERE r.conrelid = '%s' AND r.contype = 'c'\n"
+				   			  "ORDER BY 2 DESC, 1;",
+							  is_only, oid);
 			result = PSQLexec(buf.data, false);
 			if (!result)
 				goto error_return;
@@ -1736,9 +1812,10 @@ describeOneTableDetails(const char *schemaname,
 				for (i = 0; i < tuples; i++)
 				{
 					/* untranslated contraint name and def */
-					printfPQExpBuffer(&buf, "    \"%s\" %s",
+					printfPQExpBuffer(&buf, "    \"%s\"%s%s",
 									  PQgetvalue(result, i, 0),
-									  PQgetvalue(result, i, 1));
+									  (strcmp(PQgetvalue(result, i, 1), "t") == 0) ? " (ONLY) ":" ",
+									  PQgetvalue(result, i, 2));
 
 					printTableAddFooter(&cont, buf.data);
 				}
@@ -2079,22 +2156,28 @@ describeOneTableDetails(const char *schemaname,
 		if (!result)
 			goto error_return;
 		else
-			tuples = PQntuples(result);
-
-		for (i = 0; i < tuples; i++)
 		{
 			const char *s = _("Inherits");
+			int			sw = pg_wcswidth(s, strlen(s), pset.encoding);
 
-			if (i == 0)
-				printfPQExpBuffer(&buf, "%s: %s", s, PQgetvalue(result, i, 0));
-			else
-				printfPQExpBuffer(&buf, "%*s  %s", (int) strlen(s), "", PQgetvalue(result, i, 0));
-			if (i < tuples - 1)
-				appendPQExpBuffer(&buf, ",");
+			tuples = PQntuples(result);
 
-			printTableAddFooter(&cont, buf.data);
+			for (i = 0; i < tuples; i++)
+			{
+				if (i == 0)
+					printfPQExpBuffer(&buf, "%s: %s",
+									  s, PQgetvalue(result, i, 0));
+				else
+					printfPQExpBuffer(&buf, "%*s  %s",
+									  sw, "", PQgetvalue(result, i, 0));
+				if (i < tuples - 1)
+					appendPQExpBuffer(&buf, ",");
+
+				printTableAddFooter(&cont, buf.data);
+			}
+
+			PQclear(result);
 		}
-		PQclear(result);
 
 		/* print child tables */
 		if (pset.sversion >= 80300)
@@ -2121,6 +2204,7 @@ describeOneTableDetails(const char *schemaname,
 		{
 			/* display the list of child tables */
 			const char *ct = _("Child tables");
+			int			ctw = pg_wcswidth(ct, strlen(ct), pset.encoding);
 
 			for (i = 0; i < tuples; i++)
 			{
@@ -2129,8 +2213,7 @@ describeOneTableDetails(const char *schemaname,
 									  ct, PQgetvalue(result, i, 0));
 				else
 					printfPQExpBuffer(&buf, "%*s  %s",
-									  (int) strlen(ct), "",
-									  PQgetvalue(result, i, 0));
+									  ctw, "", PQgetvalue(result, i, 0));
 				if (i < tuples - 1)
 					appendPQExpBuffer(&buf, ",");
 
@@ -2741,9 +2824,16 @@ listDomains(const char *pattern, bool verbose, bool showSystem)
 					  gettext_noop("Check"));
 
 	if (verbose)
+	{
+		if (pset.sversion >= 90200)
+		{
+			appendPQExpBuffer(&buf, ",\n  ");
+			printACLColumn(&buf, "t.typacl");
+		}
 		appendPQExpBuffer(&buf,
 						  ",\n       d.description as \"%s\"",
 						  gettext_noop("Description"));
+	}
 
 	appendPQExpBuffer(&buf,
 					  "\nFROM pg_catalog.pg_type t\n"

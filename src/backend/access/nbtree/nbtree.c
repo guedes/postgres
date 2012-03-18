@@ -8,7 +8,7 @@
  *	  This file contains only the public interface routines.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1004,14 +1004,15 @@ restart:
 		}
 
 		/*
-		 * Apply any needed deletes.  We issue just one _bt_delitems() call
-		 * per page, so as to minimize WAL traffic.
+		 * Apply any needed deletes.  We issue just one _bt_delitems_vacuum()
+		 * call per page, so as to minimize WAL traffic.
 		 */
 		if (ndeletable > 0)
 		{
 			BlockNumber lastBlockVacuumed = BufferGetBlockNumber(buf);
 
-			_bt_delitems_vacuum(rel, buf, deletable, ndeletable, vstate->lastBlockVacuumed);
+			_bt_delitems_vacuum(rel, buf, deletable, ndeletable,
+								vstate->lastBlockVacuumed);
 
 			/*
 			 * Keep track of the block number of the lastBlockVacuumed, so we
@@ -1031,8 +1032,8 @@ restart:
 			/*
 			 * If the page has been split during this vacuum cycle, it seems
 			 * worth expending a write to clear btpo_cycleid even if we don't
-			 * have any deletions to do.  (If we do, _bt_delitems takes care
-			 * of this.)  This ensures we won't process the page again.
+			 * have any deletions to do.  (If we do, _bt_delitems_vacuum takes
+			 * care of this.)  This ensures we won't process the page again.
 			 *
 			 * We treat this like a hint-bit update because there's no need to
 			 * WAL-log it.
@@ -1090,4 +1091,15 @@ restart:
 		blkno = recurse_to;
 		goto restart;
 	}
+}
+
+/*
+ *	btcanreturn() -- Check whether btree indexes support index-only scans.
+ *
+ * btrees always do, so this is trivial.
+ */
+Datum
+btcanreturn(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_BOOL(true);
 }

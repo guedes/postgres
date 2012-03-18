@@ -1,12 +1,13 @@
 /*-------------------------------------------------------------------------
  *
  * gistproc.c
- *	  Support procedures for GiSTs over 2-D objects (boxes, polygons, circles).
+ *	  Support procedures for GiSTs over 2-D objects (boxes, polygons, circles,
+ *	  points).
  *
  * This gives R-tree behavior, with Guttman's poly-time split algorithm.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -283,8 +284,8 @@ typedef struct
 static int
 interval_cmp_lower(const void *i1, const void *i2)
 {
-	double		lower1 = ((SplitInterval *) i1)->lower,
-				lower2 = ((SplitInterval *) i2)->lower;
+	double		lower1 = ((const SplitInterval *) i1)->lower,
+				lower2 = ((const SplitInterval *) i2)->lower;
 
 	if (lower1 < lower2)
 		return -1;
@@ -300,8 +301,8 @@ interval_cmp_lower(const void *i1, const void *i2)
 static int
 interval_cmp_upper(const void *i1, const void *i2)
 {
-	double		upper1 = ((SplitInterval *) i1)->upper,
-				upper2 = ((SplitInterval *) i2)->upper;
+	double		upper1 = ((const SplitInterval *) i1)->upper,
+				upper2 = ((const SplitInterval *) i2)->upper;
 
 	if (upper1 < upper2)
 		return -1;
@@ -454,8 +455,8 @@ box_penalty(BOX *original, BOX *new)
 static int
 common_entry_cmp(const void *i1, const void *i2)
 {
-	double		delta1 = ((CommonEntry *) i1)->delta,
-				delta2 = ((CommonEntry *) i2)->delta;
+	double		delta1 = ((const CommonEntry *) i1)->delta,
+				delta2 = ((const CommonEntry *) i2)->delta;
 
 	if (delta1 < delta2)
 		return -1;

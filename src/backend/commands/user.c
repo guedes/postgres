@@ -3,7 +3,7 @@
  * user.c
  *	  Commands for manipulating roles (formerly called users).
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/commands/user.c
@@ -239,16 +239,7 @@ CreateRole(CreateRoleStmt *stmt)
 	if (dpassword && dpassword->arg)
 		password = strVal(dpassword->arg);
 	if (dissuper)
-	{
 		issuper = intVal(dissuper->arg) != 0;
-
-		/*
-		 * Superusers get replication by default, but only if NOREPLICATION
-		 * wasn't explicitly mentioned
-		 */
-		if (issuper && !(disreplication && intVal(disreplication->arg) == 0))
-			isreplication = 1;
-	}
 	if (dinherit)
 		inherit = intVal(dinherit->arg) != 0;
 	if (dcreaterole)
@@ -434,7 +425,8 @@ CreateRole(CreateRoleStmt *stmt)
 				GetUserId(), false);
 
 	/* Post creation hook for new role */
-	InvokeObjectAccessHook(OAT_POST_CREATE, AuthIdRelationId, roleid, 0);
+	InvokeObjectAccessHook(OAT_POST_CREATE,
+						   AuthIdRelationId, roleid, 0, NULL);
 
 	/*
 	 * Close pg_authid, but keep lock till commit.
@@ -940,6 +932,15 @@ DropRole(DropRoleStmt *stmt)
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 					 errmsg("must be superuser to drop superusers")));
+
+		/* DROP hook for the role being removed */
+		if (object_access_hook)
+		{
+			ObjectAccessDrop	drop_arg;
+			memset(&drop_arg, 0, sizeof(ObjectAccessDrop));
+			InvokeObjectAccessHook(OAT_DROP,
+								   AuthIdRelationId, roleid, 0, &drop_arg);
+		}
 
 		/*
 		 * Lock the role, so nobody can add dependencies to her while we drop

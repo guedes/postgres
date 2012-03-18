@@ -3,7 +3,7 @@
  * lock.c
  *	  POSTGRES primary lock mechanism
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -213,7 +213,12 @@ static const LockMethodData user_lockmethod = {
 	AccessExclusiveLock,		/* highest valid lock mode number */
 	true,
 	LockConflicts,
-	lock_mode_names
+	lock_mode_names,
+#ifdef LOCK_DEBUG
+	&Trace_userlocks
+#else
+	&Dummy_trace
+#endif
 };
 
 /*
@@ -271,6 +276,7 @@ static ResourceOwner awaitedOwner;
 
 int			Trace_lock_oidmin = FirstNormalObjectId;
 bool		Trace_locks = false;
+bool		Trace_userlocks = false;
 int			Trace_lock_table = 0;
 bool		Debug_deadlocks = false;
 
@@ -3182,9 +3188,20 @@ GetRunningTransactionLocks(int *nlocks)
 			proclock->tag.myLock->tag.locktag_type == LOCKTAG_RELATION)
 		{
 			PGPROC	   *proc = proclock->tag.myProc;
+			PGXACT	   *pgxact = &ProcGlobal->allPgXact[proc->pgprocno];
 			LOCK	   *lock = proclock->tag.myLock;
+			TransactionId xid = pgxact->xid;
 
-			accessExclusiveLocks[index].xid = proc->xid;
+			/*
+			 * Don't record locks for transactions if we know they have already
+			 * issued their WAL record for commit but not yet released lock.
+			 * It is still possible that we see locks held by already complete
+			 * transactions, if they haven't yet zeroed their xids.
+			 */
+			if (!TransactionIdIsValid(xid))
+				continue;
+
+			accessExclusiveLocks[index].xid = xid;
 			accessExclusiveLocks[index].dbOid = lock->tag.locktag_field1;
 			accessExclusiveLocks[index].relOid = lock->tag.locktag_field2;
 

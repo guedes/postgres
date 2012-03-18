@@ -91,6 +91,18 @@ include 'filename'
 
    <para>
     <indexterm>
+     <primary><literal>include_if_exists</></primary>
+     <secondary>in configuration file</secondary>
+    </indexterm>
+    Use the same approach as the <literal>include</> directive, continuing
+    normally if the file does not exist.  A regular <literal>include</>
+    will stop with an error if the referenced file is missing, while
+    <literal>include_if_exists</> does not.  A warning about the missing
+    file will be logged.
+   </para>
+
+   <para>
+    <indexterm>
      <primary>SIGHUP</primary>
     </indexterm>
     The configuration file is reread whenever the main server process receives a
@@ -652,6 +664,70 @@ SET ENABLE_SEQSCAN TO OFF;
         is <literal>off</>. This parameter can only be set at server
         start.  <acronym>SSL</> communication is only possible with
         TCP/IP connections.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-ssl-ca-file" xreflabel="ssl_ca_file">
+      <term><varname>ssl_ca_file</varname> (<type>string</type>)</term>
+      <indexterm>
+       <primary><varname>ssl_ca_file</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Specifies the name of the file containing the SSL server certificate
+        authority (CA).  The default is empty, meaning no CA file is loaded,
+        and client certificate verification is not performed.  (In previous
+        releases of PostgreSQL, the name of this file was hard-coded
+        as <filename>root.crt</filename>.)  Relative paths are relative to the
+        data directory.  This parameter can only be set at server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-ssl-cert-file" xreflabel="ssl_cert_file">
+      <term><varname>ssl_cert_file</varname> (<type>string</type>)</term>
+      <indexterm>
+       <primary><varname>ssl_cert_file</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Specifies the name of the file containing the SSL server certificate.
+        The default is <filename>server.crt</filename>.  Relative paths are
+        relative to the data directory.  This parameter can only be set at
+        server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-ssl-crl-file" xreflabel="ssl_crl_file">
+      <term><varname>ssl_crl_file</varname> (<type>string</type>)</term>
+      <indexterm>
+       <primary><varname>ssl_crl_file</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Specifies the name of the file containing the SSL server certificate
+        revocation list (CRL).  The default is empty, meaning no CRL file is
+        loaded.  (In previous releases of PostgreSQL, the name of this file was
+        hard-coded as <filename>root.crl</filename>.)  Relative paths are
+        relative to the data directory.  This parameter can only be set at
+        server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-ssl-key-file" xreflabel="ssl_key_file">
+      <term><varname>ssl_key_file</varname> (<type>string</type>)</term>
+      <indexterm>
+       <primary><varname>ssl_key_file</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Specifies the name of the file containing the SSL server private key.
+        The default is <filename>server.key</filename>.  Relative paths are
+        relative to the data directory.  This parameter can only be set at
+        server start.
        </para>
       </listitem>
      </varlistentry>
@@ -1310,12 +1386,14 @@ SET ENABLE_SEQSCAN TO OFF;
          background writer.  In each round the writer issues writes
          for some number of dirty buffers (controllable by the
          following parameters).  It then sleeps for <varname>bgwriter_delay</>
-         milliseconds, and repeats.  The default value is 200 milliseconds
-         (<literal>200ms</>). Note that on many systems, the effective
-         resolution of sleep delays is 10 milliseconds; setting
-         <varname>bgwriter_delay</> to a value that is not a multiple of
-         10 might have the same results as setting it to the next higher
-         multiple of 10.  This parameter can only be set in the
+         milliseconds, and repeats.  When there are no dirty buffers in the
+         buffer pool, though, it goes into a longer sleep regardless of
+         <varname>bgwriter_delay</>.  The default value is 200
+         milliseconds (<literal>200ms</>). Note that on many systems, the
+         effective resolution of sleep delays is 10 milliseconds; setting
+         <varname>bgwriter_delay</> to a value that is not a multiple of 10
+         might have the same results as setting it to the next higher multiple
+         of 10.  This parameter can only be set in the
          <filename>postgresql.conf</> file or on the server command line.
         </para>
        </listitem>
@@ -1330,7 +1408,8 @@ SET ENABLE_SEQSCAN TO OFF;
         <para>
          In each round, no more than this many buffers will be written
          by the background writer.  Setting this to zero disables
-         background writing (except for checkpoint activity).
+         background writing.  (Note that checkpoints, which are managed by
+         a separate, dedicated auxiliary process, are unaffected.)
          The default value is 100 buffers.
          This parameter can only be set in the <filename>postgresql.conf</>
          file or on the server command line.
@@ -1547,7 +1626,7 @@ SET ENABLE_SEQSCAN TO OFF;
        <para>
         Specifies whether transaction commit will wait for WAL records
         to be written to disk before the command returns a <quote>success</>
-        indication to the client.  Valid values are <literal>on</>,
+        indication to the client.  Valid values are <literal>on</>, <literal>write</>,
         <literal>local</>, and <literal>off</>.  The default, and safe, value
         is <literal>on</>.  When <literal>off</>, there can be a delay between
         when success is reported to the client and when the transaction is
@@ -1567,11 +1646,19 @@ SET ENABLE_SEQSCAN TO OFF;
         If <xref linkend="guc-synchronous-standby-names"> is set, this
         parameter also controls whether or not transaction commit will wait
         for the transaction's WAL records to be flushed to disk and replicated
-        to the standby server.  The commit wait will last until a reply from
-        the current synchronous standby indicates it has written the commit
-        record of the transaction to durable storage.  If synchronous
+        to the standby server.  When <literal>write</>, the commit wait will
+        last until a reply from the current synchronous standby indicates
+        it has received the commit record of the transaction to memory.
+        Normally this causes no data loss at the time of failover. However,
+        if both primary and standby crash, and the database cluster of
+        the primary gets corrupted, recent committed transactions might
+        be lost. When <literal>on</>,  the commit wait will last until a reply
+        from the current synchronous standby indicates it has flushed
+        the commit record of the transaction to durable storage. This
+        avoids any data loss unless the database cluster of both primary and
+        standby gets corrupted simultaneously. If synchronous
         replication is in use, it will normally be sensible either to wait
-        both for WAL records to reach both the local and remote disks, or
+        for both local flush and replication of WAL records, or
         to allow the transaction to commit asynchronously.  However, the
         special value <literal>local</> is available for transactions that
         wish to wait for local flush to disk, but not synchronous replication.
@@ -2581,6 +2668,26 @@ SET ENABLE_SEQSCAN TO OFF;
         parameters.
        </para>
 
+       <para>
+        Random access to mechanical disk storage is normally much more expensive
+        than four-times sequential access.  However, a lower default is used
+        (4.0) because the majority of random accesses to disk, such as indexed
+        reads, are assumed to be in cache.  The default value can be thought of
+        as modeling random access as 40 times slower than sequential, while
+        expecting 90% of random reads to be cached.
+       </para>
+
+       <para>
+        If you believe a 90% cache rate is an incorrect assumption
+        for your workload, you can increase random_page_cost to better
+        reflect the true cost of random storage reads. Correspondingly,
+        if your data is likely to be completely in cache, such as when
+        the database is smaller than the total server memory, decreasing
+        random_page_cost can be appropriate.  Storage that has a low random
+        read cost relative to sequential, e.g. solid-state drives, might
+        also be better modeled with a lower value for random_page_cost.
+       </para>
+
        <tip>
         <para>
          Although the system will let you set <varname>random_page_cost</> to
@@ -3016,7 +3123,7 @@ SELECT * FROM parent WHERE key = 2400;
         value</> (<acronym>CSV</>) format, which is convenient for
         loading logs into programs.
         See <xref linkend="runtime-config-logging-csvlog"> for details.
-        <varname>logging_collector</varname> must be enabled to generate
+        <xref linkend="guc-logging-collector"> must be enabled to generate
         CSV-format log output.
        </para>
 
@@ -3056,24 +3163,39 @@ local0.*    /var/log/postgresql
       </indexterm>
       <listitem>
        <para>
-         This parameter captures plain and CSV-format log messages
-         sent to <application>stderr</> and redirects them into log files.
+         This parameter enables the <firstterm>logging collector</>, which
+         is a background process that captures log messages
+         sent to <systemitem>stderr</> and redirects them into log files.
          This approach is often more useful than
          logging to <application>syslog</>, since some types of messages
-         might not appear in <application>syslog</> output (a common example
-         is dynamic-linker failure messages).
+         might not appear in <application>syslog</> output.  (One common
+         example is dynamic-linker failure messages; another is error messages
+         produced by scripts such as <varname>archive_command</>.)
          This parameter can only be set at server start.
        </para>
 
        <note>
         <para>
+         It is possible to log to <systemitem>stderr</> without using the
+         logging collector; the log messages will just go to wherever the
+         server's <systemitem>stderr</> is directed.  However, that method is
+         only suitable for low log volumes, since it provides no convenient
+         way to rotate log files.  Also, on some platforms not using the
+         logging collector can result in lost or garbled log output, because
+         multiple processes writing concurrently to the same log file can
+         overwrite each other's output.
+        </para>
+       </note>
+
+       <note>
+        <para>
           The logging collector is designed to never lose messages.  This means
           that in case of extremely high load, server processes could be
-          blocked due to trying to send additional log messages when the
+          blocked while trying to send additional log messages when the
           collector has fallen behind.  In contrast, <application>syslog</>
-          prefers to drop messages if it cannot write them, which means it's
-          less reliable in those cases but it will not block the rest of the
-          system.
+          prefers to drop messages if it cannot write them, which means it
+          may fail to log some messages in such cases but it will not block
+          the rest of the system.
         </para>
        </note>
 
@@ -3844,7 +3966,7 @@ local0.*    /var/log/postgresql
          identifier from <literal>pg_stat_activity</>, use this query:
 <programlisting>
 SELECT to_hex(EXTRACT(EPOCH FROM backend_start)::integer) || '.' ||
-       to_hex(procpid)
+       to_hex(pid)
 FROM pg_stat_activity;
 </programlisting>
 
@@ -4140,7 +4262,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        <para>
        Specifies the number of bytes reserved to track the currently
        executing command for each active session, for the
-       <structname>pg_stat_activity</>.<structfield>current_query</> field.
+       <structname>pg_stat_activity</>.<structfield>query</> field.
        The default value is 1024. This parameter can only be set at server
        start.
        </para>
@@ -6208,6 +6330,24 @@ LOG:  CleanUpLock: deleting: lock(0xb7acd844) id(24688,24696,0,0,0,1)
         If on, emit information about lightweight lock usage.  Lightweight
         locks are intended primarily to provide mutual exclusion of access
         to shared-memory data structures.
+       </para>
+       <para>
+        This parameter is only available if the <symbol>LOCK_DEBUG</symbol>
+        macro was defined when <productname>PostgreSQL</productname> was
+        compiled.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><varname>trace_userlocks</varname> (<type>boolean</type>)</term>
+      <indexterm>
+       <primary><varname>trace_userlocks</> configuration parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        If on, emit information about user lock usage.  Output is the same
+        as for <symbol>trace_locks</symbol>, only for advisory locks.
        </para>
        <para>
         This parameter is only available if the <symbol>LOCK_DEBUG</symbol>

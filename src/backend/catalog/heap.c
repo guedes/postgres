@@ -3,7 +3,7 @@
  * heap.c
  *	  code to create and destroy POSTGRES heap relations
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -92,10 +92,10 @@ static Oid AddNewRelationType(const char *typeName,
 				   Oid new_array_type);
 static void RelationRemoveInheritance(Oid relid);
 static void StoreRelCheck(Relation rel, char *ccname, Node *expr,
-			  bool is_validated, bool is_local, int inhcount);
+			  bool is_validated, bool is_local, int inhcount, bool is_only);
 static void StoreConstraints(Relation rel, List *cooked_constraints);
 static bool MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
-							bool allow_merge, bool is_local);
+							bool allow_merge, bool is_local, bool is_only);
 static void SetRelationNumChecks(Relation rel, int numchecks);
 static Node *cookConstraint(ParseState *pstate,
 			   Node *raw_constraint,
@@ -957,10 +957,12 @@ AddNewRelationType(const char *typeName,
  *	reltablespace: OID of tablespace it goes in
  *	relid: OID to assign to new rel, or InvalidOid to select a new OID
  *	reltypeid: OID to assign to rel's rowtype, or InvalidOid to select one
+ *	reloftypeid: if a typed table, OID of underlying type; else InvalidOid
  *	ownerid: OID of new rel's owner
  *	tupdesc: tuple descriptor (source of column definitions)
  *	cooked_constraints: list of precooked check constraints and defaults
  *	relkind: relkind for new rel
+ *	relpersistence: rel's persistence status (permanent, temp, or unlogged)
  *	shared_relation: TRUE if it's to be a shared relation
  *	mapped_relation: TRUE if the relation will use the relfilenode map
  *	oidislocal: TRUE if oid column (if any) should be marked attislocal
@@ -1182,7 +1184,7 @@ heap_create_with_catalog(const char *relname,
 				   F_ARRAY_SEND,	/* array send (bin) proc */
 				   InvalidOid,	/* typmodin procedure - none */
 				   InvalidOid,	/* typmodout procedure - none */
-				   InvalidOid,	/* analyze procedure - default */
+				   F_ARRAY_TYPANALYZE,	/* array analyze procedure */
 				   new_type_oid,	/* array element type - the rowtype */
 				   true,		/* yes, this is an array type */
 				   InvalidOid,	/* this has no array type */
@@ -1235,6 +1237,10 @@ heap_create_with_catalog(const char *relname,
 	 * should they have any ACL entries.  The same applies for extension
 	 * dependencies.
 	 *
+	 * If it's a temp table, we do not make it an extension member; this
+	 * prevents the unintuitive result that deletion of the temp table at
+	 * session end would make the whole extension go away.
+	 *
 	 * Also, skip this in bootstrap mode, since we don't make dependencies
 	 * while bootstrapping.
 	 */
@@ -1255,7 +1261,8 @@ heap_create_with_catalog(const char *relname,
 
 		recordDependencyOnOwner(RelationRelationId, relid, ownerid);
 
-		recordDependencyOnCurrentExtension(&myself, false);
+		if (relpersistence != RELPERSISTENCE_TEMP)
+			recordDependencyOnCurrentExtension(&myself, false);
 
 		if (reloftypeid)
 		{
@@ -1279,7 +1286,8 @@ heap_create_with_catalog(const char *relname,
 	}
 
 	/* Post creation hook for new relation */
-	InvokeObjectAccessHook(OAT_POST_CREATE, RelationRelationId, relid, 0);
+	InvokeObjectAccessHook(OAT_POST_CREATE,
+						   RelationRelationId, relid, 0, NULL);
 
 	/*
 	 * Store any supplied constraints and defaults.
@@ -1528,7 +1536,7 @@ RemoveAttributeById(Oid relid, AttrNumber attnum)
  */
 void
 RemoveAttrDefault(Oid relid, AttrNumber attnum,
-				  DropBehavior behavior, bool complain)
+				  DropBehavior behavior, bool complain, bool internal)
 {
 	Relation	attrdef_rel;
 	ScanKeyData scankeys[2];
@@ -1559,7 +1567,8 @@ RemoveAttrDefault(Oid relid, AttrNumber attnum,
 		object.objectId = HeapTupleGetOid(tuple);
 		object.objectSubId = 0;
 
-		performDeletion(&object, behavior);
+		performDeletion(&object, behavior,
+						internal ? PERFORM_DELETION_INTERNAL : 0);
 
 		found = true;
 	}
@@ -1859,7 +1868,7 @@ StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr)
  */
 static void
 StoreRelCheck(Relation rel, char *ccname, Node *expr,
-			  bool is_validated, bool is_local, int inhcount)
+			  bool is_validated, bool is_local, int inhcount, bool is_only)
 {
 	char	   *ccbin;
 	char	   *ccsrc;
@@ -1942,7 +1951,8 @@ StoreRelCheck(Relation rel, char *ccname, Node *expr,
 						  ccbin,	/* Binary form of check constraint */
 						  ccsrc,	/* Source form of check constraint */
 						  is_local,		/* conislocal */
-						  inhcount);	/* coninhcount */
+						  inhcount,		/* coninhcount */
+						  is_only);		/* conisonly */
 
 	pfree(ccbin);
 	pfree(ccsrc);
@@ -1983,7 +1993,7 @@ StoreConstraints(Relation rel, List *cooked_constraints)
 				break;
 			case CONSTR_CHECK:
 				StoreRelCheck(rel, con->name, con->expr, !con->skip_validation,
-							  con->is_local, con->inhcount);
+							  con->is_local, con->inhcount, con->is_only);
 				numchecks++;
 				break;
 			default:
@@ -2026,7 +2036,8 @@ AddRelationNewConstraints(Relation rel,
 						  List *newColDefaults,
 						  List *newConstraints,
 						  bool allow_merge,
-						  bool is_local)
+						  bool is_local,
+						  bool is_only)
 {
 	List	   *cookedConstraints = NIL;
 	TupleDesc	tupleDesc;
@@ -2099,6 +2110,7 @@ AddRelationNewConstraints(Relation rel,
 		cooked->skip_validation = false;
 		cooked->is_local = is_local;
 		cooked->inhcount = is_local ? 0 : 1;
+		cooked->is_only = is_only;
 		cookedConstraints = lappend(cookedConstraints, cooked);
 	}
 
@@ -2166,7 +2178,7 @@ AddRelationNewConstraints(Relation rel,
 			 * what ATAddCheckConstraint wants.)
 			 */
 			if (MergeWithExistingConstraint(rel, ccname, expr,
-											allow_merge, is_local))
+								allow_merge, is_local, is_only))
 				continue;
 		}
 		else
@@ -2213,7 +2225,7 @@ AddRelationNewConstraints(Relation rel,
 		 * OK, store it.
 		 */
 		StoreRelCheck(rel, ccname, expr, !cdef->skip_validation, is_local,
-					  is_local ? 0 : 1);
+					  is_local ? 0 : 1, is_only);
 
 		numchecks++;
 
@@ -2225,6 +2237,7 @@ AddRelationNewConstraints(Relation rel,
 		cooked->skip_validation = cdef->skip_validation;
 		cooked->is_local = is_local;
 		cooked->inhcount = is_local ? 0 : 1;
+		cooked->is_only = is_only;
 		cookedConstraints = lappend(cookedConstraints, cooked);
 	}
 
@@ -2247,10 +2260,13 @@ AddRelationNewConstraints(Relation rel,
  *
  * Returns TRUE if merged (constraint is a duplicate), or FALSE if it's
  * got a so-far-unique name, or throws error if conflict.
+ *
+ * XXX See MergeConstraintsIntoExisting too if you change this code.
  */
 static bool
 MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
-							bool allow_merge, bool is_local)
+							bool allow_merge, bool is_local,
+							bool is_only)
 {
 	bool		found;
 	Relation	conDesc;
@@ -2302,16 +2318,30 @@ MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
 						(errcode(ERRCODE_DUPLICATE_OBJECT),
 				errmsg("constraint \"%s\" for relation \"%s\" already exists",
 					   ccname, RelationGetRelationName(rel))));
-			/* OK to update the tuple */
-			ereport(NOTICE,
-			   (errmsg("merging constraint \"%s\" with inherited definition",
-					   ccname)));
+
 			tup = heap_copytuple(tup);
 			con = (Form_pg_constraint) GETSTRUCT(tup);
+
+			/* If the constraint is "only" then cannot merge */
+			if (con->conisonly)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("constraint \"%s\" conflicts with non-inherited constraint on relation \"%s\"",
+								ccname, RelationGetRelationName(rel))));
+
 			if (is_local)
 				con->conislocal = true;
 			else
 				con->coninhcount++;
+			if (is_only)
+			{
+				Assert(is_local);
+				con->conisonly = true;
+			}
+			/* OK to update the tuple */
+			ereport(NOTICE,
+					(errmsg("merging constraint \"%s\" with inherited definition",
+							ccname)));
 			simple_heap_update(conDesc, &tup->t_self, tup);
 			CatalogUpdateIndexes(conDesc, tup);
 			break;

@@ -3,7 +3,7 @@
  *
  * gram.y				- Parser for the PL/pgSQL procedural language
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -67,6 +67,7 @@ static	PLpgSQL_expr	*read_sql_construct(int until,
 											const char *sqlstart,
 											bool isexpression,
 											bool valid_sql,
+											bool trim,
 											int *startloc,
 											int *endtoken);
 static	PLpgSQL_expr	*read_sql_expression(int until,
@@ -83,7 +84,7 @@ static	void			 complete_direction(PLpgSQL_stmt_fetch *fetch,
 static	PLpgSQL_stmt	*make_return_stmt(int location);
 static	PLpgSQL_stmt	*make_return_next_stmt(int location);
 static	PLpgSQL_stmt	*make_return_query_stmt(int location);
-static  PLpgSQL_stmt 	*make_case(int location, PLpgSQL_expr *t_expr,
+static  PLpgSQL_stmt	*make_case(int location, PLpgSQL_expr *t_expr,
 								   List *case_when_list, List *else_stmts);
 static	char			*NameOfDatum(PLwdatum *wdatum);
 static	void			 check_assignable(PLpgSQL_datum *datum, int location);
@@ -102,7 +103,7 @@ static	PLpgSQL_type	*parse_datatype(const char *string, int location);
 static	void			 check_labels(const char *start_label,
 									  const char *end_label,
 									  int end_location);
-static	PLpgSQL_expr 	*read_cursor_args(PLpgSQL_var *cursor,
+static	PLpgSQL_expr	*read_cursor_args(PLpgSQL_var *cursor,
 										  int until, const char *expected);
 static	List			*read_raise_options(void);
 
@@ -134,8 +135,8 @@ static	List			*read_raise_options(void);
 			char *name;
 			int  lineno;
 			PLpgSQL_datum   *scalar;
-			PLpgSQL_rec     *rec;
-			PLpgSQL_row     *row;
+			PLpgSQL_rec		*rec;
+			PLpgSQL_row		*row;
 		}						forvariable;
 		struct
 		{
@@ -1069,7 +1070,7 @@ opt_expr_until_when	:
 						plpgsql_push_back_token(K_WHEN);
 						$$ = expr;
 					}
-			    ;
+				;
 
 case_when_list	: case_when_list case_when
 					{
@@ -1313,6 +1314,7 @@ for_control		: for_variable K_IN
 													   "SELECT ",
 													   true,
 													   false,
+													   true,
 													   &expr1loc,
 													   &tok);
 
@@ -1692,7 +1694,7 @@ stmt_raise		: K_RAISE
 									expr = read_sql_construct(',', ';', K_USING,
 															  ", or ; or USING",
 															  "SELECT ",
-															  true, true,
+															  true, true, true,
 															  NULL, &tok);
 									new->params = lappend(new->params, expr);
 								}
@@ -1790,7 +1792,7 @@ stmt_dynexecute : K_EXECUTE
 						expr = read_sql_construct(K_INTO, K_USING, ';',
 												  "INTO or USING or ;",
 												  "SELECT ",
-												  true, true,
+												  true, true, true,
 												  NULL, &endtoken);
 
 						new = palloc(sizeof(PLpgSQL_stmt_dynexecute));
@@ -1829,7 +1831,7 @@ stmt_dynexecute : K_EXECUTE
 									expr = read_sql_construct(',', ';', K_INTO,
 															  ", or ; or INTO",
 															  "SELECT ",
-															  true, true,
+															  true, true, true,
 															  NULL, &endtoken);
 									new->params = lappend(new->params, expr);
 								} while (endtoken == ',');
@@ -1859,7 +1861,7 @@ stmt_open		: K_OPEN cursor_variable
 						if ($2->cursor_explicit_expr == NULL)
 						{
 							/* be nice if we could use opt_scrollable here */
-						    tok = yylex();
+							tok = yylex();
 							if (tok_is_keyword(tok, &yylval,
 											   K_NO, "no"))
 							{
@@ -2077,9 +2079,9 @@ proc_exception	: K_WHEN proc_conditions K_THEN proc_sect
 						PLpgSQL_exception *new;
 
 						new = palloc0(sizeof(PLpgSQL_exception));
-						new->lineno     = plpgsql_location_to_lineno(@1);
+						new->lineno = plpgsql_location_to_lineno(@1);
 						new->conditions = $2;
-						new->action	    = $4;
+						new->action = $4;
 
 						$$ = new;
 					}
@@ -2322,7 +2324,7 @@ static PLpgSQL_expr *
 read_sql_expression(int until, const char *expected)
 {
 	return read_sql_construct(until, 0, 0, expected,
-							  "SELECT ", true, true, NULL, NULL);
+							  "SELECT ", true, true, true, NULL, NULL);
 }
 
 /* Convenience routine to read an expression with two possible terminators */
@@ -2331,7 +2333,7 @@ read_sql_expression2(int until, int until2, const char *expected,
 					 int *endtoken)
 {
 	return read_sql_construct(until, until2, 0, expected,
-							  "SELECT ", true, true, NULL, endtoken);
+							  "SELECT ", true, true, true, NULL, endtoken);
 }
 
 /* Convenience routine to read a SQL statement that must end with ';' */
@@ -2339,7 +2341,7 @@ static PLpgSQL_expr *
 read_sql_stmt(const char *sqlstart)
 {
 	return read_sql_construct(';', 0, 0, ";",
-							  sqlstart, false, true, NULL, NULL);
+							  sqlstart, false, true, true, NULL, NULL);
 }
 
 /*
@@ -2352,6 +2354,7 @@ read_sql_stmt(const char *sqlstart)
  * sqlstart:	text to prefix to the accumulated SQL text
  * isexpression: whether to say we're reading an "expression" or a "statement"
  * valid_sql:   whether to check the syntax of the expr (prefixed with sqlstart)
+ * trim:		trim trailing whitespace
  * startloc:	if not NULL, location of first token is stored at *startloc
  * endtoken:	if not NULL, ending token is stored at *endtoken
  *				(this is only interesting if until2 or until3 isn't zero)
@@ -2364,6 +2367,7 @@ read_sql_construct(int until,
 				   const char *sqlstart,
 				   bool isexpression,
 				   bool valid_sql,
+				   bool trim,
 				   int *startloc,
 				   int *endtoken)
 {
@@ -2443,15 +2447,18 @@ read_sql_construct(int until,
 	plpgsql_append_source_text(&ds, startlocation, yylloc);
 
 	/* trim any trailing whitespace, for neatness */
-	while (ds.len > 0 && scanner_isspace(ds.data[ds.len - 1]))
-		ds.data[--ds.len] = '\0';
+	if (trim)
+	{
+		while (ds.len > 0 && scanner_isspace(ds.data[ds.len - 1]))
+			ds.data[--ds.len] = '\0';
+	}
 
 	expr = palloc0(sizeof(PLpgSQL_expr));
 	expr->dtype			= PLPGSQL_DTYPE_EXPR;
 	expr->query			= pstrdup(ds.data);
 	expr->plan			= NULL;
 	expr->paramnos		= NULL;
-	expr->ns            = plpgsql_ns_top();
+	expr->ns			= plpgsql_ns_top();
 	pfree(ds.data);
 
 	if (valid_sql)
@@ -2651,7 +2658,7 @@ make_execsql_stmt(int firsttoken, int location)
 	expr->query			= pstrdup(ds.data);
 	expr->plan			= NULL;
 	expr->paramnos		= NULL;
-	expr->ns            = plpgsql_ns_top();
+	expr->ns			= plpgsql_ns_top();
 	pfree(ds.data);
 
 	check_sql_expr(expr->query, location, 0);
@@ -2688,7 +2695,7 @@ read_fetch_direction(void)
 	/* set direction defaults: */
 	fetch->direction = FETCH_FORWARD;
 	fetch->how_many  = 1;
-	fetch->expr      = NULL;
+	fetch->expr		 = NULL;
 	fetch->returns_multiple_rows = false;
 
 	tok = yylex();
@@ -3375,15 +3382,23 @@ check_labels(const char *start_label, const char *end_label, int end_location)
  * Read the arguments (if any) for a cursor, followed by the until token
  *
  * If cursor has no args, just swallow the until token and return NULL.
- * If it does have args, we expect to see "( expr [, expr ...] )" followed
- * by the until token.  Consume all that and return a SELECT query that
- * evaluates the expression(s) (without the outer parens).
+ * If it does have args, we expect to see "( arg [, arg ...] )" followed
+ * by the until token, where arg may be a plain expression, or a named
+ * parameter assignment of the form argname := expr. Consume all that and
+ * return a SELECT query that evaluates the expression(s) (without the outer
+ * parens).
  */
 static PLpgSQL_expr *
 read_cursor_args(PLpgSQL_var *cursor, int until, const char *expected)
 {
 	PLpgSQL_expr *expr;
+	PLpgSQL_row *row;
 	int			tok;
+	int			argc = 0;
+	char	  **argv;
+	StringInfoData ds;
+	char	   *sqlstart = "SELECT ";
+	bool		named = false;
 
 	tok = yylex();
 	if (cursor->cursor_explicit_argrow < 0)
@@ -3402,6 +3417,9 @@ read_cursor_args(PLpgSQL_var *cursor, int until, const char *expected)
 		return NULL;
 	}
 
+	row = (PLpgSQL_row *) plpgsql_Datums[cursor->cursor_explicit_argrow];
+	argv = (char **) palloc0(row->nfields * sizeof(char *));
+
 	/* Else better provide arguments */
 	if (tok != '(')
 		ereport(ERROR,
@@ -3411,9 +3429,119 @@ read_cursor_args(PLpgSQL_var *cursor, int until, const char *expected)
 				 parser_errposition(yylloc)));
 
 	/*
-	 * Read expressions until the matching ')'.
+	 * Read the arguments, one by one.
 	 */
-	expr = read_sql_expression(')', ")");
+	for (argc = 0; argc < row->nfields; argc++)
+	{
+		PLpgSQL_expr *item;
+		int		endtoken;
+		int		argpos;
+		int		tok1,
+				tok2;
+		int		arglocation;
+
+		/* Check if it's a named parameter: "param := value" */
+		plpgsql_peek2(&tok1, &tok2, &arglocation, NULL);
+		if (tok1 == IDENT && tok2 == COLON_EQUALS)
+		{
+			char   *argname;
+
+			/* Read the argument name, and find its position */
+			yylex();
+			argname = yylval.str;
+
+			for (argpos = 0; argpos < row->nfields; argpos++)
+			{
+				if (strcmp(row->fieldnames[argpos], argname) == 0)
+					break;
+			}
+			if (argpos == row->nfields)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("cursor \"%s\" has no argument named \"%s\"",
+								cursor->refname, argname),
+						 parser_errposition(yylloc)));
+
+			/*
+			 * Eat the ":=". We already peeked, so the error should never
+			 * happen.
+			 */
+			tok2 = yylex();
+			if (tok2 != COLON_EQUALS)
+				yyerror("syntax error");
+
+			named = true;
+		}
+		else
+			argpos = argc;
+
+		/*
+		 * Read the value expression. To provide the user with meaningful
+		 * parse error positions, we check the syntax immediately, instead of
+		 * checking the final expression that may have the arguments
+		 * reordered. Trailing whitespace must not be trimmed, because
+		 * otherwise input of the form (param -- comment\n, param) would be
+		 * translated into a form where the second parameter is commented
+		 * out.
+		 */
+		item = read_sql_construct(',', ')', 0,
+								  ",\" or \")",
+								  sqlstart,
+								  true, true,
+								  false, /* do not trim */
+								  NULL, &endtoken);
+
+		if (endtoken == ')' && !(argc == row->nfields - 1))
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("not enough arguments for cursor \"%s\"",
+							cursor->refname),
+					 parser_errposition(yylloc)));
+
+		if (endtoken == ',' && (argc == row->nfields - 1))
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("too many arguments for cursor \"%s\"",
+							cursor->refname),
+					 parser_errposition(yylloc)));
+
+		if (argv[argpos] != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("duplicate value for cursor \"%s\" parameter \"%s\"",
+							cursor->refname, row->fieldnames[argpos]),
+					 parser_errposition(arglocation)));
+
+		argv[argpos] = item->query + strlen(sqlstart);
+	}
+
+	/* Make positional argument list */
+	initStringInfo(&ds);
+	appendStringInfoString(&ds, sqlstart);
+	for (argc = 0; argc < row->nfields; argc++)
+	{
+		Assert(argv[argc] != NULL);
+
+		/*
+		 * Because named notation allows permutated argument lists, include
+		 * the parameter name for meaningful runtime errors.
+		 */
+		appendStringInfoString(&ds, argv[argc]);
+		if (named)
+			appendStringInfo(&ds, " AS %s",
+							 quote_identifier(row->fieldnames[argc]));
+		if (argc < row->nfields - 1)
+			appendStringInfoString(&ds, ", ");
+	}
+	appendStringInfoChar(&ds, ';');
+
+	expr = palloc0(sizeof(PLpgSQL_expr));
+	expr->dtype			= PLPGSQL_DTYPE_EXPR;
+	expr->query			= pstrdup(ds.data);
+	expr->plan			= NULL;
+	expr->paramnos		= NULL;
+	expr->ns            = plpgsql_ns_top();
+	pfree(ds.data);
 
 	/* Next we'd better find the until token */
 	tok = yylex();
@@ -3478,7 +3606,7 @@ static PLpgSQL_stmt *
 make_case(int location, PLpgSQL_expr *t_expr,
 		  List *case_when_list, List *else_stmts)
 {
-	PLpgSQL_stmt_case 	*new;
+	PLpgSQL_stmt_case	*new;
 
 	new = palloc(sizeof(PLpgSQL_stmt_case));
 	new->cmd_type = PLPGSQL_STMT_CASE;

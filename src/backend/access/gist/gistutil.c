@@ -4,7 +4,7 @@
  *	  utilities routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -19,9 +19,10 @@
 #include "access/reloptions.h"
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
+#include "utils/builtins.h"
 
 /*
- * static *S used for temrorary storage (saves stack and palloc() call)
+ * static *S used for temporary storage (saves stack and palloc() call)
  */
 
 static Datum attrS[INDEX_MAX_KEYS];
@@ -147,8 +148,8 @@ gistfillitupvec(IndexTuple *vec, int veclen, int *memlen)
 }
 
 /*
- * Make unions of keys in IndexTuple vector, return FALSE if itvec contains
- * invalid tuple. Resulting Datums aren't compressed.
+ * Make unions of keys in IndexTuple vector.
+ * Resulting Datums aren't compressed.
  */
 
 void
@@ -538,8 +539,10 @@ gistpenalty(GISTSTATE *giststate, int attno,
 	else if (isNullOrig && isNullAdd)
 		penalty = 0.0;
 	else
-		penalty = 1e10;			/* try to prevent mixing null and non-null
-								 * values */
+	{
+		/* try to prevent mixing null and non-null values */
+		penalty = get_float4_infinity();
+	}
 
 	return penalty;
 }

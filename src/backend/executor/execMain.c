@@ -26,7 +26,7 @@
  *	before ExecutorEnd.  This can be omitted only in case of EXPLAIN,
  *	which should also omit ExecutorRun.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -47,6 +47,7 @@
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
 #include "executor/execdebug.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_clause.h"
@@ -56,6 +57,7 @@
 #include "storage/smgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
@@ -84,6 +86,8 @@ static void ExecutePlan(EState *estate, PlanState *planstate,
 			DestReceiver *dest);
 static bool ExecCheckRTEPerms(RangeTblEntry *rte);
 static void ExecCheckXactReadOnly(PlannedStmt *plannedstmt);
+static char *ExecBuildSlotValueDescription(TupleTableSlot *slot,
+										   int maxfieldlen);
 static void EvalPlanQualStart(EPQState *epqstate, EState *parentestate,
 				  Plan *planTree);
 static void OpenIntoRel(QueryDesc *queryDesc);
@@ -304,6 +308,13 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 
 	if (sendTuples)
 		(*dest->rStartup) (dest, operation, queryDesc->tupDesc);
+
+	/*
+	 * if it's CREATE TABLE AS ... WITH NO DATA, skip plan execution
+	 */
+	if (estate->es_select_into &&
+		queryDesc->plannedstmt->intoClause->skipData)
+		direction = NoMovementScanDirection;
 
 	/*
 	 * run plan
@@ -1565,7 +1576,9 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 				ereport(ERROR,
 						(errcode(ERRCODE_NOT_NULL_VIOLATION),
 						 errmsg("null value in column \"%s\" violates not-null constraint",
-						NameStr(rel->rd_att->attrs[attrChk - 1]->attname))));
+						NameStr(rel->rd_att->attrs[attrChk - 1]->attname)),
+						 errdetail("Failing row contains %s.",
+								   ExecBuildSlotValueDescription(slot, 64))));
 		}
 	}
 
@@ -1577,8 +1590,69 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 			ereport(ERROR,
 					(errcode(ERRCODE_CHECK_VIOLATION),
 					 errmsg("new row for relation \"%s\" violates check constraint \"%s\"",
-							RelationGetRelationName(rel), failed)));
+							RelationGetRelationName(rel), failed),
+					 errdetail("Failing row contains %s.",
+							   ExecBuildSlotValueDescription(slot, 64))));
 	}
+}
+
+/*
+ * ExecBuildSlotValueDescription -- construct a string representing a tuple
+ *
+ * This is intentionally very similar to BuildIndexValueDescription, but
+ * unlike that function, we truncate long field values.  That seems necessary
+ * here since heap field values could be very long, whereas index entries
+ * typically aren't so wide.
+ */
+static char *
+ExecBuildSlotValueDescription(TupleTableSlot *slot, int maxfieldlen)
+{
+	StringInfoData buf;
+	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	int			i;
+
+	/* Make sure the tuple is fully deconstructed */
+	slot_getallattrs(slot);
+
+	initStringInfo(&buf);
+
+	appendStringInfoChar(&buf, '(');
+
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		char	   *val;
+		int			vallen;
+
+		if (slot->tts_isnull[i])
+			val = "null";
+		else
+		{
+			Oid			foutoid;
+			bool		typisvarlena;
+
+			getTypeOutputInfo(tupdesc->attrs[i]->atttypid,
+							  &foutoid, &typisvarlena);
+			val = OidOutputFunctionCall(foutoid, slot->tts_values[i]);
+		}
+
+		if (i > 0)
+			appendStringInfoString(&buf, ", ");
+
+		/* truncate if needed */
+		vallen = strlen(val);
+		if (vallen <= maxfieldlen)
+			appendStringInfoString(&buf, val);
+		else
+		{
+			vallen = pg_mbcliplen(val, vallen, maxfieldlen);
+			appendBinaryStringInfo(&buf, val, vallen);
+			appendStringInfoString(&buf, "...");
+		}
+	}
+
+	appendStringInfoChar(&buf, ')');
+
+	return buf.data;
 }
 
 
@@ -2273,11 +2347,7 @@ EvalPlanQualStart(EPQState *epqstate, EState *parentestate, Plan *planTree)
 	 * ExecInitSubPlan expects to be able to find these entries. Some of the
 	 * SubPlans might not be used in the part of the plan tree we intend to
 	 * run, but since it's not easy to tell which, we just initialize them
-	 * all.  (However, if the subplan is headed by a ModifyTable node, then it
-	 * must be a data-modifying CTE, which we will certainly not need to
-	 * re-run, so we can skip initializing it.	This is just an efficiency
-	 * hack; it won't skip data-modifying CTEs for which the ModifyTable node
-	 * is not at the top.)
+	 * all.
 	 */
 	Assert(estate->es_subplanstates == NIL);
 	foreach(l, parentestate->es_plannedstmt->subplans)
@@ -2285,12 +2355,7 @@ EvalPlanQualStart(EPQState *epqstate, EState *parentestate, Plan *planTree)
 		Plan	   *subplan = (Plan *) lfirst(l);
 		PlanState  *subplanstate;
 
-		/* Don't initialize ModifyTable subplans, per comment above */
-		if (IsA(subplan, ModifyTable))
-			subplanstate = NULL;
-		else
-			subplanstate = ExecInitNode(subplan, estate, 0);
-
+		subplanstate = ExecInitNode(subplan, estate, 0);
 		estate->es_subplanstates = lappend(estate->es_subplanstates,
 										   subplanstate);
 	}
@@ -2371,6 +2436,7 @@ typedef struct
 {
 	DestReceiver pub;			/* publicly-known function pointers */
 	EState	   *estate;			/* EState we are working with */
+	DestReceiver *origdest;		/* QueryDesc's original receiver */
 	Relation	rel;			/* Relation to write to */
 	int			hi_options;		/* heap_insert performance options */
 	BulkInsertState bistate;	/* bulk insert state */
@@ -2388,6 +2454,7 @@ OpenIntoRel(QueryDesc *queryDesc)
 {
 	IntoClause *into = queryDesc->plannedstmt->intoClause;
 	EState	   *estate = queryDesc->estate;
+	TupleDesc	intoTupDesc = queryDesc->tupDesc;
 	Relation	intoRelationDesc;
 	char	   *intoName;
 	Oid			namespaceId;
@@ -2395,6 +2462,8 @@ OpenIntoRel(QueryDesc *queryDesc)
 	Datum		reloptions;
 	Oid			intoRelationId;
 	DR_intorel *myState;
+	RangeTblEntry  *rte;
+	AttrNumber		attnum;
 	static char *validnsps[] = HEAP_RELOPT_NAMESPACES;
 
 	Assert(into);
@@ -2413,12 +2482,54 @@ OpenIntoRel(QueryDesc *queryDesc)
 				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
 				 errmsg("ON COMMIT can only be used on temporary tables")));
 
+	{
+		AclResult aclresult;
+		int i;
+
+		for (i = 0; i < intoTupDesc->natts; i++)
+		{
+			Oid atttypid = intoTupDesc->attrs[i]->atttypid;
+
+			aclresult = pg_type_aclcheck(atttypid, GetUserId(), ACL_USAGE);
+			if (aclresult != ACLCHECK_OK)
+				aclcheck_error(aclresult, ACL_KIND_TYPE,
+							   format_type_be(atttypid));
+		}
+	}
+
 	/*
-	 * Find namespace to create in, check its permissions
+	 * If a column name list was specified in CREATE TABLE AS, override the
+	 * column names derived from the query.  (Too few column names are OK, too
+	 * many are not.)  It would probably be all right to scribble directly on
+	 * the query's result tupdesc, but let's be safe and make a copy.
+	 */
+	if (into->colNames)
+	{
+		ListCell   *lc;
+
+		intoTupDesc = CreateTupleDescCopy(intoTupDesc);
+		attnum = 1;
+		foreach(lc, into->colNames)
+		{
+			char	   *colname = strVal(lfirst(lc));
+
+			if (attnum > intoTupDesc->natts)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("CREATE TABLE AS specifies too many column names")));
+			namestrcpy(&(intoTupDesc->attrs[attnum - 1]->attname), colname);
+			attnum++;
+		}
+	}
+
+	/*
+	 * Find namespace to create in, check its permissions, lock it against
+	 * concurrent drop, and mark into->rel as RELPERSISTENCE_TEMP if the
+	 * selected namespace is temporary.
 	 */
 	intoName = into->rel->relname;
-	namespaceId = RangeVarGetAndCheckCreationNamespace(into->rel);
-	RangeVarAdjustRelationPersistence(into->rel, namespaceId);
+	namespaceId = RangeVarGetAndCheckCreationNamespace(into->rel, NoLock,
+													   NULL);
 
 	/*
 	 * Security check: disallow creating temp tables from security-restricted
@@ -2475,7 +2586,7 @@ OpenIntoRel(QueryDesc *queryDesc)
 											  InvalidOid,
 											  InvalidOid,
 											  GetUserId(),
-											  queryDesc->tupDesc,
+											  intoTupDesc,
 											  NIL,
 											  RELKIND_RELATION,
 											  into->rel->relpersistence,
@@ -2517,13 +2628,30 @@ OpenIntoRel(QueryDesc *queryDesc)
 	intoRelationDesc = heap_open(intoRelationId, AccessExclusiveLock);
 
 	/*
+	 * Check INSERT permission on the constructed table.
+	 */
+	rte = makeNode(RangeTblEntry);
+	rte->rtekind = RTE_RELATION;
+	rte->relid = intoRelationId;
+	rte->relkind = RELKIND_RELATION;
+	rte->requiredPerms = ACL_INSERT;
+
+	for (attnum = 1; attnum <= intoTupDesc->natts; attnum++)
+		rte->modifiedCols = bms_add_member(rte->modifiedCols,
+				attnum - FirstLowInvalidHeapAttributeNumber);
+
+	ExecCheckRTPerms(list_make1(rte), true);
+
+	/*
 	 * Now replace the query's DestReceiver with one for SELECT INTO
 	 */
-	queryDesc->dest = CreateDestReceiver(DestIntoRel);
-	myState = (DR_intorel *) queryDesc->dest;
+	myState = (DR_intorel *) CreateDestReceiver(DestIntoRel);
 	Assert(myState->pub.mydest == DestIntoRel);
 	myState->estate = estate;
+	myState->origdest = queryDesc->dest;
 	myState->rel = intoRelationDesc;
+
+	queryDesc->dest = (DestReceiver *) myState;
 
 	/*
 	 * We can skip WAL-logging the insertions, unless PITR or streaming
@@ -2545,8 +2673,11 @@ CloseIntoRel(QueryDesc *queryDesc)
 {
 	DR_intorel *myState = (DR_intorel *) queryDesc->dest;
 
-	/* OpenIntoRel might never have gotten called */
-	if (myState && myState->pub.mydest == DestIntoRel && myState->rel)
+	/*
+	 * OpenIntoRel might never have gotten called, and we also want to guard
+	 * against double destruction.
+	 */
+	if (myState && myState->pub.mydest == DestIntoRel)
 	{
 		FreeBulkInsertState(myState->bistate);
 
@@ -2557,7 +2688,11 @@ CloseIntoRel(QueryDesc *queryDesc)
 		/* close rel, but keep lock until commit */
 		heap_close(myState->rel, NoLock);
 
-		myState->rel = NULL;
+		/* restore the receiver belonging to executor's caller */
+		queryDesc->dest = myState->origdest;
+
+		/* might as well invoke my destructor */
+		intorel_destroy((DestReceiver *) myState);
 	}
 }
 

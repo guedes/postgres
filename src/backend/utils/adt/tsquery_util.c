@@ -3,7 +3,7 @@
  * tsquery_util.c
  *	  Utilities for tsquery datatype
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -134,7 +134,7 @@ QTNodeCompare(QTNode *an, QTNode *bn)
 static int
 cmpQTN(const void *a, const void *b)
 {
-	return QTNodeCompare(*(QTNode **) a, *(QTNode **) b);
+	return QTNodeCompare(*(QTNode * const *) a, *(QTNode * const *) b);
 }
 
 void

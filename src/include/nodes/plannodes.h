@@ -4,7 +4,7 @@
  *	  definitions for query plan nodes
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/plannodes.h
@@ -462,14 +462,22 @@ typedef struct WorkTableScan
 
 /* ----------------
  *		ForeignScan node
+ *
+ * fdw_exprs and fdw_private are both under the control of the foreign-data
+ * wrapper, but fdw_exprs is presumed to contain expression trees and will
+ * be post-processed accordingly by the planner; fdw_private won't be.
+ * Note that everything in both lists must be copiable by copyObject().
+ * One way to store an arbitrary blob of bytes is to represent it as a bytea
+ * Const.  Usually, though, you'll be better off choosing a representation
+ * that can be dumped usefully by nodeToString().
  * ----------------
  */
 typedef struct ForeignScan
 {
 	Scan		scan;
+	List	   *fdw_exprs;		/* expressions that FDW may evaluate */
+	List	   *fdw_private;	/* private data for FDW */
 	bool		fsSystemCol;	/* true if any "system column" is needed */
-	/* use struct pointer to avoid including fdwapi.h here */
-	struct FdwPlan *fdwplan;
 } ForeignScan;
 
 
@@ -508,7 +516,9 @@ typedef struct Join
  * The nestParams list identifies any executor Params that must be passed
  * into execution of the inner subplan carrying values from the current row
  * of the outer subplan.  Currently we restrict these values to be simple
- * Vars, but perhaps someday that'd be worth relaxing.
+ * Vars, but perhaps someday that'd be worth relaxing.  (Note: during plan
+ * creation, the paramval can actually be a PlaceHolderVar expression; but it
+ * must be a Var with varno OUTER_VAR by the time it gets to the executor.)
  * ----------------
  */
 typedef struct NestLoop

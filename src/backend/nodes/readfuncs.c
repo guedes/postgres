@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -394,6 +394,7 @@ _readIntoClause(void)
 	READ_NODE_FIELD(options);
 	READ_ENUM_FIELD(onCommit, OnCommitAction);
 	READ_STRING_FIELD(tableSpaceName);
+	READ_BOOL_FIELD(skipData);
 
 	READ_DONE();
 }
@@ -1191,6 +1192,7 @@ _readRangeTblEntry(void)
 			break;
 		case RTE_SUBQUERY:
 			READ_NODE_FIELD(subquery);
+			READ_BOOL_FIELD(security_barrier);
 			break;
 		case RTE_JOIN:
 			READ_ENUM_FIELD(jointype, JoinType);

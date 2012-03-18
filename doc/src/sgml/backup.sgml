@@ -837,7 +837,9 @@ SELECT pg_stop_backup();
     a fatal error if a file was truncated while <application>tar</> was
     copying it.  Fortunately, GNU <application>tar</> versions 1.16 and
     later exit with 1 if a file was changed during the backup,
-    and 2 for other errors.
+    and 2 for other errors.  With GNU <application>tar</> version 1.23 and
+    later, you can use the warning options <literal>--warning=no-file-changed
+    --warning=no-file-removed</literal> to hide the related warning messages.
    </para>
 
    <para>
@@ -1270,16 +1272,13 @@ restore_command = 'gunzip &lt; /mnt/server/archivedir/%f | pg_decompresslog - %p
       <varname>archive_command</varname>, so that their
       <filename>postgresql.conf</> entry looks very simple:
 <programlisting>
-archive_command = 'local_backup_script.sh'
+archive_command = 'local_backup_script.sh "%p" "%f"'
 </programlisting>
       Using a separate script file is advisable any time you want to use
       more than a single command in the archiving process.
       This allows all complexity to be managed within the script, which
       can be written in a popular scripting language such as
       <application>bash</> or <application>perl</>.
-      Any messages written to <literal>stderr</> from the script will appear
-      in the database server log, allowing complex configurations to be
-      diagnosed easily if they fail.
      </para>
 
      <para>
@@ -1308,6 +1307,16 @@ archive_command = 'local_backup_script.sh'
        </listitem>
       </itemizedlist>
      </para>
+
+     <tip>
+      <para>
+       When using an <varname>archive_command</varname> script, it's desirable
+       to enable <xref linkend="guc-logging-collector">.
+       Any messages written to <systemitem>stderr</> from the script will then
+       appear in the database server log, allowing complex configurations to
+       be diagnosed easily if they fail.
+      </para>
+     </tip>
     </sect3>
   </sect2>
 

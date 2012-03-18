@@ -9,7 +9,7 @@
  *	  more likely to break across PostgreSQL releases than code that uses
  *	  only the official API.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/interfaces/libpq/libpq-int.h
@@ -310,6 +310,7 @@ struct pg_conn
 	char	   *keepalives_count;		/* maximum number of TCP keepalive
 										 * retransmits */
 	char	   *sslmode;		/* SSL mode (require,prefer,allow,disable) */
+	char	   *sslcompression;	/* SSL compression (0 or 1) */
 	char	   *sslkey;			/* client key filename */
 	char	   *sslcert;		/* client certificate filename */
 	char	   *sslrootcert;	/* root certificate filename */
@@ -405,8 +406,6 @@ struct pg_conn
 								 * attempting normal connection */
 	SSL		   *ssl;			/* SSL status, if have SSL connection */
 	X509	   *peer;			/* X509 cert of server */
-	char		peer_dn[256 + 1];		/* peer distinguished name */
-	char		peer_cn[SM_USER + 1];	/* peer common name */
 #ifdef USE_SSL_ENGINE
 	ENGINE	   *engine;			/* SSL engine, if any */
 #else
@@ -482,7 +481,7 @@ extern pgthreadlock_t pg_g_threadlock;
 #define PGTHREAD_ERROR(msg) \
 	do { \
 		fprintf(stderr, "%s\n", msg); \
-		exit(1); \
+		abort(); \
 	} while (0)
 
 

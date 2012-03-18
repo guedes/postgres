@@ -7,7 +7,7 @@
  * the nature and use of path keys.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -221,6 +221,11 @@ canonicalize_pathkeys(PlannerInfo *root, List *pathkeys)
  * If the PathKey is being generated from a SortGroupClause, sortref should be
  * the SortGroupClause's SortGroupRef; otherwise zero.
  *
+ * If rel is not NULL, it identifies a specific relation we're considering
+ * a path for, and indicates that child EC members for that relation can be
+ * considered.  Otherwise child members are ignored.  (See the comments for
+ * get_eclass_for_sort_expr.)
+ *
  * create_it is TRUE if we should create any missing EquivalenceClass
  * needed to represent the sort key.  If it's FALSE, we return NULL if the
  * sort key isn't already present in any EquivalenceClass.
@@ -237,6 +242,7 @@ make_pathkey_from_sortinfo(PlannerInfo *root,
 						   bool reverse_sort,
 						   bool nulls_first,
 						   Index sortref,
+						   Relids rel,
 						   bool create_it,
 						   bool canonicalize)
 {
@@ -268,7 +274,7 @@ make_pathkey_from_sortinfo(PlannerInfo *root,
 	/* Now find or (optionally) create a matching EquivalenceClass */
 	eclass = get_eclass_for_sort_expr(root, expr, opfamilies,
 									  opcintype, collation,
-									  sortref, create_it);
+									  sortref, rel, create_it);
 
 	/* Fail if no EC and !create_it */
 	if (!eclass)
@@ -320,6 +326,7 @@ make_pathkey_from_sortop(PlannerInfo *root,
 									  (strategy == BTGreaterStrategyNumber),
 									  nulls_first,
 									  sortref,
+									  NULL,
 									  create_it,
 									  canonicalize);
 }
@@ -403,14 +410,17 @@ pathkeys_contained_in(List *keys1, List *keys2)
 /*
  * get_cheapest_path_for_pathkeys
  *	  Find the cheapest path (according to the specified criterion) that
- *	  satisfies the given pathkeys.  Return NULL if no such path.
+ *	  satisfies the given pathkeys and parameterization.
+ *	  Return NULL if no such path.
  *
  * 'paths' is a list of possible paths that all generate the same relation
  * 'pathkeys' represents a required ordering (already canonicalized!)
+ * 'required_outer' denotes allowable outer relations for parameterized paths
  * 'cost_criterion' is STARTUP_COST or TOTAL_COST
  */
 Path *
 get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
+							   Relids required_outer,
 							   CostSelector cost_criterion)
 {
 	Path	   *matched_path = NULL;
@@ -428,7 +438,8 @@ get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
 			compare_path_costs(matched_path, path, cost_criterion) <= 0)
 			continue;
 
-		if (pathkeys_contained_in(pathkeys, path->pathkeys))
+		if (pathkeys_contained_in(pathkeys, path->pathkeys) &&
+			bms_is_subset(path->required_outer, required_outer))
 			matched_path = path;
 	}
 	return matched_path;
@@ -437,7 +448,7 @@ get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
 /*
  * get_cheapest_fractional_path_for_pathkeys
  *	  Find the cheapest path (for retrieving a specified fraction of all
- *	  the tuples) that satisfies the given pathkeys.
+ *	  the tuples) that satisfies the given pathkeys and parameterization.
  *	  Return NULL if no such path.
  *
  * See compare_fractional_path_costs() for the interpretation of the fraction
@@ -445,11 +456,13 @@ get_cheapest_path_for_pathkeys(List *paths, List *pathkeys,
  *
  * 'paths' is a list of possible paths that all generate the same relation
  * 'pathkeys' represents a required ordering (already canonicalized!)
+ * 'required_outer' denotes allowable outer relations for parameterized paths
  * 'fraction' is the fraction of the total tuples expected to be retrieved
  */
 Path *
 get_cheapest_fractional_path_for_pathkeys(List *paths,
 										  List *pathkeys,
+										  Relids required_outer,
 										  double fraction)
 {
 	Path	   *matched_path = NULL;
@@ -461,13 +474,14 @@ get_cheapest_fractional_path_for_pathkeys(List *paths,
 
 		/*
 		 * Since cost comparison is a lot cheaper than pathkey comparison, do
-		 * that first.
+		 * that first.	(XXX is that still true?)
 		 */
 		if (matched_path != NULL &&
 			compare_fractional_path_costs(matched_path, path, fraction) <= 0)
 			continue;
 
-		if (pathkeys_contained_in(pathkeys, path->pathkeys))
+		if (pathkeys_contained_in(pathkeys, path->pathkeys) &&
+			bms_is_subset(path->required_outer, required_outer))
 			matched_path = path;
 	}
 	return matched_path;
@@ -539,6 +553,7 @@ build_index_pathkeys(PlannerInfo *root,
 											  reverse_sort,
 											  nulls_first,
 											  0,
+											  index->rel->relids,
 											  false,
 											  true);
 
@@ -629,6 +644,7 @@ convert_subquery_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 											 sub_member->em_datatype,
 											 sub_eclass->ec_collation,
 											 0,
+											 rel->relids,
 											 false);
 
 				/*
@@ -673,6 +689,9 @@ convert_subquery_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 				Oid			sub_expr_coll = sub_eclass->ec_collation;
 				ListCell   *k;
 
+				if (sub_member->em_is_child)
+					continue;	/* ignore children here */
+
 				foreach(k, sub_tlist)
 				{
 					TargetEntry *tle = (TargetEntry *) lfirst(k);
@@ -712,6 +731,7 @@ convert_subquery_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 														sub_expr_type,
 														sub_expr_coll,
 														0,
+														rel->relids,
 														false);
 
 					/*
@@ -903,6 +923,7 @@ initialize_mergeclause_eclasses(PlannerInfo *root, RestrictInfo *restrictinfo)
 								 lefttype,
 								 ((OpExpr *) clause)->inputcollid,
 								 0,
+								 NULL,
 								 true);
 	restrictinfo->right_ec =
 		get_eclass_for_sort_expr(root,
@@ -911,6 +932,7 @@ initialize_mergeclause_eclasses(PlannerInfo *root, RestrictInfo *restrictinfo)
 								 righttype,
 								 ((OpExpr *) clause)->inputcollid,
 								 0,
+								 NULL,
 								 true);
 }
 

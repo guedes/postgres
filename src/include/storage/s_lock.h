@@ -83,7 +83,7 @@
  *	when using the SysV semaphore code.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	  src/include/storage/s_lock.h
@@ -234,7 +234,23 @@ spin_delay(void)
 #endif	 /* __x86_64__ */
 
 
-#if defined(__ia64__) || defined(__ia64)	/* Intel Itanium */
+#if defined(__ia64__) || defined(__ia64)
+/*
+ * Intel Itanium, gcc or Intel's compiler.
+ *
+ * Itanium has weak memory ordering, but we rely on the compiler to enforce
+ * strict ordering of accesses to volatile data.  In particular, while the
+ * xchg instruction implicitly acts as a memory barrier with 'acquire'
+ * semantics, we do not have an explicit memory fence instruction in the
+ * S_UNLOCK macro.  We use a regular assignment to clear the spinlock, and
+ * trust that the compiler marks the generated store instruction with the
+ * ".rel" opcode.
+ *
+ * Testing shows that assumption to hold on gcc, although I could not find
+ * any explicit statement on that in the gcc manual.  In Intel's compiler,
+ * the -m[no-]serialize-volatile option controls that, and testing shows that
+ * it is enabled by default.
+ */
 #define HAS_TEST_AND_SET
 
 typedef unsigned int slock_t;
@@ -275,12 +291,32 @@ tas(volatile slock_t *lock)
 #endif	 /* __ia64__ || __ia64 */
 
 
+/*
+ * On ARM, we use __sync_lock_test_and_set(int *, int) if available, and if
+ * not fall back on the SWPB instruction.  SWPB does not work on ARMv6 or
+ * later, so the compiler builtin is preferred if available.  Note also that
+ * the int-width variant of the builtin works on more chips than other widths.
+ */
 #if defined(__arm__) || defined(__arm)
 #define HAS_TEST_AND_SET
 
-typedef unsigned char slock_t;
-
 #define TAS(lock) tas(lock)
+
+#ifdef HAVE_GCC_INT_ATOMICS
+
+typedef int slock_t;
+
+static __inline__ int
+tas(volatile slock_t *lock)
+{
+	return __sync_lock_test_and_set(lock, 1);
+}
+
+#define S_UNLOCK(lock) __sync_lock_release(lock)
+
+#else /* !HAVE_GCC_INT_ATOMICS */
+
+typedef unsigned char slock_t;
 
 static __inline__ int
 tas(volatile slock_t *lock)
@@ -295,6 +331,7 @@ tas(volatile slock_t *lock)
 	return (int) _res;
 }
 
+#endif	 /* HAVE_GCC_INT_ATOMICS */
 #endif	 /* __arm__ */
 
 
@@ -354,16 +391,17 @@ tas(volatile slock_t *lock)
 #if defined(__ppc__) || defined(__powerpc__) || defined(__ppc64__) || defined(__powerpc64__)
 #define HAS_TEST_AND_SET
 
-#if defined(__ppc64__) || defined(__powerpc64__)
-typedef unsigned long slock_t;
-#else
 typedef unsigned int slock_t;
-#endif
 
 #define TAS(lock) tas(lock)
+
+/* On PPC, it's a win to use a non-locking test before the lwarx */
+#define TAS_SPIN(lock)	(*(lock) ? 1 : TAS(lock))
+
 /*
  * NOTE: per the Enhanced PowerPC Architecture manual, v1.0 dated 7-May-2002,
  * an isync is a sufficient synchronization barrier after a lwarx/stwcx loop.
+ * On newer machines, we can use lwsync instead for better performance.
  */
 static __inline__ int
 tas(volatile slock_t *lock)
@@ -372,7 +410,11 @@ tas(volatile slock_t *lock)
 	int _res;
 
 	__asm__ __volatile__(
+#ifdef USE_PPC_LWARX_MUTEX_HINT
+"	lwarx   %0,0,%3,1	\n"
+#else
 "	lwarx   %0,0,%3		\n"
+#endif
 "	cmpwi   %0,0		\n"
 "	bne     1f			\n"
 "	addi    %0,%0,1		\n"
@@ -381,7 +423,11 @@ tas(volatile slock_t *lock)
 "1:	li      %1,1		\n"
 "	b		3f			\n"
 "2:						\n"
+#ifdef USE_PPC_LWSYNC
+"	lwsync				\n"
+#else
 "	isync				\n"
+#endif
 "	li      %1,0		\n"
 "3:						\n"
 
@@ -391,13 +437,25 @@ tas(volatile slock_t *lock)
 	return _res;
 }
 
-/* PowerPC S_UNLOCK is almost standard but requires a "sync" instruction */
+/*
+ * PowerPC S_UNLOCK is almost standard but requires a "sync" instruction.
+ * On newer machines, we can use lwsync instead for better performance.
+ */
+#ifdef USE_PPC_LWSYNC
+#define S_UNLOCK(lock)	\
+do \
+{ \
+	__asm__ __volatile__ ("	lwsync \n"); \
+	*((volatile slock_t *) (lock)) = 0; \
+} while (0)
+#else
 #define S_UNLOCK(lock)	\
 do \
 { \
 	__asm__ __volatile__ ("	sync \n"); \
 	*((volatile slock_t *) (lock)) = 0; \
 } while (0)
+#endif /* USE_PPC_LWSYNC */
 
 #endif /* powerpc */
 
@@ -743,7 +801,19 @@ tas(volatile slock_t *lock)
 
 
 #if defined(__hpux) && defined(__ia64) && !defined(__GNUC__)
-
+/*
+ * HP-UX on Itanium, non-gcc compiler
+ *
+ * We assume that the compiler enforces strict ordering of loads/stores on
+ * volatile data (see comments on the gcc-version earlier in this file).
+ * Note that this assumption does *not* hold if you use the
+ * +Ovolatile=__unordered option on the HP-UX compiler, so don't do that.
+ *
+ * See also Implementing Spinlocks on the Intel Itanium Architecture and
+ * PA-RISC, by Tor Ekqvist and David Graves, for more information.  As of
+ * this writing, version 1.0 of the manual is available at:
+ * http://h21007.www2.hp.com/portal/download/files/unprot/itanium/spinlocks.pdf
+ */
 #define HAS_TEST_AND_SET
 
 typedef unsigned int slock_t;

@@ -4,7 +4,7 @@
  *	  definitions for run-time statistics collection
  *
  *
- * Copyright (c) 2001-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2012, PostgreSQL Global Development Group
  *
  * src/include/executor/instrument.h
  *
@@ -20,9 +20,11 @@ typedef struct BufferUsage
 {
 	long		shared_blks_hit;	/* # of shared buffer hits */
 	long		shared_blks_read;		/* # of shared disk blocks read */
+	long		shared_blks_dirtied;	/* # of shared blocks dirtied */
 	long		shared_blks_written;	/* # of shared disk blocks written */
 	long		local_blks_hit; /* # of local buffer hits */
 	long		local_blks_read;	/* # of local disk blocks read */
+	long		local_blks_dirtied;		/* # of shared blocks dirtied */
 	long		local_blks_written;		/* # of local disk blocks written */
 	long		temp_blks_read; /* # of temp blocks read */
 	long		temp_blks_written;		/* # of temp blocks written */
@@ -31,14 +33,16 @@ typedef struct BufferUsage
 /* Flag bits included in InstrAlloc's instrument_options bitmask */
 typedef enum InstrumentOption
 {
-	INSTRUMENT_TIMER = 1 << 0,	/* needs timer */
+	INSTRUMENT_TIMER = 1 << 0,	/* needs timer (and row counts) */
 	INSTRUMENT_BUFFERS = 1 << 1,	/* needs buffer usage */
+	INSTRUMENT_ROWS = 1 << 2,	/* needs row count */
 	INSTRUMENT_ALL = 0x7FFFFFFF
 } InstrumentOption;
 
 typedef struct Instrumentation
 {
 	/* Parameters set at node creation: */
+	bool		need_timer;	    /* TRUE if we need timer data */
 	bool		need_bufusage;	/* TRUE if we need buffer usage data */
 	/* Info about current plan cycle: */
 	bool		running;		/* TRUE if we've completed first tuple */

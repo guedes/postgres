@@ -5,7 +5,7 @@
  *	  wherein you authenticate a user by seeing what IP address the system
  *	  says he comes from and choosing authentication method based on it).
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -442,8 +442,13 @@ is_member(Oid userid, const char *role)
 	if (!OidIsValid(roleid))
 		return false;			/* if target role not exist, say "no" */
 
-	/* See if user is directly or indirectly a member of role */
-	return is_member_of_role(userid, roleid);
+	/* 
+	 * See if user is directly or indirectly a member of role.
+	 * For this purpose, a superuser is not considered to be automatically
+	 * a member of the role, so group auth only applies to explicit
+	 * membership.
+	 */
+	return is_member_of_role_nosuper(userid, roleid);
 }
 
 /*
@@ -1268,6 +1273,8 @@ parse_hba_line(List *line, int line_num)
 	 * SSPI authentication can never be enabled on ctLocal connections,
 	 * because it's only supported on Windows, where ctLocal isn't supported.
 	 */
+
+
 	if (parsedline->conntype != ctHostSSL &&
 		parsedline->auth_method == uaCert)
 	{
@@ -1384,7 +1391,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 			hbaline->auth_method != uaGSS &&
 			hbaline->auth_method != uaSSPI &&
 			hbaline->auth_method != uaCert)
-			INVALID_AUTH_OPTION("map", gettext_noop("ident, peer, krb5, gssapi, sspi and cert"));
+			INVALID_AUTH_OPTION("map", gettext_noop("ident, peer, krb5, gssapi, sspi, and cert"));
 		hbaline->usermap = pstrdup(val);
 	}
 	else if (strcmp(name, "clientcert") == 0)
@@ -1410,7 +1417,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 				ereport(LOG,
 						(errcode(ERRCODE_CONFIG_FILE_ERROR),
 						 errmsg("client certificates can only be checked if a root certificate store is available"),
-						 errhint("Make sure the root.crt file is present and readable."),
+						 errhint("Make sure the configuration parameter \"ssl_ca_file\" is set."),
 				   errcontext("line %d of configuration file \"%s\"",
 							  line_num, HbaFileName)));
 				return false;
@@ -1503,7 +1510,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 		if (hbaline->auth_method != uaKrb5 &&
 			hbaline->auth_method != uaGSS &&
 			hbaline->auth_method != uaSSPI)
-			INVALID_AUTH_OPTION("krb_realm", gettext_noop("krb5, gssapi and sspi"));
+			INVALID_AUTH_OPTION("krb_realm", gettext_noop("krb5, gssapi, and sspi"));
 		hbaline->krb_realm = pstrdup(val);
 	}
 	else if (strcmp(name, "include_realm") == 0)
@@ -1511,7 +1518,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 		if (hbaline->auth_method != uaKrb5 &&
 			hbaline->auth_method != uaGSS &&
 			hbaline->auth_method != uaSSPI)
-			INVALID_AUTH_OPTION("include_realm", gettext_noop("krb5, gssapi and sspi"));
+			INVALID_AUTH_OPTION("include_realm", gettext_noop("krb5, gssapi, and sspi"));
 		if (strcmp(val, "1") == 0)
 			hbaline->include_realm = true;
 		else

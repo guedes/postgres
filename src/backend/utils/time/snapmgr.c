@@ -27,7 +27,7 @@
  * for too long.)
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -577,7 +577,7 @@ static void
 SnapshotResetXmin(void)
 {
 	if (RegisteredSnapshots == 0 && ActiveSnapshot == NULL)
-		MyProc->xmin = InvalidTransactionId;
+		MyPgXact->xmin = InvalidTransactionId;
 }
 
 /*

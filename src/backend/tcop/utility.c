@@ -5,7 +5,7 @@
  *	  commands.  At one time acted as an interface between the Lisp and C
  *	  systems.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -84,7 +84,7 @@ CheckRelationOwnership(RangeVar *rel, bool noCatalogs)
 	 * AccessExclusiveLock) before verifying that the user has permissions
 	 * is not appealing either.
 	 */
-	relOid = RangeVarGetRelid(rel, NoLock, false, false);
+	relOid = RangeVarGetRelid(rel, NoLock, false);
 
 	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relOid));
 	if (!HeapTupleIsValid(tuple))		/* should not happen */
@@ -202,18 +202,13 @@ check_xact_readonly(Node *parsetree)
 		case T_CreateTrigStmt:
 		case T_CompositeTypeStmt:
 		case T_CreateEnumStmt:
+		case T_CreateRangeStmt:
 		case T_AlterEnumStmt:
 		case T_ViewStmt:
-		case T_DropCastStmt:
 		case T_DropStmt:
 		case T_DropdbStmt:
 		case T_DropTableSpaceStmt:
-		case T_RemoveFuncStmt:
 		case T_DropRoleStmt:
-		case T_DropPLangStmt:
-		case T_RemoveOpClassStmt:
-		case T_RemoveOpFamilyStmt:
-		case T_DropPropertyStmt:
 		case T_GrantStmt:
 		case T_GrantRoleStmt:
 		case T_AlterDefaultPrivilegesStmt:
@@ -227,10 +222,8 @@ check_xact_readonly(Node *parsetree)
 		case T_AlterExtensionContentsStmt:
 		case T_CreateFdwStmt:
 		case T_AlterFdwStmt:
-		case T_DropFdwStmt:
 		case T_CreateForeignServerStmt:
 		case T_AlterForeignServerStmt:
-		case T_DropForeignServerStmt:
 		case T_CreateUserMappingStmt:
 		case T_AlterUserMappingStmt:
 		case T_DropUserMappingStmt:
@@ -615,20 +608,12 @@ standard_ProcessUtility(Node *parsetree,
 			AlterForeignDataWrapper((AlterFdwStmt *) parsetree);
 			break;
 
-		case T_DropFdwStmt:
-			RemoveForeignDataWrapper((DropFdwStmt *) parsetree);
-			break;
-
 		case T_CreateForeignServerStmt:
 			CreateForeignServer((CreateForeignServerStmt *) parsetree);
 			break;
 
 		case T_AlterForeignServerStmt:
 			AlterForeignServer((AlterForeignServerStmt *) parsetree);
-			break;
-
-		case T_DropForeignServerStmt:
-			RemoveForeignServer((DropForeignServerStmt *) parsetree);
 			break;
 
 		case T_CreateUserMappingStmt:
@@ -714,38 +699,56 @@ standard_ProcessUtility(Node *parsetree,
 
 		case T_AlterTableStmt:
 			{
+				AlterTableStmt *atstmt = (AlterTableStmt *) parsetree;
+				Oid			relid;
 				List	   *stmts;
 				ListCell   *l;
+				LOCKMODE	lockmode;
 
-				/* Run parse analysis ... */
-				stmts = transformAlterTableStmt((AlterTableStmt *) parsetree,
-												queryString);
+				/*
+				 * Figure out lock mode, and acquire lock.  This also does
+				 * basic permissions checks, so that we won't wait for a lock
+				 * on (for example) a relation on which we have no
+				 * permissions.
+				 */
+				lockmode = AlterTableGetLockLevel(atstmt->cmds);
+				relid = AlterTableLookupRelation(atstmt, lockmode);
 
-				/* ... and do it */
-				foreach(l, stmts)
+				if (OidIsValid(relid))
 				{
-					Node	   *stmt = (Node *) lfirst(l);
+					/* Run parse analysis ... */
+					stmts = transformAlterTableStmt(atstmt, queryString);
 
-					if (IsA(stmt, AlterTableStmt))
+					/* ... and do it */
+					foreach(l, stmts)
 					{
-						/* Do the table alteration proper */
-						AlterTable((AlterTableStmt *) stmt);
-					}
-					else
-					{
-						/* Recurse for anything else */
-						ProcessUtility(stmt,
-									   queryString,
-									   params,
-									   false,
-									   None_Receiver,
-									   NULL);
-					}
+						Node	   *stmt = (Node *) lfirst(l);
 
-					/* Need CCI between commands */
-					if (lnext(l) != NULL)
-						CommandCounterIncrement();
+						if (IsA(stmt, AlterTableStmt))
+						{
+							/* Do the table alteration proper */
+							AlterTable(relid, lockmode, (AlterTableStmt *) stmt);
+						}
+						else
+						{
+							/* Recurse for anything else */
+							ProcessUtility(stmt,
+										   queryString,
+										   params,
+										   false,
+										   None_Receiver,
+										   NULL);
+						}
+
+						/* Need CCI between commands */
+						if (lnext(l) != NULL)
+							CommandCounterIncrement();
+					}
 				}
+				else
+					ereport(NOTICE,
+						(errmsg("relation \"%s\" does not exist, skipping",
+							atstmt->relation->relname)));
 			}
 			break;
 
@@ -783,7 +786,8 @@ standard_ProcessUtility(Node *parsetree,
 					case 'X':	/* DROP CONSTRAINT */
 						AlterDomainDropConstraint(stmt->typeName,
 												  stmt->name,
-												  stmt->behavior);
+												  stmt->behavior,
+												  stmt->missing_ok);
 						break;
 					case 'V':	/* VALIDATE CONSTRAINT */
 						AlterDomainValidateConstraint(stmt->typeName,
@@ -866,8 +870,12 @@ standard_ProcessUtility(Node *parsetree,
 			}
 			break;
 
-		case T_CreateEnumStmt:	/* CREATE TYPE (enum) */
+		case T_CreateEnumStmt:	/* CREATE TYPE AS ENUM */
 			DefineEnum((CreateEnumStmt *) parsetree);
+			break;
+
+		case T_CreateRangeStmt:	/* CREATE TYPE AS RANGE */
+			DefineRange((CreateRangeStmt *) parsetree);
 			break;
 
 		case T_AlterEnumStmt:	/* ALTER TYPE (enum) */
@@ -940,29 +948,6 @@ standard_ProcessUtility(Node *parsetree,
 
 		case T_AlterSeqStmt:
 			AlterSequence((AlterSeqStmt *) parsetree);
-			break;
-
-		case T_RemoveFuncStmt:
-			{
-				RemoveFuncStmt *stmt = (RemoveFuncStmt *) parsetree;
-
-				switch (stmt->kind)
-				{
-					case OBJECT_FUNCTION:
-						RemoveFunction(stmt);
-						break;
-					case OBJECT_AGGREGATE:
-						RemoveAggregate(stmt);
-						break;
-					case OBJECT_OPERATOR:
-						RemoveOperator(stmt);
-						break;
-					default:
-						elog(ERROR, "unrecognized object type: %d",
-							 (int) stmt->kind);
-						break;
-				}
-			}
 			break;
 
 		case T_DoStmt:
@@ -1074,36 +1059,8 @@ standard_ProcessUtility(Node *parsetree,
 								 InvalidOid, InvalidOid, false);
 			break;
 
-		case T_DropPropertyStmt:
-			{
-				DropPropertyStmt *stmt = (DropPropertyStmt *) parsetree;
-
-				switch (stmt->removeType)
-				{
-					case OBJECT_RULE:
-						/* RemoveRewriteRule checks permissions */
-						RemoveRewriteRule(stmt->relation, stmt->property,
-										  stmt->behavior, stmt->missing_ok);
-						break;
-					case OBJECT_TRIGGER:
-						/* DropTrigger checks permissions */
-						DropTrigger(stmt->relation, stmt->property,
-									stmt->behavior, stmt->missing_ok);
-						break;
-					default:
-						elog(ERROR, "unrecognized object type: %d",
-							 (int) stmt->removeType);
-						break;
-				}
-			}
-			break;
-
 		case T_CreatePLangStmt:
 			CreateProceduralLanguage((CreatePLangStmt *) parsetree);
-			break;
-
-		case T_DropPLangStmt:
-			DropProceduralLanguage((DropPLangStmt *) parsetree);
 			break;
 
 			/*
@@ -1215,10 +1172,6 @@ standard_ProcessUtility(Node *parsetree,
 			CreateCast((CreateCastStmt *) parsetree);
 			break;
 
-		case T_DropCastStmt:
-			DropCast((DropCastStmt *) parsetree);
-			break;
-
 		case T_CreateOpClassStmt:
 			DefineOpClass((CreateOpClassStmt *) parsetree);
 			break;
@@ -1229,14 +1182,6 @@ standard_ProcessUtility(Node *parsetree,
 
 		case T_AlterOpFamilyStmt:
 			AlterOpFamily((AlterOpFamilyStmt *) parsetree);
-			break;
-
-		case T_RemoveOpClassStmt:
-			RemoveOpClass((RemoveOpClassStmt *) parsetree);
-			break;
-
-		case T_RemoveOpFamilyStmt:
-			RemoveOpFamily((RemoveOpFamilyStmt *) parsetree);
 			break;
 
 		case T_AlterTSDictionaryStmt:
@@ -1669,20 +1614,12 @@ CreateCommandTag(Node *parsetree)
 			tag = "ALTER FOREIGN DATA WRAPPER";
 			break;
 
-		case T_DropFdwStmt:
-			tag = "DROP FOREIGN DATA WRAPPER";
-			break;
-
 		case T_CreateForeignServerStmt:
 			tag = "CREATE SERVER";
 			break;
 
 		case T_AlterForeignServerStmt:
 			tag = "ALTER SERVER";
-			break;
-
-		case T_DropForeignServerStmt:
-			tag = "DROP SERVER";
 			break;
 
 		case T_CreateUserMappingStmt:
@@ -1748,6 +1685,39 @@ CreateCommandTag(Node *parsetree)
 					break;
 				case OBJECT_EXTENSION:
 					tag = "DROP EXTENSION";
+					break;
+				case OBJECT_FUNCTION:
+					tag = "DROP FUNCTION";
+					break;
+				case OBJECT_AGGREGATE:
+					tag = "DROP AGGREGATE";
+					break;
+				case OBJECT_OPERATOR:
+					tag = "DROP OPERATOR";
+					break;
+				case OBJECT_LANGUAGE:
+					tag = "DROP LANGUAGE";
+					break;
+				case OBJECT_CAST:
+					tag = "DROP CAST";
+					break;
+				case OBJECT_TRIGGER:
+					tag = "DROP TRIGGER";
+					break;
+				case OBJECT_RULE:
+					tag = "DROP RULE";
+					break;
+				case OBJECT_FDW:
+					tag = "DROP FOREIGN DATA WRAPPER";
+					break;
+				case OBJECT_FOREIGN_SERVER:
+					tag = "DROP SERVER";
+					break;
+				case OBJECT_OPCLASS:
+					tag = "DROP OPERATOR CLASS";
+					break;
+				case OBJECT_OPFAMILY:
+					tag = "DROP OPERATOR FAMILY";
 					break;
 				default:
 					tag = "???";
@@ -1854,6 +1824,10 @@ CreateCommandTag(Node *parsetree)
 			tag = "CREATE TYPE";
 			break;
 
+		case T_CreateRangeStmt:
+			tag = "CREATE TYPE";
+			break;
+
 		case T_AlterEnumStmt:
 			tag = "ALTER TYPE";
 			break;
@@ -1880,23 +1854,6 @@ CreateCommandTag(Node *parsetree)
 
 		case T_AlterSeqStmt:
 			tag = "ALTER SEQUENCE";
-			break;
-
-		case T_RemoveFuncStmt:
-			switch (((RemoveFuncStmt *) parsetree)->kind)
-			{
-				case OBJECT_FUNCTION:
-					tag = "DROP FUNCTION";
-					break;
-				case OBJECT_AGGREGATE:
-					tag = "DROP AGGREGATE";
-					break;
-				case OBJECT_OPERATOR:
-					tag = "DROP OPERATOR";
-					break;
-				default:
-					tag = "???";
-			}
 			break;
 
 		case T_DoStmt:
@@ -1993,26 +1950,8 @@ CreateCommandTag(Node *parsetree)
 			tag = "CREATE TRIGGER";
 			break;
 
-		case T_DropPropertyStmt:
-			switch (((DropPropertyStmt *) parsetree)->removeType)
-			{
-				case OBJECT_TRIGGER:
-					tag = "DROP TRIGGER";
-					break;
-				case OBJECT_RULE:
-					tag = "DROP RULE";
-					break;
-				default:
-					tag = "???";
-			}
-			break;
-
 		case T_CreatePLangStmt:
 			tag = "CREATE LANGUAGE";
-			break;
-
-		case T_DropPLangStmt:
-			tag = "DROP LANGUAGE";
 			break;
 
 		case T_CreateRoleStmt:
@@ -2063,10 +2002,6 @@ CreateCommandTag(Node *parsetree)
 			tag = "CREATE CAST";
 			break;
 
-		case T_DropCastStmt:
-			tag = "DROP CAST";
-			break;
-
 		case T_CreateOpClassStmt:
 			tag = "CREATE OPERATOR CLASS";
 			break;
@@ -2077,14 +2012,6 @@ CreateCommandTag(Node *parsetree)
 
 		case T_AlterOpFamilyStmt:
 			tag = "ALTER OPERATOR FAMILY";
-			break;
-
-		case T_RemoveOpClassStmt:
-			tag = "DROP OPERATOR CLASS";
-			break;
-
-		case T_RemoveOpFamilyStmt:
-			tag = "DROP OPERATOR FAMILY";
 			break;
 
 		case T_AlterTSDictionaryStmt:
@@ -2297,10 +2224,8 @@ GetCommandLogLevel(Node *parsetree)
 
 		case T_CreateFdwStmt:
 		case T_AlterFdwStmt:
-		case T_DropFdwStmt:
 		case T_CreateForeignServerStmt:
 		case T_AlterForeignServerStmt:
-		case T_DropForeignServerStmt:
 		case T_CreateUserMappingStmt:
 		case T_AlterUserMappingStmt:
 		case T_DropUserMappingStmt:
@@ -2401,6 +2326,10 @@ GetCommandLogLevel(Node *parsetree)
 			lev = LOGSTMT_DDL;
 			break;
 
+		case T_CreateRangeStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
 		case T_AlterEnumStmt:
 			lev = LOGSTMT_DDL;
 			break;
@@ -2430,10 +2359,6 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_AlterSeqStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
-		case T_RemoveFuncStmt:
 			lev = LOGSTMT_DDL;
 			break;
 
@@ -2520,15 +2445,7 @@ GetCommandLogLevel(Node *parsetree)
 			lev = LOGSTMT_DDL;
 			break;
 
-		case T_DropPropertyStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
 		case T_CreatePLangStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
-		case T_DropPLangStmt:
 			lev = LOGSTMT_DDL;
 			break;
 
@@ -2584,10 +2501,6 @@ GetCommandLogLevel(Node *parsetree)
 			lev = LOGSTMT_DDL;
 			break;
 
-		case T_DropCastStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
 		case T_CreateOpClassStmt:
 			lev = LOGSTMT_DDL;
 			break;
@@ -2597,14 +2510,6 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_AlterOpFamilyStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
-		case T_RemoveOpClassStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
-		case T_RemoveOpFamilyStmt:
 			lev = LOGSTMT_DDL;
 			break;
 

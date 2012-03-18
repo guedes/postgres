@@ -10,7 +10,7 @@
  * guarantee that there can only be one matching row for a key combination.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/catcache.h
@@ -173,6 +173,10 @@ extern HeapTuple SearchCatCache(CatCache *cache,
 			   Datum v1, Datum v2,
 			   Datum v3, Datum v4);
 extern void ReleaseCatCache(HeapTuple tuple);
+
+extern uint32 GetCatCacheHashValue(CatCache *cache,
+					 Datum v1, Datum v2,
+					 Datum v3, Datum v4);
 
 extern CatCList *SearchCatCacheList(CatCache *cache, int nkeys,
 				   Datum v1, Datum v2,

@@ -4,7 +4,7 @@
  *	  Sort the items of a dump into a safe order for dumping
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,7 +14,8 @@
  *-------------------------------------------------------------------------
  */
 #include "pg_backup_archiver.h"
-
+#include "dumputils.h"
+#include "dumpmem.h"
 
 static const char *modulename = gettext_noop("sorter");
 
@@ -177,6 +178,25 @@ DOTypeNameCompare(const void *p1, const void *p2)
 		if (cmpval != 0)
 			return cmpval;
 	}
+	else if (obj1->objType == DO_OPERATOR)
+	{
+		OprInfo	*oobj1 = *(OprInfo * const *) p1;
+		OprInfo *oobj2 = *(OprInfo * const *) p2;
+
+		/* oprkind is 'l', 'r', or 'b'; this sorts prefix, postfix, infix */
+		cmpval = (oobj2->oprkind - oobj1->oprkind);
+		if (cmpval != 0)
+			return cmpval;
+	}
+	else if (obj1->objType == DO_ATTRDEF)
+	{
+		AttrDefInfo *adobj1 = *(AttrDefInfo * const *) p1;
+		AttrDefInfo *adobj2 = *(AttrDefInfo * const *) p2;
+
+		cmpval = (adobj1->adnum - adobj2->adnum);
+		if (cmpval != 0)
+			return cmpval;
+	}
 
 	/* Usually shouldn't get here, but if we do, sort by OID */
 	return oidcmp(obj1->catId.oid, obj2->catId.oid);
@@ -227,10 +247,7 @@ sortDumpableObjects(DumpableObject **objs, int numObjs)
 	if (numObjs <= 0)
 		return;
 
-	ordering = (DumpableObject **) malloc(numObjs * sizeof(DumpableObject *));
-	if (ordering == NULL)
-		exit_horribly(NULL, modulename, "out of memory\n");
-
+	ordering = (DumpableObject **) pg_malloc(numObjs * sizeof(DumpableObject *));
 	while (!TopoSort(objs, numObjs, ordering, &nOrdering))
 		findDependencyLoops(ordering, nOrdering, numObjs);
 
@@ -301,9 +318,7 @@ TopoSort(DumpableObject **objs,
 		return true;
 
 	/* Create workspace for the above-described heap */
-	pendingHeap = (int *) malloc(numObjs * sizeof(int));
-	if (pendingHeap == NULL)
-		exit_horribly(NULL, modulename, "out of memory\n");
+	pendingHeap = (int *) pg_malloc(numObjs * sizeof(int));
 
 	/*
 	 * Scan the constraints, and for each item in the input, generate a count
@@ -312,25 +327,21 @@ TopoSort(DumpableObject **objs,
 	 * We also make a map showing the input-order index of the item with
 	 * dumpId j.
 	 */
-	beforeConstraints = (int *) malloc((maxDumpId + 1) * sizeof(int));
-	if (beforeConstraints == NULL)
-		exit_horribly(NULL, modulename, "out of memory\n");
+	beforeConstraints = (int *) pg_malloc((maxDumpId + 1) * sizeof(int));
 	memset(beforeConstraints, 0, (maxDumpId + 1) * sizeof(int));
-	idMap = (int *) malloc((maxDumpId + 1) * sizeof(int));
-	if (idMap == NULL)
-		exit_horribly(NULL, modulename, "out of memory\n");
+	idMap = (int *) pg_malloc((maxDumpId + 1) * sizeof(int));
 	for (i = 0; i < numObjs; i++)
 	{
 		obj = objs[i];
 		j = obj->dumpId;
 		if (j <= 0 || j > maxDumpId)
-			exit_horribly(NULL, modulename, "invalid dumpId %d\n", j);
+			exit_horribly(modulename, "invalid dumpId %d\n", j);
 		idMap[j] = i;
 		for (j = 0; j < obj->nDeps; j++)
 		{
 			k = obj->dependencies[j];
 			if (k <= 0 || k > maxDumpId)
-				exit_horribly(NULL, modulename, "invalid dependency %d\n", k);
+				exit_horribly(modulename, "invalid dependency %d\n", k);
 			beforeConstraints[k]++;
 		}
 	}
@@ -516,9 +527,7 @@ findDependencyLoops(DumpableObject **objs, int nObjs, int totObjs)
 	bool		fixedloop;
 	int			i;
 
-	workspace = (DumpableObject **) malloc(totObjs * sizeof(DumpableObject *));
-	if (workspace == NULL)
-		exit_horribly(NULL, modulename, "out of memory\n");
+	workspace = (DumpableObject **) pg_malloc(totObjs * sizeof(DumpableObject *));
 	initiallen = 0;
 	fixedloop = false;
 
@@ -552,7 +561,7 @@ findDependencyLoops(DumpableObject **objs, int nObjs, int totObjs)
 
 	/* We'd better have fixed at least one loop */
 	if (!fixedloop)
-		exit_horribly(NULL, modulename, "could not identify dependency loop\n");
+		exit_horribly(modulename, "could not identify dependency loop\n");
 
 	free(workspace);
 }
@@ -636,7 +645,8 @@ findLoop(DumpableObject *obj,
 /*
  * A user-defined datatype will have a dependency loop with each of its
  * I/O functions (since those have the datatype as input or output).
- * Break the loop and make the I/O function depend on the associated
+ * Similarly, a range type will have a loop with its canonicalize function,
+ * if any.  Break the loop by making the function depend on the associated
  * shell type, instead.
  */
 static void
@@ -651,7 +661,7 @@ repairTypeFuncLoop(DumpableObject *typeobj, DumpableObject *funcobj)
 	if (typeInfo->shellType)
 	{
 		addObjectDependency(funcobj, typeInfo->shellType->dobj.dumpId);
-		/* Mark shell type as to be dumped if any I/O function is */
+		/* Mark shell type as to be dumped if any such function is */
 		if (funcobj->dump)
 			typeInfo->shellType->dobj.dump = true;
 	}
@@ -789,7 +799,7 @@ repairDependencyLoop(DumpableObject **loop,
 	int			i,
 				j;
 
-	/* Datatype and one of its I/O functions */
+	/* Datatype and one of its I/O or canonicalize functions */
 	if (nLoop == 2 &&
 		loop[0]->objType == DO_TYPE &&
 		loop[1]->objType == DO_FUNC)

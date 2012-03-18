@@ -14,7 +14,7 @@
  *
  * Author: Andreas Pflug <pgadmin@pse-consulting.de>
  *
- * Copyright (c) 2004-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2004-2012, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -588,8 +588,11 @@ SysLogger_Start(void)
 							 errmsg("could not redirect stderr: %m")));
 				close(fd);
 				_setmode(_fileno(stderr), _O_BINARY);
-				/* Now we are done with the write end of the pipe. */
-				CloseHandle(syslogPipe[1]);
+				/*
+				 * Now we are done with the write end of the pipe.
+				 * CloseHandle() must not be called because the preceding
+				 * close() closes the underlying handle.
+				*/
 				syslogPipe[1] = 0;
 #endif
 				redirection_done = true;

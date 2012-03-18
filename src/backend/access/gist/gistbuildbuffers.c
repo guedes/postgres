@@ -4,7 +4,7 @@
  *	  node buffer management functions for GiST buffering build algorithm.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -606,12 +606,8 @@ gistRelocateBuildBuffersOnSplit(GISTBuildBuffers *gfbb, GISTSTATE *giststate,
 							 HASH_FIND, &found);
 	if (!found)
 	{
-		/*
-		 * Node buffer should exist at this point. If it didn't exist before,
-		 * the insertion that caused the page to split should've created it.
-		 */
-		elog(ERROR, "node buffer of page being split (%u) does not exist",
-			 blocknum);
+		/* The page has no buffer, so we have nothing to do. */
+		return;
 	}
 
 	/*

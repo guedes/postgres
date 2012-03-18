@@ -4,7 +4,7 @@
  *	  WAL replay logic for btrees.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -539,7 +539,7 @@ btree_xlog_vacuum(XLogRecPtr lsn, XLogRecord *record)
 
 	/*
 	 * Mark the page as not containing any LP_DEAD items --- see comments in
-	 * _bt_delitems().
+	 * _bt_delitems_vacuum().
 	 */
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	opaque->btpo_flags &= ~BTP_HAS_GARBAGE;
@@ -720,7 +720,7 @@ btree_xlog_delete(XLogRecPtr lsn, XLogRecord *record)
 
 	/*
 	 * Mark the page as not containing any LP_DEAD items --- see comments in
-	 * _bt_delitems().
+	 * _bt_delitems_delete().
 	 */
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	opaque->btpo_flags &= ~BTP_HAS_GARBAGE;

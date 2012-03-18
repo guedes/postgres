@@ -19,7 +19,7 @@ typedef struct
 	char		stmtID[STMTID_SIZE];
 	char	   *ecpgQuery;
 	long		execs;			/* # of executions		*/
-	char	   *connection;		/* connection for the statement		*/
+	const char *connection;		/* connection for the statement		*/
 } stmtCacheEntry;
 
 static int	nextStmtID = 1;
@@ -361,7 +361,7 @@ SearchStmtCache(const char *ecpgQuery)
 	{
 		if (stmtCacheEntries[entNo].stmtID[0])	/* check if entry is in use		*/
 		{
-			if (!strcmp(ecpgQuery, stmtCacheEntries[entNo].ecpgQuery))
+			if (strcmp(ecpgQuery, stmtCacheEntries[entNo].ecpgQuery) == 0)
 				break;			/* found it		*/
 		}
 		++entNo;				/* incr entry #		*/
@@ -456,7 +456,7 @@ AddStmtToCache(int lineno,		/* line # of statement		*/
 	entry = &stmtCacheEntries[entNo];
 	entry->lineno = lineno;
 	entry->ecpgQuery = ecpg_strdup(ecpgQuery, lineno);
-	entry->connection = (char *) connection;
+	entry->connection = connection;
 	entry->execs = 0;
 	memcpy(entry->stmtID, stmtID, sizeof(entry->stmtID));
 

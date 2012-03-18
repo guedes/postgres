@@ -5,7 +5,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_receivexlog.c
@@ -71,32 +71,9 @@ usage(void)
 static bool
 segment_callback(XLogRecPtr segendpos, uint32 timeline)
 {
-	char		fn[MAXPGPATH];
-	struct stat statbuf;
-
 	if (verbose)
 		fprintf(stderr, _("%s: finished segment at %X/%X (timeline %u)\n"),
 				progname, segendpos.xlogid, segendpos.xrecoff, timeline);
-
-	/*
-	 * Check if there is a partial file for the name we just finished, and if
-	 * there is, remove it under the assumption that we have now got all the
-	 * data we need.
-	 */
-	segendpos.xrecoff /= XLOG_SEG_SIZE;
-	PrevLogSeg(segendpos.xlogid, segendpos.xrecoff);
-	snprintf(fn, sizeof(fn), "%s/%08X%08X%08X.partial",
-			 basedir, timeline,
-			 segendpos.xlogid,
-			 segendpos.xrecoff);
-	if (stat(fn, &statbuf) == 0)
-	{
-		/* File existed, get rid of it */
-		if (verbose)
-			fprintf(stderr, _("%s: removing file \"%s\"\n"),
-					progname, fn);
-		unlink(fn);
-	}
 
 	/*
 	 * Never abort from this - we handle all aborting in continue_streaming()
@@ -119,9 +96,8 @@ continue_streaming(void)
 /*
  * Determine starting location for streaming, based on:
  * 1. If there are existing xlog segments, start at the end of the last one
- * 2. If the last one is a partial segment, rename it and start over, since
- *	  we don't sync after every write.
- * 3. If no existing xlog exists, start from the beginning of the current
+ *    that is complete (size matches XLogSegSize)
+ * 2. If no valid xlog exists, start from the beginning of the current
  *	  WAL segment.
  */
 static XLogRecPtr
@@ -133,7 +109,6 @@ FindStreamingStart(XLogRecPtr currentpos, uint32 currenttimeline)
 	bool		b;
 	uint32		high_log = 0;
 	uint32		high_seg = 0;
-	bool		partial = false;
 
 	dir = opendir(basedir);
 	if (dir == NULL)
@@ -151,7 +126,7 @@ FindStreamingStart(XLogRecPtr currentpos, uint32 currenttimeline)
 					log,
 					seg;
 
-		if (!strcmp(dirent->d_name, ".") || !strcmp(dirent->d_name, ".."))
+		if (strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0)
 			continue;
 
 		/* xlog files are always 24 characters */
@@ -195,7 +170,7 @@ FindStreamingStart(XLogRecPtr currentpos, uint32 currenttimeline)
 			disconnect_and_exit(1);
 		}
 
-		if (statbuf.st_size == 16 * 1024 * 1024)
+		if (statbuf.st_size == XLOG_SEG_SIZE)
 		{
 			/* Completed segment */
 			if (log > high_log ||
@@ -208,37 +183,9 @@ FindStreamingStart(XLogRecPtr currentpos, uint32 currenttimeline)
 		}
 		else
 		{
-			/*
-			 * This is a partial file. Rename it out of the way.
-			 */
-			char		newfn[MAXPGPATH];
-
-			fprintf(stderr, _("%s: renaming partial file \"%s\" to \"%s.partial\"\n"),
-					progname, dirent->d_name, dirent->d_name);
-
-			snprintf(newfn, sizeof(newfn), "%s/%s.partial",
-					 basedir, dirent->d_name);
-
-			if (stat(newfn, &statbuf) == 0)
-			{
-				/*
-				 * XXX: perhaps we should only error out if the existing file
-				 * is larger?
-				 */
-				fprintf(stderr, _("%s: file \"%s\" already exists. Check and clean up manually.\n"),
-						progname, newfn);
-				disconnect_and_exit(1);
-			}
-			if (rename(fullpath, newfn) != 0)
-			{
-				fprintf(stderr, _("%s: could not rename \"%s\" to \"%s\": %s\n"),
-						progname, fullpath, newfn, strerror(errno));
-				disconnect_and_exit(1);
-			}
-
-			/* Don't continue looking for more, we assume this is the last */
-			partial = true;
-			break;
+			fprintf(stderr, _("%s: segment file '%s' is incorrect size %d, skipping\n"),
+					progname, dirent->d_name, (int) statbuf.st_size);
+			continue;
 		}
 	}
 
@@ -247,17 +194,11 @@ FindStreamingStart(XLogRecPtr currentpos, uint32 currenttimeline)
 	if (high_log > 0 || high_seg > 0)
 	{
 		XLogRecPtr	high_ptr;
-
-		if (!partial)
-		{
-			/*
-			 * If the segment was partial, the pointer is already at the right
-			 * location since we want to re-transmit that segment. If it was
-			 * not, we need to move it to the next segment, since we are
-			 * tracking the last one that was complete.
-			 */
-			NextLogSeg(high_log, high_seg);
-		}
+		/*
+		 * Move the starting pointer to the start of the next segment,
+		 * since the highest one we've seen was completed.
+		 */
+		NextLogSeg(high_log, high_seg);
 
 		high_ptr.xlogid = high_log;
 		high_ptr.xrecoff = high_seg * XLOG_SEG_SIZE;
@@ -294,10 +235,10 @@ StreamLog(void)
 				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
-	if (PQntuples(res) != 1)
+	if (PQntuples(res) != 1 || PQnfields(res) != 3)
 	{
-		fprintf(stderr, _("%s: could not identify system, got %i rows\n"),
-				progname, PQntuples(res));
+		fprintf(stderr, _("%s: could not identify system, got %i rows and %i fields\n"),
+				progname, PQntuples(res), PQnfields(res));
 		disconnect_and_exit(1);
 	}
 	timeline = atoi(PQgetvalue(res, 0, 1));
@@ -329,17 +270,23 @@ StreamLog(void)
 	ReceiveXlogStream(conn, startpos, timeline, NULL, basedir,
 					  segment_callback, continue_streaming,
 					  standby_message_timeout);
+
+	PQfinish(conn);
 }
 
 /*
  * When sigint is called, just tell the system to exit at the next possible
  * moment.
  */
+#ifndef WIN32
+
 static void
 sigint_handler(int signum)
 {
 	time_to_abort = true;
 }
+
+#endif
 
 int
 main(int argc, char **argv)

@@ -3,7 +3,7 @@
  * pg_shdepend.c
  *	  routines to support manipulation of the pg_shdepend relation
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -25,6 +25,8 @@
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_default_acl.h"
+#include "catalog/pg_foreign_data_wrapper.h"
+#include "catalog/pg_foreign_server.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_largeobject.h"
 #include "catalog/pg_namespace.h"
@@ -1240,7 +1242,7 @@ shdepDropOwned(List *roleids, DropBehavior behavior)
 	}
 
 	/* the dependency mechanism does the actual work */
-	performMultipleDeletions(deleteobjs, behavior);
+	performMultipleDeletions(deleteobjs, behavior, 0);
 
 	heap_close(sdepRel, RowExclusiveLock);
 
@@ -1380,6 +1382,14 @@ shdepReassignOwned(List *roleids, Oid newrole)
 
 				case OperatorFamilyRelationId:
 					AlterOpFamilyOwner_oid(sdepForm->objid, newrole);
+					break;
+
+				case ForeignServerRelationId:
+					AlterForeignServerOwner_oid(sdepForm->objid, newrole);
+					break;
+
+				case ForeignDataWrapperRelationId:
+					AlterForeignDataWrapperOwner_oid(sdepForm->objid, newrole);
 					break;
 
 				default:

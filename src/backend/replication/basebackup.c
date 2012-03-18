@@ -3,7 +3,7 @@
  * basebackup.c
  *	  code for taking a base backup and streaming it to a standby
  *
- * Portions Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/basebackup.c
@@ -47,7 +47,7 @@ static int64 sendDir(char *path, int basepathlen, bool sizeonly);
 static void sendFile(char *readfilename, char *tarfilename,
 		 struct stat * statbuf);
 static void sendFileWithContent(const char *filename, const char *content);
-static void _tarWriteHeader(const char *filename, char *linktarget,
+static void _tarWriteHeader(const char *filename, const char *linktarget,
 				struct stat * statbuf);
 static void send_int8_string(StringInfoData *buf, int64 intval);
 static void SendBackupHeader(List *tablespaces);
@@ -109,6 +109,7 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 		{
 			char		fullpath[MAXPGPATH];
 			char		linkpath[MAXPGPATH];
+			int			rllen;
 
 			/* Skip special stuff */
 			if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
@@ -116,19 +117,39 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 
 			snprintf(fullpath, sizeof(fullpath), "pg_tblspc/%s", de->d_name);
 
-			MemSet(linkpath, 0, sizeof(linkpath));
-			if (readlink(fullpath, linkpath, sizeof(linkpath) - 1) == -1)
+#if defined(HAVE_READLINK) || defined(WIN32)
+			rllen = readlink(fullpath, linkpath, sizeof(linkpath));
+			if (rllen < 0)
 			{
 				ereport(WARNING,
-				  (errmsg("could not read symbolic link \"%s\": %m", fullpath)));
+						(errmsg("could not read symbolic link \"%s\": %m",
+								fullpath)));
 				continue;
 			}
+			else if (rllen >= sizeof(linkpath))
+			{
+				ereport(WARNING,
+						(errmsg("symbolic link \"%s\" target is too long",
+								fullpath)));
+				continue;
+			}
+			linkpath[rllen] = '\0';
 
 			ti = palloc(sizeof(tablespaceinfo));
 			ti->oid = pstrdup(de->d_name);
 			ti->path = pstrdup(linkpath);
 			ti->size = opt->progress ? sendDir(linkpath, strlen(linkpath), true) : -1;
 			tablespaces = lappend(tablespaces, ti);
+#else
+			/*
+			 * If the platform does not have symbolic links, it should not be
+			 * possible to have tablespaces - clearly somebody else created
+			 * them. Warn about it and ignore.
+			 */
+			ereport(WARNING,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("tablespaces are not supported on this platform")));
+#endif
 		}
 
 		/* Add a node for the base directory at the end */
@@ -158,6 +179,22 @@ perform_base_backup(basebackup_options *opt, DIR *tblspcdir)
 			sendDir(ti->path == NULL ? "." : ti->path,
 					ti->path == NULL ? 1 : strlen(ti->path),
 					false);
+
+			/* In the main tar, include pg_control last. */
+			if (ti->path == NULL)
+			{
+				struct stat statbuf;
+
+				if (lstat(XLOG_CONTROL_FILE, &statbuf) != 0)
+				{
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not stat control file \"%s\": %m",
+									XLOG_CONTROL_FILE)));
+				}
+
+				sendFile(XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf);
+			}
 
 			/*
 			 * If we're including WAL, and this is the main data directory we
@@ -339,11 +376,6 @@ SendBaseBackup(BaseBackupCmd *cmd)
 	MemoryContext backup_context;
 	MemoryContext old_context;
 	basebackup_options opt;
-
-	if (am_cascading_walsender)
-		ereport(FATAL,
-				(errcode(ERRCODE_CANNOT_CONNECT_NOW),
-				 errmsg("recovery is still in progress, can't accept WAL streaming connections for backup")));
 
 	parse_basebackup_options(cmd->options, &opt);
 
@@ -588,6 +620,10 @@ sendDir(char *path, int basepathlen, bool sizeonly)
 			strcmp(pathbuf, "./postmaster.opts") == 0)
 			continue;
 
+		/* Skip pg_control here to back up it last */
+		if (strcmp(pathbuf, "./global/pg_control") == 0)
+			continue;
+
 		if (lstat(pathbuf, &statbuf) != 0)
 		{
 			if (errno != ENOENT)
@@ -622,24 +658,45 @@ sendDir(char *path, int basepathlen, bool sizeonly)
 			continue;			/* don't recurse into pg_xlog */
 		}
 
+		/* Allow symbolic links in pg_tblspc only */
+		if (strcmp(path, "./pg_tblspc") == 0 &&
 #ifndef WIN32
-		if (S_ISLNK(statbuf.st_mode) && strcmp(path, "./pg_tblspc") == 0)
+				 S_ISLNK(statbuf.st_mode)
 #else
-		if (pgwin32_is_junction(pathbuf) && strcmp(path, "./pg_tblspc") == 0)
+				 pgwin32_is_junction(pathbuf)
 #endif
+			)
 		{
-			/* Allow symbolic links in pg_tblspc */
+#if defined(HAVE_READLINK) || defined(WIN32)
 			char		linkpath[MAXPGPATH];
+			int			rllen;
 
-			MemSet(linkpath, 0, sizeof(linkpath));
-			if (readlink(pathbuf, linkpath, sizeof(linkpath) - 1) == -1)
+			rllen = readlink(pathbuf, linkpath, sizeof(linkpath));
+			if (rllen < 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not read symbolic link \"%s\": %m",
 								pathbuf)));
+			if (rllen >= sizeof(linkpath))
+				ereport(ERROR,
+						(errmsg("symbolic link \"%s\" target is too long",
+								pathbuf)));
+			linkpath[rllen] = '\0';
+
 			if (!sizeonly)
 				_tarWriteHeader(pathbuf + basepathlen + 1, linkpath, &statbuf);
 			size += 512;		/* Size of the header just added */
+#else
+			/*
+			 * If the platform does not have symbolic links, it should not be
+			 * possible to have tablespaces - clearly somebody else created
+			 * them. Warn about it and ignore.
+			 */
+			ereport(WARNING,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("tablespaces are not supported on this platform")));
+			continue;
+#endif /* HAVE_READLINK */
 		}
 		else if (S_ISDIR(statbuf.st_mode))
 		{
@@ -787,7 +844,8 @@ sendFile(char *readfilename, char *tarfilename, struct stat * statbuf)
 
 
 static void
-_tarWriteHeader(const char *filename, char *linktarget, struct stat * statbuf)
+_tarWriteHeader(const char *filename, const char *linktarget,
+				struct stat * statbuf)
 {
 	char		h[512];
 	int			lastSum = 0;
@@ -835,7 +893,7 @@ _tarWriteHeader(const char *filename, char *linktarget, struct stat * statbuf)
 	{
 		/* Type - Symbolic link */
 		sprintf(&h[156], "2");
-		strcpy(&h[157], linktarget);
+		sprintf(&h[157], "%.99s", linktarget);
 	}
 	else if (S_ISDIR(statbuf->st_mode))
 		/* Type - directory */

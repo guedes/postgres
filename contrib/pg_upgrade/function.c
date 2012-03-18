@@ -3,7 +3,7 @@
  *
  *	server-side function support
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/function.c
  */
 
@@ -132,8 +132,7 @@ get_loadable_libraries(void)
 	int			totaltups;
 	int			dbnum;
 
-	ress = (PGresult **)
-		pg_malloc(old_cluster.dbarr.ndbs * sizeof(PGresult *));
+	ress = (PGresult **) pg_malloc(old_cluster.dbarr.ndbs * sizeof(PGresult *));
 	totaltups = 0;
 
 	/* Fetch all library names, removing duplicates within each DB */
@@ -219,18 +218,37 @@ check_loadable_libraries(void)
 
 	prep_status("Checking for presence of required libraries");
 
-	snprintf(output_path, sizeof(output_path), "%s/loadable_libraries.txt",
-			 os_info.cwd);
+	snprintf(output_path, sizeof(output_path), "loadable_libraries.txt");
 
 	for (libnum = 0; libnum < os_info.num_libraries; libnum++)
 	{
 		char	   *lib = os_info.libraries[libnum];
 		int			llen = strlen(lib);
-		char	   *cmd = (char *) pg_malloc(8 + 2 * llen + 1);
+		char		cmd[7 + 2 * MAXPGPATH + 1];
 		PGresult   *res;
 
+		/*
+		 *	In Postgres 9.0, Python 3 support was added, and to do that, a
+		 *	plpython2u language was created with library name plpython2.so
+		 *	as a symbolic link to plpython.so.  In Postgres 9.1, only the
+		 *	plpython2.so library was created, and both plpythonu and
+		 *	plpython2u pointing to it.  For this reason, any reference to
+		 *	library name "plpython" in an old PG <= 9.1 cluster must look
+		 *	for "plpython2" in the new cluster.
+		 *
+		 *	For this case, we could check pg_pltemplate, but that only works
+		 *	for languages, and does not help with function shared objects,
+		 *	so we just do a general fix.
+		 */
+		if (GET_MAJOR_VERSION(old_cluster.major_version) < 901 &&
+			strcmp(lib, "$libdir/plpython") == 0)
+		{
+			lib = "$libdir/plpython2";
+			llen = strlen(lib);
+		}
+
 		strcpy(cmd, "LOAD '");
-		PQescapeStringConn(conn, cmd + 6, lib, llen, NULL);
+		PQescapeStringConn(conn, cmd + strlen(cmd), lib, llen, NULL);
 		strcat(cmd, "'");
 
 		res = PQexec(conn, cmd);
@@ -238,7 +256,7 @@ check_loadable_libraries(void)
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
 		{
 			found = true;
-			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
+			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
 				pg_log(PG_FATAL, "Could not open file \"%s\": %s\n",
 					   output_path, getErrorText(errno));
 			fprintf(script, "Could not load library \"%s\"\n%s\n",
@@ -247,7 +265,6 @@ check_loadable_libraries(void)
 		}
 
 		PQclear(res);
-		pg_free(cmd);
 	}
 
 	PQfinish(conn);
