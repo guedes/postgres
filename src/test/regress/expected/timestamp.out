@@ -12,9 +12,9 @@ CREATE TABLE TIMESTAMP_TBL (d1 timestamp(2) without time zone);
 -- the same values and the counts will come out different.
 INSERT INTO TIMESTAMP_TBL VALUES ('now');
 SELECT pg_sleep(0.1);
- pg_sleep 
+ pg_sleep
 ----------
- 
+
 (1 row)
 
 BEGIN;
@@ -26,25 +26,25 @@ INSERT INTO TIMESTAMP_TBL VALUES ('tomorrow');
 INSERT INTO TIMESTAMP_TBL VALUES ('tomorrow EST');
 INSERT INTO TIMESTAMP_TBL VALUES ('tomorrow zulu');
 SELECT count(*) AS One FROM TIMESTAMP_TBL WHERE d1 = timestamp without time zone 'today';
- one 
+ one
 -----
    1
 (1 row)
 
 SELECT count(*) AS Three FROM TIMESTAMP_TBL WHERE d1 = timestamp without time zone 'tomorrow';
- three 
+ three
 -------
      3
 (1 row)
 
 SELECT count(*) AS One FROM TIMESTAMP_TBL WHERE d1 = timestamp without time zone 'yesterday';
- one 
+ one
 -----
    1
 (1 row)
 
 SELECT count(*) AS One FROM TIMESTAMP_TBL WHERE d1 = timestamp(2) without time zone 'now';
- one 
+ one
 -----
    1
 (1 row)
@@ -55,20 +55,20 @@ DELETE FROM TIMESTAMP_TBL;
 BEGIN;
 INSERT INTO TIMESTAMP_TBL VALUES ('now');
 SELECT pg_sleep(0.1);
- pg_sleep 
+ pg_sleep
 ----------
- 
+
 (1 row)
 
 INSERT INTO TIMESTAMP_TBL VALUES ('now');
 SELECT pg_sleep(0.1);
- pg_sleep 
+ pg_sleep
 ----------
- 
+
 (1 row)
 
 SELECT count(*) AS two FROM TIMESTAMP_TBL WHERE d1 = timestamp(2) without time zone 'now';
- two 
+ two
 -----
    2
 (1 row)
@@ -181,7 +181,7 @@ ERROR:  timestamp out of range: "Feb 16 17:32:01 5097 BC"
 LINE 1: INSERT INTO TIMESTAMP_TBL VALUES ('Feb 16 17:32:01 5097 BC')...
                                           ^
 SELECT '' AS "64", d1 FROM TIMESTAMP_TBL;
- 64 |             d1              
+ 64 |             d1
 ----+-----------------------------
     | -infinity
     | infinity
@@ -253,7 +253,7 @@ SELECT '' AS "64", d1 FROM TIMESTAMP_TBL;
 -- Demonstrate functions and operators
 SELECT '' AS "48", d1 FROM TIMESTAMP_TBL
    WHERE d1 > timestamp without time zone '1997-01-02';
- 48 |             d1             
+ 48 |             d1
 ----+----------------------------
     | infinity
     | Mon Feb 10 17:32:01 1997
@@ -308,7 +308,7 @@ SELECT '' AS "48", d1 FROM TIMESTAMP_TBL
 
 SELECT '' AS "15", d1 FROM TIMESTAMP_TBL
    WHERE d1 < timestamp without time zone '1997-01-02';
- 15 |             d1              
+ 15 |             d1
 ----+-----------------------------
     | -infinity
     | Thu Jan 01 00:00:00 1970
@@ -329,14 +329,14 @@ SELECT '' AS "15", d1 FROM TIMESTAMP_TBL
 
 SELECT '' AS one, d1 FROM TIMESTAMP_TBL
    WHERE d1 = timestamp without time zone '1997-01-02';
- one |            d1            
+ one |            d1
 -----+--------------------------
      | Thu Jan 02 00:00:00 1997
 (1 row)
 
 SELECT '' AS "63", d1 FROM TIMESTAMP_TBL
    WHERE d1 != timestamp without time zone '1997-01-02';
- 63 |             d1              
+ 63 |             d1
 ----+-----------------------------
     | -infinity
     | infinity
@@ -406,7 +406,7 @@ SELECT '' AS "63", d1 FROM TIMESTAMP_TBL
 
 SELECT '' AS "16", d1 FROM TIMESTAMP_TBL
    WHERE d1 <= timestamp without time zone '1997-01-02';
- 16 |             d1              
+ 16 |             d1
 ----+-----------------------------
     | -infinity
     | Thu Jan 01 00:00:00 1970
@@ -428,7 +428,7 @@ SELECT '' AS "16", d1 FROM TIMESTAMP_TBL
 
 SELECT '' AS "49", d1 FROM TIMESTAMP_TBL
    WHERE d1 >= timestamp without time zone '1997-01-02';
- 49 |             d1             
+ 49 |             d1
 ----+----------------------------
     | infinity
     | Mon Feb 10 17:32:01 1997
@@ -484,7 +484,7 @@ SELECT '' AS "49", d1 FROM TIMESTAMP_TBL
 
 SELECT '' AS "54", d1 - timestamp without time zone '1997-01-02' AS diff
    FROM TIMESTAMP_TBL WHERE d1 BETWEEN '1902-01-01' AND '2038-01-01';
- 54 |                  diff                  
+ 54 |                  diff
 ----+----------------------------------------
     | @ 9863 days ago
     | @ 39 days 17 hours 32 mins 1 sec
@@ -544,7 +544,7 @@ SELECT '' AS "54", d1 - timestamp without time zone '1997-01-02' AS diff
 (55 rows)
 
 SELECT '' AS date_trunc_week, date_trunc( 'week', timestamp '2004-02-29 15:44:17.71393' ) AS week_trunc;
- date_trunc_week |        week_trunc        
+ date_trunc_week |        week_trunc
 -----------------+--------------------------
                  | Mon Feb 23 00:00:00 2004
 (1 row)
@@ -554,7 +554,7 @@ SELECT '' AS "54", d1 - timestamp without time zone '1997-01-02' AS diff
   FROM TIMESTAMP_TBL
   WHERE d1 BETWEEN timestamp without time zone '1902-01-01'
    AND timestamp without time zone '2038-01-01';
- 54 |                  diff                  
+ 54 |                  diff
 ----+----------------------------------------
     | @ 9863 days ago
     | @ 39 days 17 hours 32 mins 1 sec
@@ -618,7 +618,7 @@ SELECT '' AS "54", d1 as "timestamp",
    date_part( 'day', d1) AS day, date_part( 'hour', d1) AS hour,
    date_part( 'minute', d1) AS minute, date_part( 'second', d1) AS second
    FROM TIMESTAMP_TBL WHERE d1 BETWEEN '1902-01-01' AND '2038-01-01';
- 54 |         timestamp          | year | month | day | hour | minute | second 
+ 54 |         timestamp          | year | month | day | hour | minute | second
 ----+----------------------------+------+-------+-----+------+--------+--------
     | Thu Jan 01 00:00:00 1970   | 1970 |     1 |   1 |    0 |      0 |      0
     | Mon Feb 10 17:32:01 1997   | 1997 |     2 |  10 |   17 |     32 |      1
@@ -679,72 +679,72 @@ SELECT '' AS "54", d1 as "timestamp",
 
 SELECT '' AS "54", d1 as "timestamp",
    date_part( 'quarter', d1) AS quarter, date_part( 'msec', d1) AS msec,
-   date_part( 'usec', d1) AS usec
+   date_part( 'usec', d1) AS usec, date_part('semester', d1) AS semester
    FROM TIMESTAMP_TBL WHERE d1 BETWEEN '1902-01-01' AND '2038-01-01';
- 54 |         timestamp          | quarter | msec  |   usec   
-----+----------------------------+---------+-------+----------
-    | Thu Jan 01 00:00:00 1970   |       1 |     0 |        0
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:02 1997   |       1 |  2000 |  2000000
-    | Mon Feb 10 17:32:01.4 1997 |       1 |  1400 |  1400000
-    | Mon Feb 10 17:32:01.5 1997 |       1 |  1500 |  1500000
-    | Mon Feb 10 17:32:01.6 1997 |       1 |  1600 |  1600000
-    | Thu Jan 02 00:00:00 1997   |       1 |     0 |        0
-    | Thu Jan 02 03:04:05 1997   |       1 |  5000 |  5000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Tue Jun 10 17:32:01 1997   |       2 |  1000 |  1000000
-    | Sat Sep 22 18:19:20 2001   |       3 | 20000 | 20000000
-    | Wed Mar 15 08:14:01 2000   |       1 |  1000 |  1000000
-    | Wed Mar 15 13:14:02 2000   |       1 |  2000 |  2000000
-    | Wed Mar 15 12:14:03 2000   |       1 |  3000 |  3000000
-    | Wed Mar 15 03:14:04 2000   |       1 |  4000 |  4000000
-    | Wed Mar 15 02:14:05 2000   |       1 |  5000 |  5000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:00 1997   |       1 |     0 |        0
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Tue Jun 10 18:32:01 1997   |       2 |  1000 |  1000000
-    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000
-    | Tue Feb 11 17:32:01 1997   |       1 |  1000 |  1000000
-    | Wed Feb 12 17:32:01 1997   |       1 |  1000 |  1000000
-    | Thu Feb 13 17:32:01 1997   |       1 |  1000 |  1000000
-    | Fri Feb 14 17:32:01 1997   |       1 |  1000 |  1000000
-    | Sat Feb 15 17:32:01 1997   |       1 |  1000 |  1000000
-    | Sun Feb 16 17:32:01 1997   |       1 |  1000 |  1000000
-    | Sun Feb 16 17:32:01 1997   |       1 |  1000 |  1000000
-    | Wed Feb 28 17:32:01 1996   |       1 |  1000 |  1000000
-    | Thu Feb 29 17:32:01 1996   |       1 |  1000 |  1000000
-    | Fri Mar 01 17:32:01 1996   |       1 |  1000 |  1000000
-    | Mon Dec 30 17:32:01 1996   |       4 |  1000 |  1000000
-    | Tue Dec 31 17:32:01 1996   |       4 |  1000 |  1000000
-    | Wed Jan 01 17:32:01 1997   |       1 |  1000 |  1000000
-    | Fri Feb 28 17:32:01 1997   |       1 |  1000 |  1000000
-    | Sat Mar 01 17:32:01 1997   |       1 |  1000 |  1000000
-    | Tue Dec 30 17:32:01 1997   |       4 |  1000 |  1000000
-    | Wed Dec 31 17:32:01 1997   |       4 |  1000 |  1000000
-    | Fri Dec 31 17:32:01 1999   |       4 |  1000 |  1000000
-    | Sat Jan 01 17:32:01 2000   |       1 |  1000 |  1000000
-    | Sun Dec 31 17:32:01 2000   |       4 |  1000 |  1000000
-    | Mon Jan 01 17:32:01 2001   |       1 |  1000 |  1000000
+ 54 |         timestamp          | quarter | msec  |   usec   | semester
+----+----------------------------+---------+-------+----------+----------
+    | Thu Jan 01 00:00:00 1970   |       1 |     0 |        0 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:02 1997   |       1 |  2000 |  2000000 |        1
+    | Mon Feb 10 17:32:01.4 1997 |       1 |  1400 |  1400000 |        1
+    | Mon Feb 10 17:32:01.5 1997 |       1 |  1500 |  1500000 |        1
+    | Mon Feb 10 17:32:01.6 1997 |       1 |  1600 |  1600000 |        1
+    | Thu Jan 02 00:00:00 1997   |       1 |     0 |        0 |        1
+    | Thu Jan 02 03:04:05 1997   |       1 |  5000 |  5000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Tue Jun 10 17:32:01 1997   |       2 |  1000 |  1000000 |        1
+    | Sat Sep 22 18:19:20 2001   |       3 | 20000 | 20000000 |        2
+    | Wed Mar 15 08:14:01 2000   |       1 |  1000 |  1000000 |        1
+    | Wed Mar 15 13:14:02 2000   |       1 |  2000 |  2000000 |        1
+    | Wed Mar 15 12:14:03 2000   |       1 |  3000 |  3000000 |        1
+    | Wed Mar 15 03:14:04 2000   |       1 |  4000 |  4000000 |        1
+    | Wed Mar 15 02:14:05 2000   |       1 |  5000 |  5000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:00 1997   |       1 |     0 |        0 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Tue Jun 10 18:32:01 1997   |       2 |  1000 |  1000000 |        1
+    | Mon Feb 10 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Tue Feb 11 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Wed Feb 12 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Thu Feb 13 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Fri Feb 14 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Sat Feb 15 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Sun Feb 16 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Sun Feb 16 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Wed Feb 28 17:32:01 1996   |       1 |  1000 |  1000000 |        1
+    | Thu Feb 29 17:32:01 1996   |       1 |  1000 |  1000000 |        1
+    | Fri Mar 01 17:32:01 1996   |       1 |  1000 |  1000000 |        1
+    | Mon Dec 30 17:32:01 1996   |       4 |  1000 |  1000000 |        2
+    | Tue Dec 31 17:32:01 1996   |       4 |  1000 |  1000000 |        2
+    | Wed Jan 01 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Fri Feb 28 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Sat Mar 01 17:32:01 1997   |       1 |  1000 |  1000000 |        1
+    | Tue Dec 30 17:32:01 1997   |       4 |  1000 |  1000000 |        2
+    | Wed Dec 31 17:32:01 1997   |       4 |  1000 |  1000000 |        2
+    | Fri Dec 31 17:32:01 1999   |       4 |  1000 |  1000000 |        2
+    | Sat Jan 01 17:32:01 2000   |       1 |  1000 |  1000000 |        1
+    | Sun Dec 31 17:32:01 2000   |       4 |  1000 |  1000000 |        2
+    | Mon Jan 01 17:32:01 2001   |       1 |  1000 |  1000000 |        1
 (55 rows)
 
 SELECT '' AS "54", d1 as "timestamp",
    date_part( 'isoyear', d1) AS isoyear, date_part( 'week', d1) AS week,
    date_part( 'dow', d1) AS dow
    FROM TIMESTAMP_TBL WHERE d1 BETWEEN '1902-01-01' AND '2038-01-01';
- 54 |         timestamp          | isoyear | week | dow 
+ 54 |         timestamp          | isoyear | week | dow
 ----+----------------------------+---------+------+-----
     | Thu Jan 01 00:00:00 1970   |    1970 |    1 |   4
     | Mon Feb 10 17:32:01 1997   |    1997 |    7 |   1
@@ -806,10 +806,10 @@ SELECT '' AS "54", d1 as "timestamp",
 -- TO_CHAR()
 SELECT '' AS to_char_1, to_char(d1, 'DAY Day day DY Dy dy MONTH Month month RM MON Mon mon')
    FROM TIMESTAMP_TBL;
- to_char_1 |                                         to_char                                          
+ to_char_1 |                                         to_char
 -----------+------------------------------------------------------------------------------------------
-           | 
-           | 
+           |
+           |
            | THURSDAY  Thursday  thursday  THU Thu thu JANUARY   January   january   I    JAN Jan jan
            | MONDAY    Monday    monday    MON Mon mon FEBRUARY  February  february  II   FEB Feb feb
            | MONDAY    Monday    monday    MON Mon mon FEBRUARY  February  february  II   FEB Feb feb
@@ -877,10 +877,10 @@ SELECT '' AS to_char_1, to_char(d1, 'DAY Day day DY Dy dy MONTH Month month RM M
 
 SELECT '' AS to_char_2, to_char(d1, 'FMDAY FMDay FMday FMMONTH FMMonth FMmonth FMRM')
    FROM TIMESTAMP_TBL;
- to_char_2 |                           to_char                            
+ to_char_2 |                           to_char
 -----------+--------------------------------------------------------------
-           | 
-           | 
+           |
+           |
            | THURSDAY Thursday thursday JANUARY January january I
            | MONDAY Monday monday FEBRUARY February february II
            | MONDAY Monday monday FEBRUARY February february II
@@ -948,10 +948,10 @@ SELECT '' AS to_char_2, to_char(d1, 'FMDAY FMDay FMday FMMONTH FMMonth FMmonth F
 
 SELECT '' AS to_char_3, to_char(d1, 'Y,YYY YYYY YYY YY Y CC Q MM WW DDD DD D J')
    FROM TIMESTAMP_TBL;
- to_char_3 |                     to_char                     
+ to_char_3 |                     to_char
 -----------+-------------------------------------------------
-           | 
-           | 
+           |
+           |
            | 1,970 1970 970 70 0 20 1 01 01 001 01 5 2440588
            | 1,997 1997 997 97 7 20 1 02 06 041 10 2 2450490
            | 1,997 1997 997 97 7 20 1 02 06 041 10 2 2450490
@@ -1019,10 +1019,10 @@ SELECT '' AS to_char_3, to_char(d1, 'Y,YYY YYYY YYY YY Y CC Q MM WW DDD DD D J')
 
 SELECT '' AS to_char_4, to_char(d1, 'FMY,YYY FMYYYY FMYYY FMYY FMY FMCC FMQ FMMM FMWW FMDDD FMDD FMD FMJ')
    FROM TIMESTAMP_TBL;
- to_char_4 |                     to_char                     
+ to_char_4 |                     to_char
 -----------+-------------------------------------------------
-           | 
-           | 
+           |
+           |
            | 1,970 1970 970 70 0 20 1 1 1 1 1 5 2440588
            | 1,997 1997 997 97 7 20 1 2 6 41 10 2 2450490
            | 1,997 1997 997 97 7 20 1 2 6 41 10 2 2450490
@@ -1090,10 +1090,10 @@ SELECT '' AS to_char_4, to_char(d1, 'FMY,YYY FMYYYY FMYYY FMYY FMY FMCC FMQ FMMM
 
 SELECT '' AS to_char_5, to_char(d1, 'HH HH12 HH24 MI SS SSSS')
    FROM TIMESTAMP_TBL;
- to_char_5 |       to_char        
+ to_char_5 |       to_char
 -----------+----------------------
-           | 
-           | 
+           |
+           |
            | 12 12 00 00 00 0
            | 05 05 17 32 01 63121
            | 05 05 17 32 01 63121
@@ -1161,10 +1161,10 @@ SELECT '' AS to_char_5, to_char(d1, 'HH HH12 HH24 MI SS SSSS')
 
 SELECT '' AS to_char_6, to_char(d1, E'"HH:MI:SS is" HH:MI:SS "\\"text between quote marks\\""')
    FROM TIMESTAMP_TBL;
- to_char_6 |                     to_char                     
+ to_char_6 |                     to_char
 -----------+-------------------------------------------------
-           | 
-           | 
+           |
+           |
            | HH:MI:SS is 12:00:00 "text between quote marks"
            | HH:MI:SS is 05:32:01 "text between quote marks"
            | HH:MI:SS is 05:32:01 "text between quote marks"
@@ -1232,10 +1232,10 @@ SELECT '' AS to_char_6, to_char(d1, E'"HH:MI:SS is" HH:MI:SS "\\"text between qu
 
 SELECT '' AS to_char_7, to_char(d1, 'HH24--text--MI--text--SS')
    FROM TIMESTAMP_TBL;
- to_char_7 |        to_char         
+ to_char_7 |        to_char
 -----------+------------------------
-           | 
-           | 
+           |
+           |
            | 00--text--00--text--00
            | 17--text--32--text--01
            | 17--text--32--text--01
@@ -1303,10 +1303,10 @@ SELECT '' AS to_char_7, to_char(d1, 'HH24--text--MI--text--SS')
 
 SELECT '' AS to_char_8, to_char(d1, 'YYYYTH YYYYth Jth')
    FROM TIMESTAMP_TBL;
- to_char_8 |         to_char         
+ to_char_8 |         to_char
 -----------+-------------------------
-           | 
-           | 
+           |
+           |
            | 1970TH 1970th 2440588th
            | 1997TH 1997th 2450490th
            | 1997TH 1997th 2450490th
@@ -1374,10 +1374,10 @@ SELECT '' AS to_char_8, to_char(d1, 'YYYYTH YYYYth Jth')
 
 SELECT '' AS to_char_9, to_char(d1, 'YYYY A.D. YYYY a.d. YYYY bc HH:MI:SS P.M. HH:MI:SS p.m. HH:MI:SS pm')
    FROM TIMESTAMP_TBL;
- to_char_9 |                               to_char                               
+ to_char_9 |                               to_char
 -----------+---------------------------------------------------------------------
-           | 
-           | 
+           |
+           |
            | 1970 A.D. 1970 a.d. 1970 ad 12:00:00 A.M. 12:00:00 a.m. 12:00:00 am
            | 1997 A.D. 1997 a.d. 1997 ad 05:32:01 P.M. 05:32:01 p.m. 05:32:01 pm
            | 1997 A.D. 1997 a.d. 1997 ad 05:32:01 P.M. 05:32:01 p.m. 05:32:01 pm
@@ -1445,10 +1445,10 @@ SELECT '' AS to_char_9, to_char(d1, 'YYYY A.D. YYYY a.d. YYYY bc HH:MI:SS P.M. H
 
 SELECT '' AS to_char_10, to_char(d1, 'IYYY IYY IY I IW IDDD ID')
    FROM TIMESTAMP_TBL;
- to_char_10 |        to_char         
+ to_char_10 |        to_char
 ------------+------------------------
-            | 
-            | 
+            |
+            |
             | 1970 970 70 0 01 004 4
             | 1997 997 97 7 07 043 1
             | 1997 997 97 7 07 043 1
@@ -1516,10 +1516,10 @@ SELECT '' AS to_char_10, to_char(d1, 'IYYY IYY IY I IW IDDD ID')
 
 SELECT '' AS to_char_11, to_char(d1, 'FMIYYY FMIYY FMIY FMI FMIW FMIDDD FMID')
    FROM TIMESTAMP_TBL;
- to_char_11 |        to_char         
+ to_char_11 |        to_char
 ------------+------------------------
-            | 
-            | 
+            |
+            |
             | 1970 970 70 0 1 4 4
             | 1997 997 97 7 7 43 1
             | 1997 997 97 7 7 43 1

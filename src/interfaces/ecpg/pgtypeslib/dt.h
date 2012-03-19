@@ -61,6 +61,7 @@ typedef double fsec_t;
 #define DWEEK			"week"
 #define DMONTH			"month"
 #define DQUARTER		"quarter"
+#define DSEMESTER		"semester"
 #define DYEAR			"year"
 #define DDECADE			"decade"
 #define DCENTURY		"century"
@@ -181,6 +182,7 @@ typedef double fsec_t;
 #define DTK_TZ_MINUTE	35
 #define DTK_ISOYEAR		36
 #define DTK_ISODOW		37
+#define DTK_SEMESTER	38
 
 
 /*

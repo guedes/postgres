@@ -3438,6 +3438,8 @@ timestamp_trunc(PG_FUNCTION_ARGS)
 				}
 			case DTK_YEAR:
 				tm->tm_mon = 1;
+			case DTK_SEMESTER:
+				tm->tm_mon = (6 * ((tm->tm_mon - 1) / 6)) + 1;
 			case DTK_QUARTER:
 				tm->tm_mon = (3 * ((tm->tm_mon - 1) / 3)) + 1;
 			case DTK_MONTH:
@@ -3587,6 +3589,8 @@ timestamptz_trunc(PG_FUNCTION_ARGS)
 			case DTK_YEAR:
 				tm->tm_mon = 1;
 				/* FALL THRU */
+			case DTK_SEMESTER:
+				tm->tm_mon = (6 * ((tm->tm_mon - 1) / 6)) + 1;
 			case DTK_QUARTER:
 				tm->tm_mon = (3 * ((tm->tm_mon - 1) / 3)) + 1;
 				/* FALL THRU */
@@ -3690,6 +3694,8 @@ interval_trunc(PG_FUNCTION_ARGS)
 					tm->tm_year = (tm->tm_year / 10) * 10;
 				case DTK_YEAR:
 					tm->tm_mon = 0;
+				case DTK_SEMESTER:
+					tm->tm_mon = 6 * (tm->tm_mon / 6);
 				case DTK_QUARTER:
 					tm->tm_mon = 3 * (tm->tm_mon / 3);
 				case DTK_MONTH:
@@ -3991,6 +3997,10 @@ timestamp_part(PG_FUNCTION_ARGS)
 				result = tm->tm_mon;
 				break;
 
+			case DTK_SEMESTER:
+				result = (tm->tm_mon - 1) / 6 + 1;
+				break;
+
 			case DTK_QUARTER:
 				result = (tm->tm_mon - 1) / 3 + 1;
 				break;
@@ -4236,6 +4246,10 @@ timestamptz_part(PG_FUNCTION_ARGS)
 				result = tm->tm_mon;
 				break;
 
+			case DTK_SEMESTER:
+				result = (tm->tm_mon - 1) / 6 + 1;
+				break;
+
 			case DTK_QUARTER:
 				result = (tm->tm_mon - 1) / 3 + 1;
 				break;
@@ -4422,6 +4436,10 @@ interval_part(PG_FUNCTION_ARGS)
 
 				case DTK_MONTH:
 					result = tm->tm_mon;
+					break;
+
+				case DTK_SEMESTER:
+					result = (tm->tm_mon / 6) + 1;
 					break;
 
 				case DTK_QUARTER:

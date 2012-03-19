@@ -236,6 +236,8 @@ static datetkn deltatktbl[] = {
 	{DSECOND, UNITS, DTK_SECOND},
 	{"seconds", UNITS, DTK_SECOND},
 	{"secs", UNITS, DTK_SECOND},
+	{"sem", UNITS, DTK_SEMESTER},
+	{DSEMESTER, UNITS, DTK_SEMESTER},		/* "semester" relative */
 	{DTIMEZONE, UNITS, DTK_TZ}, /* "timezone" time offset */
 	{"timezone_h", UNITS, DTK_TZ_HOUR}, /* timezone hour units */
 	{"timezone_m", UNITS, DTK_TZ_MINUTE},		/* timezone minutes units */
