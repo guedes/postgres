@@ -145,7 +145,7 @@ static int	pg_krb5_recvauth(Port *port);
 #include <com_err.h>
 #endif
 /*
- * Various krb5 state which is not connection specfic, and a flag to
+ * Various krb5 state which is not connection specific, and a flag to
  * indicate whether we have initialised it yet.
  */
 static int	pg_krb5_initialised;
@@ -1600,9 +1600,9 @@ ident_inet(hbaPort *port)
 	const SockAddr remote_addr = port->raddr;
 	const SockAddr local_addr = port->laddr;
 	char		ident_user[IDENT_USERNAME_MAX + 1];
-	pgsocket	sock_fd,		/* File descriptor for socket on which we talk
+	pgsocket	sock_fd;		/* File descriptor for socket on which we talk
 								 * to Ident */
-				rc;				/* Return code from a locally called function */
+	int			rc;				/* Return code from a locally called function */
 	bool		ident_return;
 	char		remote_addr_s[NI_MAXHOST];
 	char		remote_port[NI_MAXSERV];

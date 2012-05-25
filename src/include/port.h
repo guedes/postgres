@@ -250,26 +250,7 @@ extern char *pgwin32_setlocale(int category, const char *locale);
 /* Portable prompt handling */
 extern char *simple_prompt(const char *prompt, int maxlen, bool echo);
 
-/*
- *	WIN32 doesn't allow descriptors returned by pipe() to be used in select(),
- *	so for that platform we use socket() instead of pipe().
- *	There is some inconsistency here because sometimes we require pg*, like
- *	pgpipe, but in other cases we define rename to pgrename just on Win32.
- */
-#ifndef WIN32
-/*
- *	The function prototypes are not supplied because every C file
- *	includes this file.
- */
-#define pgpipe(a)			pipe(a)
-#define piperead(a,b,c)		read(a,b,c)
-#define pipewrite(a,b,c)	write(a,b,c)
-#else
-extern int	pgpipe(int handles[2]);
-extern int	piperead(int s, char *buf, int len);
-
-#define pipewrite(a,b,c)	send(a,b,c,0)
-
+#ifdef WIN32
 #define PG_SIGNAL_COUNT 32
 #define kill(pid,sig)	pgkill(pid,sig)
 extern int	pgkill(int pid, int sig);
@@ -386,7 +367,7 @@ extern char *crypt(const char *key, const char *setting);
 /* WIN32 handled in port/win32.h */
 #ifndef WIN32
 #define pgoff_t off_t
-#if defined(__bsdi__) || defined(__NetBSD__)
+#ifdef __NetBSD__
 extern int	fseeko(FILE *stream, off_t offset, int whence);
 extern off_t ftello(FILE *stream);
 #endif
@@ -425,10 +406,6 @@ extern double rint(double x);
 #include <netinet/in.h>
 #include <arpa/inet.h>
 extern int	inet_aton(const char *cp, struct in_addr * addr);
-#endif
-
-#ifndef HAVE_STRDUP
-extern char *strdup(const char *str);
 #endif
 
 #if !HAVE_DECL_STRLCAT

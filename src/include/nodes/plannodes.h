@@ -37,6 +37,8 @@ typedef struct PlannedStmt
 
 	CmdType		commandType;	/* select|insert|update|delete */
 
+	uint32		queryId;		/* query identifier (copied from Query) */
+
 	bool		hasReturning;	/* is it insert|update|delete RETURNING? */
 
 	bool		hasModifyingCTE;	/* has insert|update|delete in WITH? */
@@ -53,8 +55,6 @@ typedef struct PlannedStmt
 	List	   *resultRelations;	/* integer list of RT indexes, or NIL */
 
 	Node	   *utilityStmt;	/* non-null if this is DECLARE CURSOR */
-
-	IntoClause *intoClause;		/* target for SELECT INTO / CREATE TABLE AS */
 
 	List	   *subplans;		/* Plan trees for SubPlan expressions */
 

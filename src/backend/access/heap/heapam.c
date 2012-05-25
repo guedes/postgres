@@ -222,6 +222,13 @@ heapgetpage(HeapScanDesc scan, BlockNumber page)
 		scan->rs_cbuf = InvalidBuffer;
 	}
 
+	/*
+	 * Be sure to check for interrupts at least once per page.  Checks at
+	 * higher code levels won't be able to stop a seqscan that encounters
+	 * many pages' worth of consecutive dead tuples.
+	 */
+	CHECK_FOR_INTERRUPTS();
+
 	/* read page using selected strategy */
 	scan->rs_cbuf = ReadBufferExtended(scan->rs_rd, MAIN_FORKNUM, page,
 									   RBM_NORMAL, scan->rs_strategy);
@@ -1580,7 +1587,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 			break;
 
 		/*
-		 * When first_call is true (and thus, skip is initally false) we'll
+		 * When first_call is true (and thus, skip is initially false) we'll
 		 * return the first tuple we find.  But on later passes, heapTuple
 		 * will initially be pointing to the tuple we returned last time.
 		 * Returning it again would be incorrect (and would loop forever),
@@ -1609,8 +1616,7 @@ heap_hot_search_buffer(ItemPointer tid, Relation relation, Buffer buffer,
 		 * transactions.
 		 */
 		if (all_dead && *all_dead &&
-			HeapTupleSatisfiesVacuum(heapTuple->t_data, RecentGlobalXmin,
-									 buffer) != HEAPTUPLE_DEAD)
+			!HeapTupleIsSurelyDead(heapTuple->t_data, RecentGlobalXmin))
 			*all_dead = false;
 
 		/*
@@ -2160,7 +2166,7 @@ heap_multi_insert(Relation relation, HeapTuple *tuples, int ntuples,
 		{
 			HeapTuple	heaptup = heaptuples[ndone + nthispage];
 
-			if (PageGetHeapFreeSpace(page) - saveFreeSpace < MAXALIGN(heaptup->t_len))
+			if (PageGetHeapFreeSpace(page) < MAXALIGN(heaptup->t_len) + saveFreeSpace)
 				break;
 
 			RelationPutHeapTuple(relation, buffer, heaptup);
@@ -3947,10 +3953,8 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
  * because this function is applied during WAL recovery, when we don't have
  * access to any such state, and can't depend on the hint bits to be set.)
  *
- * In lazy VACUUM, we call this while initially holding only a shared lock
- * on the tuple's buffer.  If any change is needed, we trade that in for an
- * exclusive lock before making the change.  Caller should pass the buffer ID
- * if shared lock is held, InvalidBuffer if exclusive lock is already held.
+ * If the tuple is in a shared buffer, caller must hold an exclusive lock on
+ * that buffer.
  *
  * Note: it might seem we could make the changes without exclusive lock, since
  * TransactionId read/write is assumed atomic anyway.  However there is a race
@@ -3962,8 +3966,7 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
  * infomask bits.
  */
 bool
-heap_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
-				  Buffer buf)
+heap_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid)
 {
 	bool		changed = false;
 	TransactionId xid;
@@ -3972,13 +3975,6 @@ heap_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 	if (TransactionIdIsNormal(xid) &&
 		TransactionIdPrecedes(xid, cutoff_xid))
 	{
-		if (buf != InvalidBuffer)
-		{
-			/* trade in share lock for exclusive lock */
-			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-			buf = InvalidBuffer;
-		}
 		HeapTupleHeaderSetXmin(tuple, FrozenTransactionId);
 
 		/*
@@ -3990,28 +3986,12 @@ heap_freeze_tuple(HeapTupleHeader tuple, TransactionId cutoff_xid,
 		changed = true;
 	}
 
-	/*
-	 * When we release shared lock, it's possible for someone else to change
-	 * xmax before we get the lock back, so repeat the check after acquiring
-	 * exclusive lock.	(We don't need this pushup for xmin, because only
-	 * VACUUM could be interested in changing an existing tuple's xmin, and
-	 * there's only one VACUUM allowed on a table at a time.)
-	 */
-recheck_xmax:
 	if (!(tuple->t_infomask & HEAP_XMAX_IS_MULTI))
 	{
 		xid = HeapTupleHeaderGetXmax(tuple);
 		if (TransactionIdIsNormal(xid) &&
 			TransactionIdPrecedes(xid, cutoff_xid))
 		{
-			if (buf != InvalidBuffer)
-			{
-				/* trade in share lock for exclusive lock */
-				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-				LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-				buf = InvalidBuffer;
-				goto recheck_xmax;		/* see comment above */
-			}
 			HeapTupleHeaderSetXmax(tuple, InvalidTransactionId);
 
 			/*
@@ -4046,30 +4026,15 @@ recheck_xmax:
 	}
 
 	/*
-	 * Although xvac per se could only be set by old-style VACUUM FULL, it
-	 * shares physical storage space with cmax, and so could be wiped out by
-	 * someone setting xmax.  Hence recheck after changing lock, same as for
-	 * xmax itself.
-	 *
 	 * Old-style VACUUM FULL is gone, but we have to keep this code as long as
 	 * we support having MOVED_OFF/MOVED_IN tuples in the database.
 	 */
-recheck_xvac:
 	if (tuple->t_infomask & HEAP_MOVED)
 	{
 		xid = HeapTupleHeaderGetXvac(tuple);
 		if (TransactionIdIsNormal(xid) &&
 			TransactionIdPrecedes(xid, cutoff_xid))
 		{
-			if (buf != InvalidBuffer)
-			{
-				/* trade in share lock for exclusive lock */
-				LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-				LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-				buf = InvalidBuffer;
-				goto recheck_xvac;		/* see comment above */
-			}
-
 			/*
 			 * If a MOVED_OFF tuple is not dead, the xvac transaction must
 			 * have failed; whereas a non-dead MOVED_IN tuple must mean the
@@ -4409,7 +4374,8 @@ log_heap_freeze(Relation reln, Buffer buffer,
  * and dirtied.
  */
 XLogRecPtr
-log_heap_visible(RelFileNode rnode, BlockNumber block, Buffer vm_buffer)
+log_heap_visible(RelFileNode rnode, BlockNumber block, Buffer vm_buffer,
+				 TransactionId cutoff_xid)
 {
 	xl_heap_visible xlrec;
 	XLogRecPtr	recptr;
@@ -4417,6 +4383,7 @@ log_heap_visible(RelFileNode rnode, BlockNumber block, Buffer vm_buffer)
 
 	xlrec.node = rnode;
 	xlrec.block = block;
+	xlrec.cutoff_xid = cutoff_xid;
 
 	rdata[0].data = (char *) &xlrec;
 	rdata[0].len = SizeOfHeapVisible;
@@ -4711,7 +4678,7 @@ heap_xlog_freeze(XLogRecPtr lsn, XLogRecord *record)
 			ItemId		lp = PageGetItemId(page, *offsets);
 			HeapTupleHeader tuple = (HeapTupleHeader) PageGetItem(page, lp);
 
-			(void) heap_freeze_tuple(tuple, cutoff_xid, InvalidBuffer);
+			(void) heap_freeze_tuple(tuple, cutoff_xid);
 			offsets++;
 		}
 	}
@@ -4748,6 +4715,17 @@ heap_xlog_visible(XLogRecPtr lsn, XLogRecord *record)
 	if (!BufferIsValid(buffer))
 		return;
 	page = (Page) BufferGetPage(buffer);
+
+	/*
+	 * If there are any Hot Standby transactions running that have an xmin
+	 * horizon old enough that this page isn't all-visible for them, they
+	 * might incorrectly decide that an index-only scan can skip a heap fetch.
+	 *
+	 * NB: It might be better to throw some kind of "soft" conflict here that
+	 * forces any index-only scan that is in flight to perform heap fetches,
+	 * rather than killing the transaction outright.
+	 */
+	ResolveRecoveryConflictWithSnapshot(xlrec->cutoff_xid, xlrec->node);
 
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
@@ -4801,7 +4779,8 @@ heap_xlog_visible(XLogRecPtr lsn, XLogRecord *record)
 		 * harm is done; and the next VACUUM will fix it.
 		 */
 		if (!XLByteLE(lsn, PageGetLSN(BufferGetPage(vmbuffer))))
-			visibilitymap_set(reln, xlrec->block, lsn, vmbuffer);
+			visibilitymap_set(reln, xlrec->block, lsn, vmbuffer,
+							  xlrec->cutoff_xid);
 
 		ReleaseBuffer(vmbuffer);
 		FreeFakeRelcacheEntry(reln);

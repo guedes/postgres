@@ -192,7 +192,7 @@ PostgreSQL documentation
    </para>
 
    <para>
-    Other, less commonly used, parameters are also available:
+    Other, less commonly used, options are also available:
 
     <variablelist>
      <varlistentry>
@@ -253,10 +253,9 @@ PostgreSQL documentation
    To stream the transaction log from the server at
    <literal>mydbserver</literal> and store it in the local directory
    <filename>/usr/local/pgsql/archive</filename>:
-   <screen>
-    <prompt>$</prompt> <userinput>pg_receivexlog -h mydbserver -D /home/pgbackup/archive</userinput>
-   </screen>
-  </para>
+<screen>
+<prompt>$</prompt> <userinput>pg_receivexlog -h mydbserver -D /usr/local/pgsql/archive</userinput>
+</screen></para>
  </refsect1>
 
  <refsect1>

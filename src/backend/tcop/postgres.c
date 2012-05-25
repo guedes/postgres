@@ -115,8 +115,10 @@ int			PostAuthDelay = 0;
 static long max_stack_depth_bytes = 100 * 1024L;
 
 /*
- * Stack base pointer -- initialized by PostgresMain. This is not static
- * so that PL/Java can modify it.
+ * Stack base pointer -- initialized by PostmasterMain and inherited by
+ * subprocesses. This is not static because old versions of PL/Java modify
+ * it directly. Newer versions use set_stack_base(), but we want to stay
+ * binary-compatible for the time being.
  */
 char	   *stack_base_ptr = NULL;
 
@@ -341,9 +343,22 @@ SocketBackend(StringInfo inBuf)
 
 	if (qtype == EOF)			/* frontend disconnected */
 	{
-		ereport(COMMERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("unexpected EOF on client connection")));
+		if (IsTransactionState())
+			ereport(COMMERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("unexpected EOF on client connection with an open transaction")));
+		else
+		{
+			/*
+			 * Can't send DEBUG log messages to client at this point.
+			 * Since we're disconnecting right away, we don't need to
+			 * restore whereToSendOutput.
+			 */
+			whereToSendOutput = DestNone;
+			ereport(DEBUG1,
+					(errcode(ERRCODE_CONNECTION_DOES_NOT_EXIST),
+					 errmsg("unexpected EOF on client connection")));
+		}
 		return qtype;
 	}
 
@@ -364,9 +379,22 @@ SocketBackend(StringInfo inBuf)
 				/* old style without length word; convert */
 				if (pq_getstring(inBuf))
 				{
-					ereport(COMMERROR,
-							(errcode(ERRCODE_PROTOCOL_VIOLATION),
-							 errmsg("unexpected EOF on client connection")));
+					if (IsTransactionState())
+						ereport(COMMERROR,
+								(errcode(ERRCODE_CONNECTION_FAILURE),
+								 errmsg("unexpected EOF on client connection with an open transaction")));
+					else
+					{
+						/*
+						 * Can't send DEBUG log messages to client at this
+						 * point.Since we're disconnecting right away, we
+						 * don't need to restore whereToSendOutput.
+						 */
+						whereToSendOutput = DestNone;
+						ereport(DEBUG1,
+								(errcode(ERRCODE_CONNECTION_DOES_NOT_EXIST),
+								 errmsg("unexpected EOF on client connection")));
+					}
 					return EOF;
 				}
 			}
@@ -624,7 +652,10 @@ pg_analyze_and_rewrite_params(Node *parsetree,
 	pstate->p_sourcetext = query_string;
 	(*parserSetup) (pstate, parserSetupArg);
 
-	query = transformStmt(pstate, parsetree);
+	query = transformTopLevelStmt(pstate, parsetree);
+
+	if (post_parse_analyze_hook)
+		(*post_parse_analyze_hook) (pstate, query);
 
 	free_parsestate(pstate);
 
@@ -975,7 +1006,7 @@ exec_simple_query(const char *query_string)
 		 * end up being able to do this, keeping the parse/plan snapshot around
 		 * until after we start the portal doesn't cost much.
 		 */
-		PortalStart(portal, NULL, snapshot_set);
+		PortalStart(portal, NULL, 0, snapshot_set);
 
 		/* Done with the snapshot used for parsing/planning */
 		if (snapshot_set)
@@ -1709,7 +1740,7 @@ exec_bind_message(StringInfo input_message)
 	 * for query execution (currently, reuse will only occur if
 	 * PORTAL_ONE_SELECT mode is chosen).
 	 */
-	PortalStart(portal, params, snapshot_set);
+	PortalStart(portal, params, 0, snapshot_set);
 
 	/* Done with the snapshot used for parameter I/O and parsing/planning */
 	if (snapshot_set)
@@ -2570,7 +2601,7 @@ die(SIGNAL_ARGS)
 			/* bump holdoff count to make ProcessInterrupts() a no-op */
 			/* until we are done getting ready for it */
 			InterruptHoldoffCount++;
-			LockWaitCancel();	/* prevent CheckDeadLock from running */
+			LockErrorCleanup();	/* prevent CheckDeadLock from running */
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			InterruptHoldoffCount--;
@@ -2612,7 +2643,7 @@ StatementCancelHandler(SIGNAL_ARGS)
 			/* bump holdoff count to make ProcessInterrupts() a no-op */
 			/* until we are done getting ready for it */
 			InterruptHoldoffCount++;
-			LockWaitCancel();	/* prevent CheckDeadLock from running */
+			LockErrorCleanup();	/* prevent CheckDeadLock from running */
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			InterruptHoldoffCount--;
@@ -2771,7 +2802,7 @@ RecoveryConflictInterrupt(ProcSignalReason reason)
 			/* bump holdoff count to make ProcessInterrupts() a no-op */
 			/* until we are done getting ready for it */
 			InterruptHoldoffCount++;
-			LockWaitCancel();	/* prevent CheckDeadLock from running */
+			LockErrorCleanup();	/* prevent CheckDeadLock from running */
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			InterruptHoldoffCount--;
@@ -2955,6 +2986,53 @@ ia64_get_bsp(void)
 
 
 /*
+ * set_stack_base: set up reference point for stack depth checking
+ *
+ * Returns the old reference point, if any.
+ */
+pg_stack_base_t
+set_stack_base(void)
+{
+	char		stack_base;
+	pg_stack_base_t old;
+
+#if defined(__ia64__) || defined(__ia64)
+	old.stack_base_ptr = stack_base_ptr;
+	old.register_stack_base_ptr = register_stack_base_ptr;
+#else
+	old = stack_base_ptr;
+#endif
+
+	/* Set up reference point for stack depth checking */
+	stack_base_ptr = &stack_base;
+#if defined(__ia64__) || defined(__ia64)
+	register_stack_base_ptr = ia64_get_bsp();
+#endif
+
+	return old;
+}
+
+/*
+ * restore_stack_base: restore reference point for stack depth checking
+ *
+ * This can be used after set_stack_base() to restore the old value. This
+ * is currently only used in PL/Java. When PL/Java calls a backend function
+ * from different thread, the thread's stack is at a different location than
+ * the main thread's stack, so it sets the base pointer before the call, and
+ * restores it afterwards.
+ */
+void
+restore_stack_base(pg_stack_base_t base)
+{
+#if defined(__ia64__) || defined(__ia64)
+	stack_base_ptr = base.stack_base_ptr;
+	register_stack_base_ptr = base.register_stack_base_ptr;
+#else
+	stack_base_ptr = base;
+#endif
+}
+
+/*
  * check_stack_depth: check for excessively deep recursion
  *
  * This should be called someplace in any recursive routine that might possibly
@@ -2969,7 +3047,7 @@ check_stack_depth(void)
 	long		stack_depth;
 
 	/*
-	 * Compute distance from PostgresMain's local variables to my own
+	 * Compute distance from reference point to my local variables
 	 */
 	stack_depth = (long) (stack_base_ptr - &stack_top_loc);
 
@@ -3431,7 +3509,6 @@ PostgresMain(int argc, char *argv[], const char *username)
 {
 	const char *dbname;
 	int			firstchar;
-	char		stack_base;
 	StringInfoData input_message;
 	sigjmp_buf	local_sigjmp_buf;
 	volatile bool send_ready_for_query = true;
@@ -3456,12 +3533,6 @@ PostgresMain(int argc, char *argv[], const char *username)
 		MemoryContextInit();
 
 	SetProcessingMode(InitProcessing);
-
-	/* Set up reference point for stack depth checking */
-	stack_base_ptr = &stack_base;
-#if defined(__ia64__) || defined(__ia64)
-	register_stack_base_ptr = ia64_get_bsp();
-#endif
 
 	/* Compute paths, if we didn't inherit them from postmaster */
 	if (my_exec_path[0] == '\0')

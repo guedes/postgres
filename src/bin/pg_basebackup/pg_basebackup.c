@@ -78,7 +78,7 @@ static void ReceiveTarFile(PGconn *conn, PGresult *res, int rownum);
 static void ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum);
 static void BaseBackup(void);
 
-static bool segment_callback(XLogRecPtr segendpos, uint32 timeline);
+static bool reached_end_position(XLogRecPtr segendpos, uint32 timeline, bool segment_finished);
 
 #ifdef HAVE_LIBZ
 static const char *
@@ -129,8 +129,7 @@ usage(void)
 
 
 /*
- * Called in the background process whenever a complete segment of WAL
- * has been received.
+ * Called in the background process every time data is received.
  * On Unix, we check to see if there is any data on our pipe
  * (which would mean we have a stop position), and if it is, check if
  * it is time to stop.
@@ -138,7 +137,7 @@ usage(void)
  * time to stop.
  */
 static bool
-segment_callback(XLogRecPtr segendpos, uint32 timeline)
+reached_end_position(XLogRecPtr segendpos, uint32 timeline, bool segment_finished)
 {
 	if (!has_xlogendptr)
 	{
@@ -162,7 +161,7 @@ segment_callback(XLogRecPtr segendpos, uint32 timeline)
 			char		xlogend[64];
 
 			MemSet(xlogend, 0, sizeof(xlogend));
-			r = piperead(bgpipe[0], xlogend, sizeof(xlogend));
+			r = read(bgpipe[0], xlogend, sizeof(xlogend));
 			if (r < 0)
 			{
 				fprintf(stderr, _("%s: could not read from ready pipe: %s\n"),
@@ -231,7 +230,7 @@ LogStreamerMain(logstreamer_param * param)
 {
 	if (!ReceiveXlogStream(param->bgconn, param->startptr, param->timeline,
 						   param->sysidentifier, param->xlogdir,
-						   segment_callback, NULL, standby_message_timeout))
+						   reached_end_position, standby_message_timeout, true))
 
 		/*
 		 * Any errors will already have been reported in the function process,
@@ -270,7 +269,7 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier)
 
 #ifndef WIN32
 	/* Create our background pipe */
-	if (pgpipe(bgpipe) < 0)
+	if (pipe(bgpipe) < 0)
 	{
 		fprintf(stderr, _("%s: could not create pipe for background process: %s\n"),
 				progname, strerror(errno));
@@ -584,6 +583,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 				{
 					fprintf(stderr, _("%s: could not write to compressed file \"%s\": %s\n"),
 							progname, filename, get_gz_error(ztarfile));
+					disconnect_and_exit(1);
 				}
 			}
 			else
@@ -597,21 +597,28 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 				}
 			}
 
-			if (strcmp(basedir, "-") == 0)
-			{
 #ifdef HAVE_LIBZ
-				if (ztarfile)
-					gzclose(ztarfile);
-#endif
+			if (ztarfile != NULL)
+			{
+				if (gzclose(ztarfile) != 0)
+				{
+					fprintf(stderr, _("%s: could not close compressed file \"%s\": %s\n"),
+							progname, filename, get_gz_error(ztarfile));
+					disconnect_and_exit(1);
+				}
 			}
 			else
-			{
-#ifdef HAVE_LIBZ
-				if (ztarfile != NULL)
-					gzclose(ztarfile);
 #endif
-				if (tarfile != NULL)
-					fclose(tarfile);
+			{
+				if (strcmp(basedir, "-") != 0)
+				{
+					if (fclose(tarfile) != 0)
+					{
+						fprintf(stderr, _("%s: could not close file \"%s\": %s\n"),
+								progname, filename, strerror(errno));
+						disconnect_and_exit(1);
+					}
+				}
 			}
 
 			break;
@@ -630,6 +637,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 			{
 				fprintf(stderr, _("%s: could not write to compressed file \"%s\": %s\n"),
 						progname, filename, get_gz_error(ztarfile));
+				disconnect_and_exit(1);
 			}
 		}
 		else
@@ -914,13 +922,13 @@ BaseBackup(void)
 	res = PQexec(conn, "IDENTIFY_SYSTEM");
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not identify system: %s\n"),
+		fprintf(stderr, _("%s: could not identify system: %s"),
 				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
 	if (PQntuples(res) != 1 || PQnfields(res) != 3)
 	{
-		fprintf(stderr, _("%s: could not identify system, got %i rows and %i fields\n"),
+		fprintf(stderr, _("%s: could not identify system, got %d rows and %d fields\n"),
 				progname, PQntuples(res), PQnfields(res));
 		disconnect_and_exit(1);
 	}
@@ -1049,8 +1057,8 @@ BaseBackup(void)
 	res = PQgetResult(conn);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not get WAL end position from server\n"),
-				progname);
+		fprintf(stderr, _("%s: could not get WAL end position from server: %s"),
+				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
 	if (PQntuples(res) != 1)
@@ -1085,7 +1093,7 @@ BaseBackup(void)
 			fprintf(stderr, _("%s: waiting for background process to finish streaming...\n"), progname);
 
 #ifndef WIN32
-		if (pipewrite(bgpipe[1], xlogend, strlen(xlogend)) != strlen(xlogend))
+		if (write(bgpipe[1], xlogend, strlen(xlogend)) != strlen(xlogend))
 		{
 			fprintf(stderr, _("%s: could not send command to background pipe: %s\n"),
 					progname, strerror(errno));
@@ -1102,8 +1110,8 @@ BaseBackup(void)
 		}
 		if (r != bgchild)
 		{
-			fprintf(stderr, _("%s: child %i died, expected %i\n"),
-					progname, r, bgchild);
+			fprintf(stderr, _("%s: child %d died, expected %d\n"),
+					progname, r, (int) bgchild);
 			disconnect_and_exit(1);
 		}
 		if (!WIFEXITED(status))
@@ -1114,7 +1122,7 @@ BaseBackup(void)
 		}
 		if (WEXITSTATUS(status) != 0)
 		{
-			fprintf(stderr, _("%s: child process exited with error %i\n"),
+			fprintf(stderr, _("%s: child process exited with error %d\n"),
 					progname, WEXITSTATUS(status));
 			disconnect_and_exit(1);
 		}

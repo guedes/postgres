@@ -15,6 +15,7 @@
 
 #include "access/xact.h"
 #include "catalog/pg_type.h"
+#include "commands/createas.h"
 #include "commands/defrem.h"
 #include "commands/prepare.h"
 #include "executor/hashjoin.h"
@@ -45,7 +46,7 @@ explain_get_index_name_hook_type explain_get_index_name_hook = NULL;
 #define X_CLOSE_IMMEDIATE 2
 #define X_NOWHITESPACE 4
 
-static void ExplainOneQuery(Query *query, ExplainState *es,
+static void ExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 				const char *queryString, ParamListInfo params);
 static void report_triggers(ResultRelInfo *rInfo, bool show_relname,
 				ExplainState *es);
@@ -212,7 +213,8 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 		/* Explain every plan */
 		foreach(l, rewritten)
 		{
-			ExplainOneQuery((Query *) lfirst(l), &es, queryString, params);
+			ExplainOneQuery((Query *) lfirst(l), NULL, &es,
+							queryString, params);
 
 			/* Separate plans with an appropriate separator */
 			if (lnext(l) != NULL)
@@ -288,21 +290,23 @@ ExplainResultDesc(ExplainStmt *stmt)
 /*
  * ExplainOneQuery -
  *	  print out the execution plan for one Query
+ *
+ * "into" is NULL unless we are explaining the contents of a CreateTableAsStmt.
  */
 static void
-ExplainOneQuery(Query *query, ExplainState *es,
+ExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 				const char *queryString, ParamListInfo params)
 {
 	/* planner will not cope with utility statements */
 	if (query->commandType == CMD_UTILITY)
 	{
-		ExplainOneUtility(query->utilityStmt, es, queryString, params);
+		ExplainOneUtility(query->utilityStmt, into, es, queryString, params);
 		return;
 	}
 
 	/* if an advisor plugin is present, let it manage things */
 	if (ExplainOneQuery_hook)
-		(*ExplainOneQuery_hook) (query, es, queryString, params);
+		(*ExplainOneQuery_hook) (query, into, es, queryString, params);
 	else
 	{
 		PlannedStmt *plan;
@@ -311,7 +315,7 @@ ExplainOneQuery(Query *query, ExplainState *es,
 		plan = pg_plan_query(query, 0, params);
 
 		/* run it (if needed) and produce output */
-		ExplainOnePlan(plan, es, queryString, params);
+		ExplainOnePlan(plan, into, es, queryString, params);
 	}
 }
 
@@ -321,18 +325,36 @@ ExplainOneQuery(Query *query, ExplainState *es,
  *	  (In general, utility statements don't have plans, but there are some
  *	  we treat as special cases)
  *
+ * "into" is NULL unless we are explaining the contents of a CreateTableAsStmt.
+ *
  * This is exported because it's called back from prepare.c in the
- * EXPLAIN EXECUTE case
+ * EXPLAIN EXECUTE case.
  */
 void
-ExplainOneUtility(Node *utilityStmt, ExplainState *es,
+ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 				  const char *queryString, ParamListInfo params)
 {
 	if (utilityStmt == NULL)
 		return;
 
-	if (IsA(utilityStmt, ExecuteStmt))
-		ExplainExecuteQuery((ExecuteStmt *) utilityStmt, es,
+	if (IsA(utilityStmt, CreateTableAsStmt))
+	{
+		/*
+		 * We have to rewrite the contained SELECT and then pass it back
+		 * to ExplainOneQuery.  It's probably not really necessary to copy
+		 * the contained parsetree another time, but let's be safe.
+		 */
+		CreateTableAsStmt *ctas = (CreateTableAsStmt *) utilityStmt;
+		List	   *rewritten;
+
+		Assert(IsA(ctas->query, Query));
+		rewritten = QueryRewrite((Query *) copyObject(ctas->query));
+		Assert(list_length(rewritten) == 1);
+		ExplainOneQuery((Query *) linitial(rewritten), ctas->into, es,
+						queryString, params);
+	}
+	else if (IsA(utilityStmt, ExecuteStmt))
+		ExplainExecuteQuery((ExecuteStmt *) utilityStmt, into, es,
 							queryString, params);
 	else if (IsA(utilityStmt, NotifyStmt))
 	{
@@ -356,6 +378,9 @@ ExplainOneUtility(Node *utilityStmt, ExplainState *es,
  *		given a planned query, execute it if needed, and then print
  *		EXPLAIN output
  *
+ * "into" is NULL unless we are explaining the contents of a CreateTableAsStmt,
+ * in which case executing the query should result in creating that table.
+ *
  * Since we ignore any DeclareCursorStmt that might be attached to the query,
  * if you say EXPLAIN ANALYZE DECLARE CURSOR then we'll actually run the
  * query.  This is different from pre-8.3 behavior but seems more useful than
@@ -366,9 +391,10 @@ ExplainOneUtility(Node *utilityStmt, ExplainState *es,
  * to call it.
  */
 void
-ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
+ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 			   const char *queryString, ParamListInfo params)
 {
+	DestReceiver *dest;
 	QueryDesc  *queryDesc;
 	instr_time	starttime;
 	double		totaltime = 0;
@@ -392,16 +418,27 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
 	PushCopiedSnapshot(GetActiveSnapshot());
 	UpdateActiveSnapshotCommandId();
 
-	/* Create a QueryDesc requesting no output */
+	/*
+	 * Normally we discard the query's output, but if explaining CREATE TABLE
+	 * AS, we'd better use the appropriate tuple receiver.
+	 */
+	if (into)
+		dest = CreateIntoRelDestReceiver(into);
+	else
+		dest = None_Receiver;
+
+	/* Create a QueryDesc for the query */
 	queryDesc = CreateQueryDesc(plannedstmt, queryString,
 								GetActiveSnapshot(), InvalidSnapshot,
-								None_Receiver, params, instrument_option);
+								dest, params, instrument_option);
 
 	/* Select execution options */
 	if (es->analyze)
 		eflags = 0;				/* default run-to-completion flags */
 	else
 		eflags = EXEC_FLAG_EXPLAIN_ONLY;
+	if (into)
+		eflags |= GetIntoRelEFlags(into);
 
 	/* call ExecutorStart to prepare the plan for execution */
 	ExecutorStart(queryDesc, eflags);
@@ -409,8 +446,16 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
 	/* Execute the plan for statistics if asked for */
 	if (es->analyze)
 	{
+		ScanDirection dir;
+
+		/* EXPLAIN ANALYZE CREATE TABLE AS WITH NO DATA is weird */
+		if (into && into->skipData)
+			dir = NoMovementScanDirection;
+		else
+			dir = ForwardScanDirection;
+
 		/* run the plan */
-		ExecutorRun(queryDesc, ForwardScanDirection, 0L);
+		ExecutorRun(queryDesc, dir, 0L);
 
 		/* run cleanup too */
 		ExecutorFinish(queryDesc);
@@ -1191,6 +1236,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 									 usage->local_blks_written > 0);
 			bool		has_temp = (usage->temp_blks_read > 0 ||
 									usage->temp_blks_written > 0);
+			bool		has_timing = (!INSTR_TIME_IS_ZERO(usage->blk_read_time) ||
+									  !INSTR_TIME_IS_ZERO(usage->blk_write_time));
 
 			/* Show only positive counter values. */
 			if (has_shared || has_local || has_temp)
@@ -1246,6 +1293,20 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				}
 				appendStringInfoChar(es->str, '\n');
 			}
+
+			/* As above, show only positive counter values. */
+			if (has_timing)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfoString(es->str, "I/O Timings:");
+				if (!INSTR_TIME_IS_ZERO(usage->blk_read_time))
+					appendStringInfo(es->str, " read=%0.3f",
+								INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
+				if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
+					appendStringInfo(es->str, " write=%0.3f",
+								INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
+				appendStringInfoChar(es->str, '\n');
+			}
 		}
 		else
 		{
@@ -1259,6 +1320,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			ExplainPropertyLong("Local Written Blocks", usage->local_blks_written, es);
 			ExplainPropertyLong("Temp Read Blocks", usage->temp_blks_read, es);
 			ExplainPropertyLong("Temp Written Blocks", usage->temp_blks_written, es);
+			ExplainPropertyFloat("I/O Read Time", INSTR_TIME_GET_MILLISEC(usage->blk_read_time), 3, es);
+			ExplainPropertyFloat("I/O Write Time", INSTR_TIME_GET_MILLISEC(usage->blk_write_time), 3, es);
 		}
 	}
 

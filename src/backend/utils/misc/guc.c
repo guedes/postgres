@@ -370,12 +370,12 @@ static const struct config_enum_entry constraint_exclusion_options[] = {
 };
 
 /*
- * Although only "on", "off", "write", and "local" are documented, we
+ * Although only "on", "off", "remote_write", and "local" are documented, we
  * accept all the likely variants of "on" and "off".
  */
 static const struct config_enum_entry synchronous_commit_options[] = {
 	{"local", SYNCHRONOUS_COMMIT_LOCAL_FLUSH, false},
-	{"write", SYNCHRONOUS_COMMIT_REMOTE_WRITE, false},
+	{"remote_write", SYNCHRONOUS_COMMIT_REMOTE_WRITE, false},
 	{"on", SYNCHRONOUS_COMMIT_ON, false},
 	{"off", SYNCHRONOUS_COMMIT_OFF, false},
 	{"true", SYNCHRONOUS_COMMIT_ON, true},
@@ -1016,6 +1016,15 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&pgstat_track_counts,
 		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"track_io_timing", PGC_SUSET, STATS_COLLECTOR,
+			gettext_noop("Collects timing statistics for database I/O activity."),
+			NULL
+		},
+		&track_io_timing,
+		false,
 		NULL, NULL, NULL
 	},
 

@@ -67,6 +67,7 @@
 bool		zero_damaged_pages = false;
 int			bgwriter_lru_maxpages = 100;
 double		bgwriter_lru_multiplier = 2.0;
+bool		track_io_timing = false;
 
 /*
  * How many buffers PrefetchBuffer callers should try to stay ahead of their
@@ -437,7 +438,21 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			MemSet((char *) bufBlock, 0, BLCKSZ);
 		else
 		{
+			instr_time	io_start,
+						io_time;
+
+			if (track_io_timing)
+				INSTR_TIME_SET_CURRENT(io_start);
+
 			smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
+
+			if (track_io_timing)
+			{
+				INSTR_TIME_SET_CURRENT(io_time);
+				INSTR_TIME_SUBTRACT(io_time, io_start);
+				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+			}
 
 			/* check for garbage data */
 			if (!PageHeaderIsValid((PageHeader) bufBlock))
@@ -953,7 +968,6 @@ void
 MarkBufferDirty(Buffer buffer)
 {
 	volatile BufferDesc *bufHdr;
-	bool	dirtied = false;
 
 	if (!BufferIsValid(buffer))
 		elog(ERROR, "bad buffer ID: %d", buffer);
@@ -974,26 +988,20 @@ MarkBufferDirty(Buffer buffer)
 
 	Assert(bufHdr->refcount > 0);
 
-	if (!(bufHdr->flags & BM_DIRTY))
-		dirtied = true;
-
-	bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
-
-	UnlockBufHdr(bufHdr);
-
 	/*
-	 * If the buffer was not dirty already, do vacuum accounting, and
-	 * nudge bgwriter.
+	 * If the buffer was not dirty already, do vacuum accounting.
 	 */
-	if (dirtied)
+	if (!(bufHdr->flags & BM_DIRTY))
 	{
 		VacuumPageDirty++;
 		pgBufferUsage.shared_blks_dirtied++;
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
-		if (ProcGlobal->bgwriterLatch)
-			SetLatch(ProcGlobal->bgwriterLatch);
 	}
+
+	bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
+
+	UnlockBufHdr(bufHdr);
 }
 
 /*
@@ -1316,9 +1324,11 @@ BufferSync(int flags)
  *
  * This is called periodically by the background writer process.
  *
- * Returns true if the clocksweep has been "lapped", so that there's nothing
- * to do. Also returns true if there's nothing to do because bgwriter was
- * effectively disabled by setting bgwriter_lru_maxpages to 0.
+ * Returns true if it's appropriate for the bgwriter process to go into
+ * low-power hibernation mode.  (This happens if the strategy clock sweep
+ * has been "lapped" and no buffer allocations have occurred recently,
+ * or if the bgwriter has been effectively disabled by setting
+ * bgwriter_lru_maxpages to 0.)
  */
 bool
 BgBufferSync(void)
@@ -1359,6 +1369,10 @@ BgBufferSync(void)
 	int			num_to_scan;
 	int			num_written;
 	int			reusable_buffers;
+
+	/* Variables for final smoothed_density update */
+	long		new_strategy_delta;
+	uint32		new_recent_alloc;
 
 	/*
 	 * Find out where the freelist clock sweep currently is, and how many
@@ -1583,21 +1597,23 @@ BgBufferSync(void)
 	 * which is helpful because a long memory isn't as desirable on the
 	 * density estimates.
 	 */
-	strategy_delta = bufs_to_lap - num_to_scan;
-	recent_alloc = reusable_buffers - reusable_buffers_est;
-	if (strategy_delta > 0 && recent_alloc > 0)
+	new_strategy_delta = bufs_to_lap - num_to_scan;
+	new_recent_alloc = reusable_buffers - reusable_buffers_est;
+	if (new_strategy_delta > 0 && new_recent_alloc > 0)
 	{
-		scans_per_alloc = (float) strategy_delta / (float) recent_alloc;
+		scans_per_alloc = (float) new_strategy_delta / (float) new_recent_alloc;
 		smoothed_density += (scans_per_alloc - smoothed_density) /
 			smoothing_samples;
 
 #ifdef BGW_DEBUG
 		elog(DEBUG2, "bgwriter: cleaner density alloc=%u scan=%ld density=%.2f new smoothed=%.2f",
-			 recent_alloc, strategy_delta, scans_per_alloc, smoothed_density);
+			 new_recent_alloc, new_strategy_delta,
+			 scans_per_alloc, smoothed_density);
 #endif
 	}
 
-	return (bufs_to_lap == 0);
+	/* Return true if OK to hibernate */
+	return (bufs_to_lap == 0 && recent_alloc == 0);
 }
 
 /*
@@ -1874,6 +1890,8 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 {
 	XLogRecPtr	recptr;
 	ErrorContextCallback errcontext;
+	instr_time	io_start,
+				io_time;
 
 	/*
 	 * Acquire the buffer's io_in_progress lock.  If StartBufferIO returns
@@ -1921,11 +1939,22 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 	buf->flags &= ~BM_JUST_DIRTIED;
 	UnlockBufHdr(buf);
 
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
+
 	smgrwrite(reln,
 			  buf->tag.forkNum,
 			  buf->tag.blockNum,
 			  (char *) BufHdrGetBlock(buf),
 			  false);
+
+	if (track_io_timing)
+	{
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+	}
 
 	pgBufferUsage.shared_blks_written++;
 
@@ -2348,31 +2377,26 @@ SetBufferCommitInfoNeedsSave(Buffer buffer)
 	 * making the first scan after commit of an xact that added/deleted many
 	 * tuples.	So, be as quick as we can if the buffer is already dirty.  We
 	 * do this by not acquiring spinlock if it looks like the status bits are
-	 * already OK.	(Note it is okay if someone else clears BM_JUST_DIRTIED
-	 * immediately after we look, because the buffer content update is already
-	 * done and will be reflected in the I/O.)
+	 * already.  Since we make this test unlocked, there's a chance we might
+	 * fail to notice that the flags have just been cleared, and failed to reset
+	 * them, due to memory-ordering issues.  But since this function is only
+	 * intended to be used in cases where failing to write out the data would
+	 * be harmless anyway, it doesn't really matter.
 	 */
 	if ((bufHdr->flags & (BM_DIRTY | BM_JUST_DIRTIED)) !=
 		(BM_DIRTY | BM_JUST_DIRTIED))
 	{
-		bool		dirtied = false;
-
 		LockBufHdr(bufHdr);
 		Assert(bufHdr->refcount > 0);
 		if (!(bufHdr->flags & BM_DIRTY))
-			dirtied = true;
-		bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
-		UnlockBufHdr(bufHdr);
-
-		if (dirtied)
 		{
+			/* Do vacuum cost accounting */
 			VacuumPageDirty++;
 			if (VacuumCostActive)
 				VacuumCostBalance += VacuumCostPageDirty;
-			/* The bgwriter may need to be woken. */
-			if (ProcGlobal->bgwriterLatch)
-				SetLatch(ProcGlobal->bgwriterLatch);
 		}
+		bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
+		UnlockBufHdr(bufHdr);
 	}
 }
 

@@ -283,7 +283,7 @@ ResolveRecoveryConflictWithTablespace(Oid tsid)
 	VirtualTransactionId *temp_file_users;
 
 	/*
-	 * Standby users may be currently using this tablespace for for their
+	 * Standby users may be currently using this tablespace for their
 	 * temporary files. We only care about current users because
 	 * temp_tablespace parameter will just ignore tablespaces that no longer
 	 * exist.
@@ -1009,7 +1009,7 @@ LogAccessExclusiveLockPrepare(void)
 	 * RecordTransactionAbort() do not optimise away the transaction
 	 * completion record which recovery relies upon to release locks. It's a
 	 * hack, but for a corner case not worth adding code for into the main
-	 * commit path. Second, must must assign an xid before the lock is
+	 * commit path. Second, we must assign an xid before the lock is
 	 * recorded in shared memory, otherwise a concurrently executing
 	 * GetRunningTransactionLocks() might see a lock associated with an
 	 * InvalidTransactionId which we later assert cannot happen.

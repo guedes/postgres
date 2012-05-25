@@ -3262,7 +3262,7 @@ CheckConstraintFetch(Relation relation)
 				 RelationGetRelationName(relation));
 
 		check[found].ccvalid = conform->convalidated;
-		check[found].cconly	= conform->conisonly;
+		check[found].ccnoinherit = conform->connoinherit;
 		check[found].ccname = MemoryContextStrdup(CacheMemoryContext,
 												  NameStr(conform->conname));
 
@@ -3354,6 +3354,12 @@ RelationGetIndexList(Relation relation)
 		Datum		indclassDatum;
 		oidvector  *indclass;
 		bool		isnull;
+
+		/*
+		 * Ignore any indexes that are currently being dropped
+		 */
+		if (!index->indisvalid && !index->indisready)
+			continue;
 
 		/* Add index's OID to result list in the proper order */
 		result = insert_ordered_oid(result, index->indexrelid);

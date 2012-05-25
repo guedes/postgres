@@ -15,7 +15,7 @@
  *	oids are the same between old and new clusters.  This is important
  *	because toast oids are stored as toast pointers in user tables.
  *
- *	FYI, while pg_class.oid and pg_class.relfilenode are intially the same
+ *	FYI, while pg_class.oid and pg_class.relfilenode are initially the same
  *	in a cluster, but they can diverge due to CLUSTER, REINDEX, or VACUUM
  *	FULL.  The new cluster will have matching pg_class.oid and
  *	pg_class.relfilenode values and be based on the old oid value.	This can
@@ -55,11 +55,16 @@ ClusterInfo old_cluster,
 			new_cluster;
 OSInfo		os_info;
 
-char *output_files[NUM_LOG_FILES] = {
+char *output_files[] = {
 	SERVER_LOG_FILE,
+#ifdef WIN32
+	/* unique file for pg_ctl start */
+	SERVER_START_LOG_FILE,
+#endif
 	RESTORE_LOG_FILE,
 	UTILITY_LOG_FILE,
-	INTERNAL_LOG_FILE
+	INTERNAL_LOG_FILE,
+	NULL
 };
 
 
@@ -454,21 +459,14 @@ cleanup(void)
 	/* Remove dump and log files? */
 	if (!log_opts.retain)
 	{
-		char		filename[MAXPGPATH];
-		int i;
+		char		**filename;
 
-		for (i = 0; i < NUM_LOG_FILES; i++)
-		{
-			snprintf(filename, sizeof(filename), "%s", output_files[i]);
-			unlink(filename);
-		}
+		for (filename = output_files; *filename != NULL; filename++)
+			unlink(*filename);
 
 		/* remove SQL files */
-		snprintf(filename, sizeof(filename), "%s", ALL_DUMP_FILE);
-		unlink(filename);
-		snprintf(filename, sizeof(filename), "%s", GLOBALS_DUMP_FILE);
-		unlink(filename);
-		snprintf(filename, sizeof(filename), "%s", DB_DUMP_FILE);
-		unlink(filename);
+		unlink(ALL_DUMP_FILE);
+		unlink(GLOBALS_DUMP_FILE);
+		unlink(DB_DUMP_FILE);
 	}
 }

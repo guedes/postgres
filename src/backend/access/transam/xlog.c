@@ -427,16 +427,18 @@ typedef struct XLogCtlData
 	bool		SharedHotStandbyActive;
 
 	/*
+	 * WalWriterSleeping indicates whether the WAL writer is currently in
+	 * low-power mode (and hence should be nudged if an async commit occurs).
+	 * Protected by info_lck.
+	 */
+	bool		WalWriterSleeping;
+
+	/*
 	 * recoveryWakeupLatch is used to wake up the startup process to continue
 	 * WAL replay, if it is waiting for WAL to arrive or failover trigger file
 	 * to appear.
 	 */
 	Latch		recoveryWakeupLatch;
-
-	/*
-	 * WALWriterLatch is used to wake up the WALWriter to write some WAL.
-	 */
-	Latch		WALWriterLatch;
 
 	/*
 	 * During recovery, we keep a copy of the latest checkpoint record here.
@@ -1908,34 +1910,47 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible, bool xlog_switch)
 
 /*
  * Record the LSN for an asynchronous transaction commit/abort
- * and nudge the WALWriter if there is a complete page to write.
- * (This should not be called for for synchronous commits.)
+ * and nudge the WALWriter if there is work for it to do.
+ * (This should not be called for synchronous commits.)
  */
 void
 XLogSetAsyncXactLSN(XLogRecPtr asyncXactLSN)
 {
 	XLogRecPtr	WriteRqstPtr = asyncXactLSN;
+	bool		sleeping;
 
 	/* use volatile pointer to prevent code rearrangement */
 	volatile XLogCtlData *xlogctl = XLogCtl;
 
 	SpinLockAcquire(&xlogctl->info_lck);
 	LogwrtResult = xlogctl->LogwrtResult;
+	sleeping = xlogctl->WalWriterSleeping;
 	if (XLByteLT(xlogctl->asyncXactLSN, asyncXactLSN))
 		xlogctl->asyncXactLSN = asyncXactLSN;
 	SpinLockRelease(&xlogctl->info_lck);
 
-	/* back off to last completed page boundary */
-	WriteRqstPtr.xrecoff -= WriteRqstPtr.xrecoff % XLOG_BLCKSZ;
+	/*
+	 * If the WALWriter is sleeping, we should kick it to make it come out of
+	 * low-power mode.  Otherwise, determine whether there's a full page of
+	 * WAL available to write.
+	 */
+	if (!sleeping)
+	{
+		/* back off to last completed page boundary */
+		WriteRqstPtr.xrecoff -= WriteRqstPtr.xrecoff % XLOG_BLCKSZ;
 
-	/* if we have already flushed that far, we're done */
-	if (XLByteLE(WriteRqstPtr, LogwrtResult.Flush))
-		return;
+		/* if we have already flushed that far, we're done */
+		if (XLByteLE(WriteRqstPtr, LogwrtResult.Flush))
+			return;
+	}
 
 	/*
-	 * Nudge the WALWriter if we have a full page of WAL to write.
+	 * Nudge the WALWriter: it has a full page of WAL to write, or we want
+	 * it to come out of low-power mode so that this async commit will reach
+	 * disk within the expected amount of time.
 	 */
-	SetLatch(&XLogCtl->WALWriterLatch);
+	if (ProcGlobal->walwriterLatch)
+		SetLatch(ProcGlobal->walwriterLatch);
 }
 
 /*
@@ -2167,22 +2182,25 @@ XLogFlush(XLogRecPtr record)
  * block, and flush through the latest one of those.  Thus, if async commits
  * are not being used, we will flush complete blocks only.	We can guarantee
  * that async commits reach disk after at most three cycles; normally only
- * one or two.	(We allow XLogWrite to write "flexibly", meaning it can stop
- * at the end of the buffer ring; this makes a difference only with very high
- * load or long wal_writer_delay, but imposes one extra cycle for the worst
- * case for async commits.)
+ * one or two.  (When flushing complete blocks, we allow XLogWrite to write
+ * "flexibly", meaning it can stop at the end of the buffer ring; this makes a
+ * difference only with very high load or long wal_writer_delay, but imposes
+ * one extra cycle for the worst case for async commits.)
  *
  * This routine is invoked periodically by the background walwriter process.
+ *
+ * Returns TRUE if we flushed anything.
  */
-void
+bool
 XLogBackgroundFlush(void)
 {
 	XLogRecPtr	WriteRqstPtr;
 	bool		flexible = true;
+	bool		wrote_something = false;
 
 	/* XLOG doesn't need flushing during recovery */
 	if (RecoveryInProgress())
-		return;
+		return false;
 
 	/* read LogwrtResult and update local state */
 	{
@@ -2224,7 +2242,7 @@ XLogBackgroundFlush(void)
 				XLogFileClose();
 			}
 		}
-		return;
+		return false;
 	}
 
 #ifdef WAL_DEBUG
@@ -2247,10 +2265,13 @@ XLogBackgroundFlush(void)
 		WriteRqst.Write = WriteRqstPtr;
 		WriteRqst.Flush = WriteRqstPtr;
 		XLogWrite(WriteRqst, flexible, false);
+		wrote_something = true;
 	}
 	LWLockRelease(WALWriteLock);
 
 	END_CRIT_SECTION();
+
+	return wrote_something;
 }
 
 /*
@@ -5098,10 +5119,10 @@ XLOGShmemInit(void)
 	XLogCtl->XLogCacheBlck = XLOGbuffers - 1;
 	XLogCtl->SharedRecoveryInProgress = true;
 	XLogCtl->SharedHotStandbyActive = false;
+	XLogCtl->WalWriterSleeping = false;
 	XLogCtl->Insert.currpage = (XLogPageHeader) (XLogCtl->pages);
 	SpinLockInit(&XLogCtl->info_lck);
 	InitSharedLatch(&XLogCtl->recoveryWakeupLatch);
-	InitSharedLatch(&XLogCtl->WALWriterLatch);
 
 	/*
 	 * If we are not in bootstrap mode, pg_control should already exist. Read
@@ -6320,6 +6341,10 @@ StartupXLOG(void)
 		/* No need to hold ControlFileLock yet, we aren't up far enough */
 		UpdateControlFile();
 
+		/* initialize shared-memory copy of latest checkpoint XID/epoch */
+		XLogCtl->ckptXidEpoch = ControlFile->checkPointCopy.nextXidEpoch;
+		XLogCtl->ckptXid = ControlFile->checkPointCopy.nextXid;
+
 		/* initialize our local copy of minRecoveryPoint */
 		minRecoveryPoint = ControlFile->minRecoveryPoint;
 
@@ -6350,10 +6375,10 @@ StartupXLOG(void)
 		CheckRequiredParameterValues();
 
 		/*
-		 * We're in recovery, so unlogged relations relations may be trashed
-		 * and must be reset.  This should be done BEFORE allowing Hot Standby
-		 * connections, so that read-only backends don't try to read whatever
-		 * garbage is left over from before.
+		 * We're in recovery, so unlogged relations may be trashed and must be
+		 * reset.  This should be done BEFORE allowing Hot Standby connections,
+		 * so that read-only backends don't try to read whatever garbage is
+		 * left over from before.
 		 */
 		ResetUnloggedRelations(UNLOGGED_RELATION_CLEANUP);
 
@@ -6914,10 +6939,6 @@ StartupXLOG(void)
 
 	/* start the archive_timeout timer running */
 	XLogCtl->Write.lastSegSwitchTime = (pg_time_t) time(NULL);
-
-	/* initialize shared-memory copy of latest checkpoint XID/epoch */
-	XLogCtl->ckptXidEpoch = ControlFile->checkPointCopy.nextXidEpoch;
-	XLogCtl->ckptXid = ControlFile->checkPointCopy.nextXid;
 
 	/* also initialize latestCompletedXid, to nextXid - 1 */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
@@ -7511,10 +7532,6 @@ LogCheckpointEnd(bool restartpoint)
 
 	CheckpointStats.ckpt_end_t = GetCurrentTimestamp();
 
-	TimestampDifference(CheckpointStats.ckpt_start_t,
-						CheckpointStats.ckpt_end_t,
-						&total_secs, &total_usecs);
-
 	TimestampDifference(CheckpointStats.ckpt_write_t,
 						CheckpointStats.ckpt_sync_t,
 						&write_secs, &write_usecs);
@@ -7522,6 +7539,23 @@ LogCheckpointEnd(bool restartpoint)
 	TimestampDifference(CheckpointStats.ckpt_sync_t,
 						CheckpointStats.ckpt_sync_end_t,
 						&sync_secs, &sync_usecs);
+
+	/* Accumulate checkpoint timing summary data, in milliseconds. */
+	BgWriterStats.m_checkpoint_write_time +=
+		write_secs * 1000 + write_usecs / 1000;
+	BgWriterStats.m_checkpoint_sync_time +=
+		sync_secs * 1000 + sync_usecs / 1000;
+
+	/*
+	 * All of the published timing statistics are accounted for.  Only
+	 * continue if a log message is to be written.
+	 */
+	if (!log_checkpoints)
+		return;
+
+	TimestampDifference(CheckpointStats.ckpt_start_t,
+						CheckpointStats.ckpt_end_t,
+						&total_secs, &total_usecs);
 
 	/*
 	 * Timing values returned from CheckpointStats are in microseconds.
@@ -7581,7 +7615,7 @@ LogCheckpointEnd(bool restartpoint)
  *	CHECKPOINT_END_OF_RECOVERY: checkpoint is for end of WAL recovery.
  *	CHECKPOINT_IMMEDIATE: finish the checkpoint ASAP,
  *		ignoring checkpoint_completion_target parameter.
- *	CHECKPOINT_FORCE: force a checkpoint even if no XLOG activity has occured
+ *	CHECKPOINT_FORCE: force a checkpoint even if no XLOG activity has occurred
  *		since the last one (implied by CHECKPOINT_IS_SHUTDOWN or
  *		CHECKPOINT_END_OF_RECOVERY).
  *
@@ -7971,9 +8005,8 @@ CreateCheckPoint(int flags)
 	if (!RecoveryInProgress())
 		TruncateSUBTRANS(GetOldestXmin(true, false));
 
-	/* All real work is done, but log before releasing lock. */
-	if (log_checkpoints)
-		LogCheckpointEnd(false);
+	/* Real work is done, but log and update stats before releasing lock. */
+	LogCheckpointEnd(false);
 
 	TRACE_POSTGRESQL_CHECKPOINT_DONE(CheckpointStats.ckpt_bufs_written,
 									 NBuffers,
@@ -8237,9 +8270,8 @@ CreateRestartPoint(int flags)
 	if (EnableHotStandby)
 		TruncateSUBTRANS(GetOldestXmin(true, false));
 
-	/* All real work is done, but log before releasing lock. */
-	if (log_checkpoints)
-		LogCheckpointEnd(true);
+	/* Real work is done, but log and update before releasing lock. */
+	LogCheckpointEnd(true);
 
 	xtime = GetLatestXTime();
 	ereport((log_checkpoints ? LOG : DEBUG2),
@@ -8601,6 +8633,17 @@ xlog_redo(XLogRecPtr lsn, XLogRecord *record)
 		ControlFile->checkPointCopy.nextXidEpoch = checkPoint.nextXidEpoch;
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
 
+		/* Update shared-memory copy of checkpoint XID/epoch */
+		{
+			/* use volatile pointer to prevent code rearrangement */
+			volatile XLogCtlData *xlogctl = XLogCtl;
+
+			SpinLockAcquire(&xlogctl->info_lck);
+			xlogctl->ckptXidEpoch = checkPoint.nextXidEpoch;
+			xlogctl->ckptXid = checkPoint.nextXid;
+			SpinLockRelease(&xlogctl->info_lck);
+		}
+
 		/*
 		 * TLI may change in a shutdown checkpoint, but it shouldn't decrease
 		 */
@@ -8644,6 +8687,17 @@ xlog_redo(XLogRecPtr lsn, XLogRecord *record)
 		/* ControlFile->checkPointCopy always tracks the latest ckpt XID */
 		ControlFile->checkPointCopy.nextXidEpoch = checkPoint.nextXidEpoch;
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
+
+		/* Update shared-memory copy of checkpoint XID/epoch */
+		{
+			/* use volatile pointer to prevent code rearrangement */
+			volatile XLogCtlData *xlogctl = XLogCtl;
+
+			SpinLockAcquire(&xlogctl->info_lck);
+			xlogctl->ckptXidEpoch = checkPoint.nextXidEpoch;
+			xlogctl->ckptXid = checkPoint.nextXid;
+			SpinLockRelease(&xlogctl->info_lck);
+		}
 
 		/* TLI should not change in an on-line checkpoint */
 		if (checkPoint.ThisTimeLineID != ThisTimeLineID)
@@ -10447,10 +10501,15 @@ WakeupRecovery(void)
 }
 
 /*
- * Manage the WALWriterLatch
+ * Update the WalWriterSleeping flag.
  */
-Latch *
-WALWriterLatch(void)
+void
+SetWalWriterSleeping(bool sleeping)
 {
-	return &XLogCtl->WALWriterLatch;
+	/* use volatile pointer to prevent code rearrangement */
+	volatile XLogCtlData *xlogctl = XLogCtl;
+
+	SpinLockAcquire(&xlogctl->info_lck);
+	xlogctl->WalWriterSleeping = sleeping;
+	SpinLockRelease(&xlogctl->info_lck);
 }

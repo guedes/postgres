@@ -753,7 +753,7 @@ get_object_address_relobject(ObjectType objtype, List *objname,
 			case OBJECT_CONSTRAINT:
 				address.classId = ConstraintRelationId;
 				address.objectId =
-					get_constraint_oid(reloid, depname, missing_ok);
+					get_relation_constraint_oid(reloid, depname, missing_ok);
 				address.objectSubId = 0;
 				break;
 			default:
@@ -794,6 +794,10 @@ get_object_address_attribute(ObjectType objtype, List *objname,
 	AttrNumber	attnum;
 
 	/* Extract relation name and open relation. */
+	if (list_length(objname) < 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("column name must be qualified")));
 	attname = strVal(lfirst(list_tail(objname)));
 	relname = list_truncate(list_copy(objname), list_length(objname) - 1);
 	relation = relation_openrv(makeRangeVarFromNameList(relname), lockmode);

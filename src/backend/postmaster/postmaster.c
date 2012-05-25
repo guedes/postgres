@@ -239,13 +239,13 @@ static bool RecoveryError = false;		/* T if WAL recovery failed */
  * hot standby during archive recovery.
  *
  * When the startup process is ready to start archive recovery, it signals the
- * postmaster, and we switch to PM_RECOVERY state. The background writer is
- * launched, while the startup process continues applying WAL.	If Hot Standby
- * is enabled, then, after reaching a consistent point in WAL redo, startup
- * process signals us again, and we switch to PM_HOT_STANDBY state and
- * begin accepting connections to perform read-only queries.  When archive
- * recovery is finished, the startup process exits with exit code 0 and we
- * switch to PM_RUN state.
+ * postmaster, and we switch to PM_RECOVERY state. The background writer and
+ * checkpointer are launched, while the startup process continues applying WAL.
+ * If Hot Standby is enabled, then, after reaching a consistent point in WAL
+ * redo, startup process signals us again, and we switch to PM_HOT_STANDBY
+ * state and begin accepting connections to perform read-only queries.  When
+ * archive recovery is finished, the startup process exits with exit code 0
+ * and we switch to PM_RUN state.
  *
  * Normal child backends can only be launched when we are in PM_RUN or
  * PM_HOT_STANDBY state.  (We also allow launch of normal
@@ -438,6 +438,7 @@ typedef struct
 	TimestampTz PgReloadTime;
 	bool		redirection_done;
 	bool		IsBinaryUpgrade;
+	int			max_safe_fds;
 #ifdef WIN32
 	HANDLE		PostmasterHandle;
 	HANDLE		initial_signal_pipe;
@@ -826,12 +827,6 @@ PostmasterMain(int argc, char *argv[])
 	process_shared_preload_libraries();
 
 	/*
-	 * Remove old temporary files.	At this point there can be no other
-	 * Postgres processes running in this directory, so this should be safe.
-	 */
-	RemovePgTempFiles();
-
-	/*
 	 * Establish input sockets.
 	 */
 	for (i = 0; i < MAXLISTEN; i++)
@@ -970,6 +965,11 @@ PostmasterMain(int argc, char *argv[])
 	set_max_safe_fds();
 
 	/*
+	 * Set reference point for stack-depth checking.
+	 */
+	set_stack_base();
+
+	/*
 	 * Initialize the list of active backends.
 	 */
 	BackendList = DLNewList();
@@ -1032,7 +1032,7 @@ PostmasterMain(int argc, char *argv[])
 	 * handling setup of child processes.  See tcop/postgres.c,
 	 * bootstrap/bootstrap.c, postmaster/bgwriter.c, postmaster/walwriter.c,
 	 * postmaster/autovacuum.c, postmaster/pgarch.c, postmaster/pgstat.c,
-	 * postmaster/syslogger.c and postmaster/checkpointer.c
+	 * postmaster/syslogger.c and postmaster/checkpointer.c.
 	 */
 	pqinitmask();
 	PG_SETMASK(&BlockSig);
@@ -1092,6 +1092,12 @@ PostmasterMain(int argc, char *argv[])
 				(errmsg("could not load pg_hba.conf")));
 	}
 	load_ident();
+
+	/*
+	 * Remove old temporary files.	At this point there can be no other
+	 * Postgres processes running in this directory, so this should be safe.
+	 */
+	RemovePgTempFiles();
 
 	/*
 	 * Remember postmaster startup time
@@ -1367,10 +1373,10 @@ ServerLoop(void)
 		/*
 		 * If no background writer process is running, and we are not in a
 		 * state that prevents it, start one.  It doesn't matter if this
-		 * fails, we'll just try again later.
+		 * fails, we'll just try again later.  Likewise for the checkpointer.
 		 */
 		if (pmState == PM_RUN || pmState == PM_RECOVERY ||
-			 pmState == PM_HOT_STANDBY)
+			pmState == PM_HOT_STANDBY)
 		{
 			if (BgWriterPID == 0)
 				BgWriterPID = StartBackgroundWriter();
@@ -1380,7 +1386,8 @@ ServerLoop(void)
 
 		/*
 		 * Likewise, if we have lost the walwriter process, try to start a new
-		 * one.
+		 * one.  But this is needed only in normal operation (else we cannot
+		 * be writing any new WAL).
 		 */
 		if (WalWriterPID == 0 && pmState == PM_RUN)
 			WalWriterPID = StartWalWriter();
@@ -2125,11 +2132,12 @@ pmdie(SIGNAL_ARGS)
 				/* and the autovac launcher too */
 				if (AutoVacPID != 0)
 					signal_child(AutoVacPID, SIGTERM);
+				/* and the bgwriter too */
+				if (BgWriterPID != 0)
+					signal_child(BgWriterPID, SIGTERM);
 				/* and the walwriter too */
 				if (WalWriterPID != 0)
 					signal_child(WalWriterPID, SIGTERM);
-				if (BgWriterPID != 0)
-					signal_child(BgWriterPID, SIGTERM);
 
 				/*
 				 * If we're in recovery, we can't kill the startup process
@@ -2168,13 +2176,17 @@ pmdie(SIGNAL_ARGS)
 
 			if (StartupPID != 0)
 				signal_child(StartupPID, SIGTERM);
-			if (WalReceiverPID != 0)
-				signal_child(WalReceiverPID, SIGTERM);
 			if (BgWriterPID != 0)
 				signal_child(BgWriterPID, SIGTERM);
+			if (WalReceiverPID != 0)
+				signal_child(WalReceiverPID, SIGTERM);
 			if (pmState == PM_RECOVERY)
 			{
-				/* only checkpointer is active in this state */
+				/*
+				 * Only startup, bgwriter, and checkpointer should be active
+				 * in this state; we just signaled the first two, and we don't
+				 * want to kill checkpointer yet.
+				 */
 				pmState = PM_WAIT_BACKENDS;
 			}
 			else if (pmState == PM_RUN ||
@@ -2356,7 +2368,7 @@ reaper(SIGNAL_ARGS)
 			}
 
 			/*
-			 * Crank up background tasks, if we didn't do that already
+			 * Crank up the background tasks, if we didn't do that already
 			 * when we entered consistent recovery state.  It doesn't matter
 			 * if this fails, we'll just try again later.
 			 */
@@ -2364,13 +2376,13 @@ reaper(SIGNAL_ARGS)
 				BgWriterPID = StartBackgroundWriter();
 			if (CheckpointerPID == 0)
 				CheckpointerPID = StartCheckpointer();
+			if (WalWriterPID == 0)
+				WalWriterPID = StartWalWriter();
 
 			/*
 			 * Likewise, start other special children as needed.  In a restart
 			 * situation, some of them may be alive already.
 			 */
-			if (WalWriterPID == 0)
-				WalWriterPID = StartWalWriter();
 			if (!IsBinaryUpgrade && AutoVacuumingActive() && AutoVacPID == 0)
 				AutoVacPID = StartAutoVacLauncher();
 			if (XLogArchivingActive() && PgArchPID == 0)
@@ -2386,7 +2398,9 @@ reaper(SIGNAL_ARGS)
 		}
 
 		/*
-		 * Was it the bgwriter?
+		 * Was it the bgwriter?  Normal exit can be ignored; we'll start a
+		 * new one at the next iteration of the postmaster's main loop, if
+		 * necessary.  Any other exit condition is treated as a crash.
 		 */
 		if (pid == BgWriterPID)
 		{
@@ -2500,7 +2514,7 @@ reaper(SIGNAL_ARGS)
 		 * Was it the archiver?  If so, just try to start a new one; no need
 		 * to force reset of the rest of the system.  (If fail, we'll try
 		 * again in future cycles of the main loop.).  Unless we were waiting
-		 * for it to shut down; don't restart it in that case, and and
+		 * for it to shut down; don't restart it in that case, and
 		 * PostmasterStateMachine() will advance to the next shutdown step.
 		 */
 		if (pid == PgArchPID)
@@ -3977,6 +3991,11 @@ SubPostmasterMain(int argc, char *argv[])
 	read_backend_variables(argv[2], &port);
 
 	/*
+	 * Set reference point for stack-depth checking
+	 */
+	set_stack_base();
+
+	/*
 	 * Set up memory area for GSS information. Mirrors the code in ConnCreate
 	 * for the non-exec case.
 	 */
@@ -4217,13 +4236,13 @@ sigusr1_handler(SIGNAL_ARGS)
 		FatalError = false;
 
 		/*
-		 * Crank up the background writers.	It doesn't matter if this fails,
+		 * Crank up the background tasks.  It doesn't matter if this fails,
 		 * we'll just try again later.
 		 */
-		Assert(CheckpointerPID == 0);
-		CheckpointerPID = StartCheckpointer();
 		Assert(BgWriterPID == 0);
 		BgWriterPID = StartBackgroundWriter();
+		Assert(CheckpointerPID == 0);
+		CheckpointerPID = StartCheckpointer();
 
 		pmState = PM_RECOVERY;
 	}
@@ -4741,6 +4760,7 @@ save_backend_variables(BackendParameters *param, Port *port,
 
 	param->redirection_done = redirection_done;
 	param->IsBinaryUpgrade = IsBinaryUpgrade;
+	param->max_safe_fds = max_safe_fds;
 
 #ifdef WIN32
 	param->PostmasterHandle = PostmasterHandle;
@@ -4964,6 +4984,7 @@ restore_backend_variables(BackendParameters *param, Port *port)
 
 	redirection_done = param->redirection_done;
 	IsBinaryUpgrade = param->IsBinaryUpgrade;
+	max_safe_fds = param->max_safe_fds;
 
 #ifdef WIN32
 	PostmasterHandle = param->PostmasterHandle;

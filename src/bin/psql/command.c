@@ -2407,12 +2407,12 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "footer") == 0)
 	{
 		if (value)
-			popt->default_footer = ParseVariableBool(value);
+			popt->topt.default_footer = ParseVariableBool(value);
 		else
-			popt->default_footer = !popt->default_footer;
+			popt->topt.default_footer = !popt->topt.default_footer;
 		if (!quiet)
 		{
-			if (popt->default_footer)
+			if (popt->topt.default_footer)
 				puts(_("Default footer is on."));
 			else
 				puts(_("Default footer is off."));
@@ -2471,10 +2471,10 @@ do_shell(const char *command)
 		sys = pg_malloc(strlen(shellName) + 16);
 #ifndef WIN32
 		sprintf(sys,
-		/* See EDITOR handling comment for an explaination */
+		/* See EDITOR handling comment for an explanation */
 				"exec %s", shellName);
 #else
-		/* See EDITOR handling comment for an explaination */
+		/* See EDITOR handling comment for an explanation */
 		sprintf(sys, SYSTEMQUOTE "\"%s\"" SYSTEMQUOTE, shellName);
 #endif
 		result = system(sys);

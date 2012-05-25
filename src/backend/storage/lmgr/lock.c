@@ -114,6 +114,50 @@ static const char *const lock_mode_names[] =
 	"AccessExclusiveLock"
 };
 
+#ifndef LOCK_DEBUG
+static bool Dummy_trace = false;
+#endif
+
+static const LockMethodData default_lockmethod = {
+	AccessExclusiveLock,		/* highest valid lock mode number */
+	LockConflicts,
+	lock_mode_names,
+#ifdef LOCK_DEBUG
+	&Trace_locks
+#else
+	&Dummy_trace
+#endif
+};
+
+static const LockMethodData user_lockmethod = {
+	AccessExclusiveLock,		/* highest valid lock mode number */
+	LockConflicts,
+	lock_mode_names,
+#ifdef LOCK_DEBUG
+	&Trace_userlocks
+#else
+	&Dummy_trace
+#endif
+};
+
+/*
+ * map from lock method id to the lock table data structures
+ */
+static const LockMethod LockMethods[] = {
+	NULL,
+	&default_lockmethod,
+	&user_lockmethod
+};
+
+
+/* Record that's written to 2PC state file when a lock is persisted */
+typedef struct TwoPhaseLockRecord
+{
+	LOCKTAG		locktag;
+	LOCKMODE	lockmode;
+} TwoPhaseLockRecord;
+
+
 /*
  * Count of the number of fast path lock slots we believe to be used.  This
  * might be higher than the real number if another backend has transferred
@@ -193,51 +237,6 @@ typedef struct
 
 FastPathStrongRelationLockData *FastPathStrongRelationLocks;
 
-#ifndef LOCK_DEBUG
-static bool Dummy_trace = false;
-#endif
-
-static const LockMethodData default_lockmethod = {
-	AccessExclusiveLock,		/* highest valid lock mode number */
-	true,
-	LockConflicts,
-	lock_mode_names,
-#ifdef LOCK_DEBUG
-	&Trace_locks
-#else
-	&Dummy_trace
-#endif
-};
-
-static const LockMethodData user_lockmethod = {
-	AccessExclusiveLock,		/* highest valid lock mode number */
-	true,
-	LockConflicts,
-	lock_mode_names,
-#ifdef LOCK_DEBUG
-	&Trace_userlocks
-#else
-	&Dummy_trace
-#endif
-};
-
-/*
- * map from lock method id to the lock table data structures
- */
-static const LockMethod LockMethods[] = {
-	NULL,
-	&default_lockmethod,
-	&user_lockmethod
-};
-
-
-/* Record that's written to 2PC state file when a lock is persisted */
-typedef struct TwoPhaseLockRecord
-{
-	LOCKTAG		locktag;
-	LOCKMODE	lockmode;
-} TwoPhaseLockRecord;
-
 
 /*
  * Pointers to hash tables containing lock state
@@ -250,7 +249,8 @@ static HTAB *LockMethodProcLockHash;
 static HTAB *LockMethodLocalHash;
 
 
-/* private state for GrantAwaitedLock */
+/* private state for error cleanup */
+static LOCALLOCK *StrongLockInProgress;
 static LOCALLOCK *awaitedLock;
 static ResourceOwner awaitedOwner;
 
@@ -338,8 +338,10 @@ static void RemoveLocalLock(LOCALLOCK *locallock);
 static PROCLOCK *SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 			     const LOCKTAG *locktag, uint32 hashcode, LOCKMODE lockmode);
 static void GrantLockLocal(LOCALLOCK *locallock, ResourceOwner owner);
+static void BeginStrongLockAcquire(LOCALLOCK *locallock, uint32 fasthashcode);
+static void FinishStrongLockAcquire(void);
 static void WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner);
-static void ReleaseLockForOwner(LOCALLOCK *locallock, ResourceOwner owner);
+static void ReleaseLockIfHeld(LOCALLOCK *locallock, bool sessionLock);
 static bool UnGrantLock(LOCK *lock, LOCKMODE lockmode,
 			PROCLOCK *proclock, LockMethod lockMethodTable);
 static void CleanUpLock(LOCK *lock, PROCLOCK *proclock,
@@ -618,11 +620,11 @@ LockAcquireExtended(const LOCKTAG *locktag,
 			 lockMethodTable->lockModeNames[lockmode]);
 #endif
 
-	/* Session locks are never transactional, else check table */
-	if (!sessionLock && lockMethodTable->transactional)
-		owner = CurrentResourceOwner;
-	else
+	/* Identify owner for lock */
+	if (sessionLock)
 		owner = NULL;
+	else
+		owner = CurrentResourceOwner;
 
 	/*
 	 * Find or create a LOCALLOCK entry for this lock and lockmode
@@ -720,8 +722,8 @@ LockAcquireExtended(const LOCKTAG *locktag,
 			/*
 			 * LWLockAcquire acts as a memory sequencing point, so it's safe
 			 * to assume that any strong locker whose increment to
-			 * FastPathStrongLocks->counts becomes visible after we test it has
-			 * yet to begin to transfer fast-path locks.
+			 * FastPathStrongRelationLocks->counts becomes visible after we test
+			 * it has yet to begin to transfer fast-path locks.
 			 */
 			LWLockAcquire(MyProc->backendLock, LW_EXCLUSIVE);
 			if (FastPathStrongRelationLocks->count[fasthashcode] != 0)
@@ -738,22 +740,11 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		}
 		else if (FastPathStrongMode(lockmode))
 		{
-			/*
-			 * Adding to a memory location is not atomic, so we take a
-			 * spinlock to ensure we don't collide with someone else trying
-			 * to bump the count at the same time.
-			 *
-			 * XXX: It might be worth considering using an atomic fetch-and-add
-			 * instruction here, on architectures where that is supported.
-			 */
-			Assert(locallock->holdsStrongLockCount == FALSE);
-			SpinLockAcquire(&FastPathStrongRelationLocks->mutex);
-			FastPathStrongRelationLocks->count[fasthashcode]++;
-			locallock->holdsStrongLockCount = TRUE;
-			SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+			BeginStrongLockAcquire(locallock, fasthashcode);
 			if (!FastPathTransferRelationLocks(lockMethodTable, locktag,
 											   hashcode))
 			{
+				AbortStrongLockAcquire();
 				if (reportMemoryError)
 					ereport(ERROR,
 							(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -779,6 +770,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 								hashcode, lockmode);
 	if (!proclock)
 	{
+		AbortStrongLockAcquire();
 		LWLockRelease(partitionLock);
 		if (reportMemoryError)
 			ereport(ERROR,
@@ -820,6 +812,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		 */
 		if (dontWait)
 		{
+			AbortStrongLockAcquire();
 			if (proclock->holdMask == 0)
 			{
 				uint32		proclock_hashcode;
@@ -884,6 +877,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		 */
 		if (!(proclock->holdMask & LOCKBIT_ON(lockmode)))
 		{
+			AbortStrongLockAcquire();
 			PROCLOCK_PRINT("LockAcquire: INCONSISTENT", proclock);
 			LOCK_PRINT("LockAcquire: INCONSISTENT", lock, lockmode);
 			/* Should we retry ? */
@@ -893,6 +887,12 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		PROCLOCK_PRINT("LockAcquire: granted", proclock);
 		LOCK_PRINT("LockAcquire: granted", lock, lockmode);
 	}
+
+	/*
+	 * Lock state is fully up-to-date now; if we error out after this, no
+	 * special error cleanup is required.
+	 */
+	FinishStrongLockAcquire();
 
 	LWLockRelease(partitionLock);
 
@@ -1350,6 +1350,64 @@ GrantLockLocal(LOCALLOCK *locallock, ResourceOwner owner)
 }
 
 /*
+ * BeginStrongLockAcquire - inhibit use of fastpath for a given LOCALLOCK,
+ * and arrange for error cleanup if it fails
+ */
+static void
+BeginStrongLockAcquire(LOCALLOCK *locallock, uint32 fasthashcode)
+{
+	Assert(StrongLockInProgress == NULL);
+	Assert(locallock->holdsStrongLockCount == FALSE);
+
+	/*
+	 * Adding to a memory location is not atomic, so we take a
+	 * spinlock to ensure we don't collide with someone else trying
+	 * to bump the count at the same time.
+	 *
+	 * XXX: It might be worth considering using an atomic fetch-and-add
+	 * instruction here, on architectures where that is supported.
+	 */
+
+	SpinLockAcquire(&FastPathStrongRelationLocks->mutex);
+	FastPathStrongRelationLocks->count[fasthashcode]++;
+	locallock->holdsStrongLockCount = TRUE;
+	StrongLockInProgress = locallock;
+	SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+}
+
+/*
+ * FinishStrongLockAcquire - cancel pending cleanup for a strong lock
+ * acquisition once it's no longer needed
+ */
+static void
+FinishStrongLockAcquire(void)
+{
+	StrongLockInProgress = NULL;
+}
+
+/*
+ * AbortStrongLockAcquire - undo strong lock state changes performed by
+ * BeginStrongLockAcquire.
+ */
+void
+AbortStrongLockAcquire(void)
+{
+	uint32	fasthashcode;
+	LOCALLOCK  *locallock = StrongLockInProgress;
+	
+	if (locallock == NULL)
+		return;
+
+	fasthashcode = FastPathStrongLockHashPartition(locallock->hashcode);
+	Assert(locallock->holdsStrongLockCount == TRUE);
+	SpinLockAcquire(&FastPathStrongRelationLocks->mutex);
+	FastPathStrongRelationLocks->count[fasthashcode]--;
+	locallock->holdsStrongLockCount = FALSE;
+	StrongLockInProgress = NULL;
+	SpinLockRelease(&FastPathStrongRelationLocks->mutex);
+}
+
+/*
  * GrantAwaitedLock -- call GrantLockLocal for the lock we are doing
  *		WaitOnLock on.
  *
@@ -1414,7 +1472,7 @@ WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner)
 	 * We can and do use a PG_TRY block to try to clean up after failure, but
 	 * this still has a major limitation: elog(FATAL) can occur while waiting
 	 * (eg, a "die" interrupt), and then control won't come back here. So all
-	 * cleanup of essential state should happen in LockWaitCancel, not here.
+	 * cleanup of essential state should happen in LockErrorCleanup, not here.
 	 * We can use PG_TRY to clear the "waiting" status flags, since doing that
 	 * is unimportant if the process exits.
 	 */
@@ -1441,7 +1499,7 @@ WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner)
 	}
 	PG_CATCH();
 	{
-		/* In this path, awaitedLock remains set until LockWaitCancel */
+		/* In this path, awaitedLock remains set until LockErrorCleanup */
 
 		/* Report change to non-waiting status */
 		pgstat_report_waiting(false);
@@ -1591,11 +1649,11 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 		ResourceOwner owner;
 		int			i;
 
-		/* Session locks are never transactional, else check table */
-		if (!sessionLock && lockMethodTable->transactional)
-			owner = CurrentResourceOwner;
-		else
+		/* Identify owner for lock */
+		if (sessionLock)
 			owner = NULL;
+		else
+			owner = CurrentResourceOwner;
 
 		for (i = locallock->numLockOwners - 1; i >= 0; i--)
 		{
@@ -1718,31 +1776,6 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 
 	RemoveLocalLock(locallock);
 	return TRUE;
-}
-
-/*
- * LockReleaseSession -- Release all session locks of the specified lock method
- *		that are held by the current process.
- */
-void
-LockReleaseSession(LOCKMETHODID lockmethodid)
-{
-	HASH_SEQ_STATUS status;
-	LOCALLOCK  *locallock;
-
-	if (lockmethodid <= 0 || lockmethodid >= lengthof(LockMethods))
-		elog(ERROR, "unrecognized lock method: %d", lockmethodid);
-
-	hash_seq_init(&status, LockMethodLocalHash);
-
-	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
-	{
-		/* Ignore items that are not of the specified lock method */
-		if (LOCALLOCK_LOCKMETHOD(*locallock) != lockmethodid)
-			continue;
-
-		ReleaseLockForOwner(locallock, NULL);
-	}
 }
 
 /*
@@ -1999,6 +2032,31 @@ LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)
 }
 
 /*
+ * LockReleaseSession -- Release all session locks of the specified lock method
+ *		that are held by the current process.
+ */
+void
+LockReleaseSession(LOCKMETHODID lockmethodid)
+{
+	HASH_SEQ_STATUS status;
+	LOCALLOCK  *locallock;
+
+	if (lockmethodid <= 0 || lockmethodid >= lengthof(LockMethods))
+		elog(ERROR, "unrecognized lock method: %d", lockmethodid);
+
+	hash_seq_init(&status, LockMethodLocalHash);
+
+	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
+	{
+		/* Ignore items that are not of the specified lock method */
+		if (LOCALLOCK_LOCKMETHOD(*locallock) != lockmethodid)
+			continue;
+
+		ReleaseLockIfHeld(locallock, true);
+	}
+}
+
+/*
  * LockReleaseCurrentOwner
  *		Release all locks belonging to CurrentResourceOwner
  */
@@ -2012,25 +2070,37 @@ LockReleaseCurrentOwner(void)
 
 	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
 	{
-		/* Ignore items that must be nontransactional */
-		if (!LockMethods[LOCALLOCK_LOCKMETHOD(*locallock)]->transactional)
-			continue;
-
-		ReleaseLockForOwner(locallock, CurrentResourceOwner);
+		ReleaseLockIfHeld(locallock, false);
 	}
 }
 
 /*
- * Subroutine to release a lock belonging to the 'owner' if found.
- * 'owner' can be NULL to release a session lock.
+ * ReleaseLockIfHeld
+ *		Release any session-level locks on this lockable object if sessionLock
+ *		is true; else, release any locks held by CurrentResourceOwner.
+ *
+ * It is tempting to pass this a ResourceOwner pointer (or NULL for session
+ * locks), but without refactoring LockRelease() we cannot support releasing
+ * locks belonging to resource owners other than CurrentResourceOwner.
+ * If we were to refactor, it'd be a good idea to fix it so we don't have to
+ * do a hashtable lookup of the locallock, too.  However, currently this
+ * function isn't used heavily enough to justify refactoring for its
+ * convenience.
  */
 static void
-ReleaseLockForOwner(LOCALLOCK *locallock, ResourceOwner owner)
+ReleaseLockIfHeld(LOCALLOCK *locallock, bool sessionLock)
 {
-	int			i;
+	ResourceOwner owner;
 	LOCALLOCKOWNER *lockOwners;
+	int			i;
 
-	/* Scan to see if there are any locks belonging to the owner */
+	/* Identify owner for lock (must match LockRelease!) */
+	if (sessionLock)
+		owner = NULL;
+	else
+		owner = CurrentResourceOwner;
+
+	/* Scan to see if there are any locks belonging to the target owner */
 	lockOwners = locallock->lockOwners;
 	for (i = locallock->numLockOwners - 1; i >= 0; i--)
 	{
@@ -2057,8 +2127,8 @@ ReleaseLockForOwner(LOCALLOCK *locallock, ResourceOwner owner)
 				locallock->nLocks = 1;
 				if (!LockRelease(&locallock->tag.lock,
 								 locallock->tag.mode,
-								 owner == NULL))
-					elog(WARNING, "ReleaseLockForOwner: failed??");
+								 sessionLock))
+					elog(WARNING, "ReleaseLockIfHeld: failed??");
 			}
 			break;
 		}
@@ -2087,10 +2157,6 @@ LockReassignCurrentOwner(void)
 		int			i;
 		int			ic = -1;
 		int			ip = -1;
-
-		/* Ignore items that must be nontransactional */
-		if (!LockMethods[LOCALLOCK_LOCKMETHOD(*locallock)]->transactional)
-			continue;
 
 		/*
 		 * Scan to see if there are any locks belonging to current owner or
@@ -2670,13 +2736,13 @@ LockRefindAndRelease(LockMethod lockMethodTable, PGPROC *proc,
  *		Do the preparatory work for a PREPARE: make 2PC state file records
  *		for all locks currently held.
  *
- * Non-transactional locks are ignored, as are VXID locks.
+ * Session-level locks are ignored, as are VXID locks.
  *
- * There are some special cases that we error out on: we can't be holding
- * any session locks (should be OK since only VACUUM uses those) and we
- * can't be holding any locks on temporary objects (since that would mess
- * up the current backend if it tries to exit before the prepared xact is
- * committed).
+ * There are some special cases that we error out on: we can't be holding any
+ * locks at both session and transaction level (since we must either keep or
+ * give away the PROCLOCK object), and we can't be holding any locks on
+ * temporary objects (since that would mess up the current backend if it tries
+ * to exit before the prepared xact is committed).
  */
 void
 AtPrepare_Locks(void)
@@ -2696,11 +2762,9 @@ AtPrepare_Locks(void)
 	{
 		TwoPhaseLockRecord record;
 		LOCALLOCKOWNER *lockOwners = locallock->lockOwners;
+		bool		haveSessionLock;
+		bool		haveXactLock;
 		int			i;
-
-		/* Ignore nontransactional locks */
-		if (!LockMethods[LOCALLOCK_LOCKMETHOD(*locallock)]->transactional)
-			continue;
 
 		/*
 		 * Ignore VXID locks.  We don't want those to be held by prepared
@@ -2713,13 +2777,37 @@ AtPrepare_Locks(void)
 		if (locallock->nLocks <= 0)
 			continue;
 
-		/* Scan to verify there are no session locks */
+		/* Scan to see whether we hold it at session or transaction level */
+		haveSessionLock = haveXactLock = false;
 		for (i = locallock->numLockOwners - 1; i >= 0; i--)
 		{
-			/* elog not ereport since this should not happen */
 			if (lockOwners[i].owner == NULL)
-				elog(ERROR, "cannot PREPARE when session locks exist");
+				haveSessionLock = true;
+			else
+				haveXactLock = true;
 		}
+
+		/* Ignore it if we have only session lock */
+		if (!haveXactLock)
+			continue;
+
+		/*
+		 * If we have both session- and transaction-level locks, fail.  This
+		 * should never happen with regular locks, since we only take those at
+		 * session level in some special operations like VACUUM.  It's
+		 * possible to hit this with advisory locks, though.
+		 *
+		 * It would be nice if we could keep the session hold and give away
+		 * the transactional hold to the prepared xact.  However, that would
+		 * require two PROCLOCK objects, and we cannot be sure that another
+		 * PROCLOCK will be available when it comes time for PostPrepare_Locks
+		 * to do the deed.  So for now, we error out while we can still do so
+		 * safely.
+		 */
+		if (haveSessionLock)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot PREPARE while holding both session-level and transaction-level locks on the same object")));
 
 		/*
 		 * If the local lock was taken via the fast-path, we need to move it
@@ -2733,7 +2821,7 @@ AtPrepare_Locks(void)
 		}
 
 		/*
-		 * Arrange not to release any strong lock count held by this lock
+		 * Arrange to not release any strong lock count held by this lock
 		 * entry.  We must retain the count until the prepared transaction
 		 * is committed or rolled back.
 		 */
@@ -2793,6 +2881,11 @@ PostPrepare_Locks(TransactionId xid)
 
 	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
 	{
+		LOCALLOCKOWNER *lockOwners = locallock->lockOwners;
+		bool		haveSessionLock;
+		bool		haveXactLock;
+		int			i;
+
 		if (locallock->proclock == NULL || locallock->lock == NULL)
 		{
 			/*
@@ -2804,15 +2897,29 @@ PostPrepare_Locks(TransactionId xid)
 			continue;
 		}
 
-		/* Ignore nontransactional locks */
-		if (!LockMethods[LOCALLOCK_LOCKMETHOD(*locallock)]->transactional)
-			continue;
-
 		/* Ignore VXID locks */
 		if (locallock->tag.lock.locktag_type == LOCKTAG_VIRTUALTRANSACTION)
 			continue;
 
-		/* We already checked there are no session locks */
+		/* Scan to see whether we hold it at session or transaction level */
+		haveSessionLock = haveXactLock = false;
+		for (i = locallock->numLockOwners - 1; i >= 0; i--)
+		{
+			if (lockOwners[i].owner == NULL)
+				haveSessionLock = true;
+			else
+				haveXactLock = true;
+		}
+
+		/* Ignore it if we have only session lock */
+		if (!haveXactLock)
+			continue;
+
+		/* This can't happen, because we already checked it */
+		if (haveSessionLock)
+			ereport(PANIC,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot PREPARE while holding both session-level and transaction-level locks on the same object")));
 
 		/* Mark the proclock to show we need to release this lockmode */
 		if (locallock->nLocks > 0)
@@ -2853,10 +2960,6 @@ PostPrepare_Locks(TransactionId xid)
 
 			lock = proclock->tag.myLock;
 
-			/* Ignore nontransactional locks */
-			if (!LockMethods[LOCK_LOCKMETHOD(*lock)]->transactional)
-				goto next_item;
-
 			/* Ignore VXID locks */
 			if (lock->tag.locktag_type == LOCKTAG_VIRTUALTRANSACTION)
 				goto next_item;
@@ -2868,10 +2971,11 @@ PostPrepare_Locks(TransactionId xid)
 			Assert(lock->nGranted <= lock->nRequested);
 			Assert((proclock->holdMask & ~lock->grantMask) == 0);
 
-			/*
-			 * Since there were no session locks, we should be releasing all
-			 * locks
-			 */
+			/* Ignore it if nothing to release (must be a session lock) */
+			if (proclock->releaseMask == 0)
+				goto next_item;
+
+			/* Else we should be releasing all locks */
 			if (proclock->releaseMask != proclock->holdMask)
 				elog(PANIC, "we seem to have dropped a bit somewhere");
 

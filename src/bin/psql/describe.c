@@ -1104,7 +1104,7 @@ describeOneTableDetails(const char *schemaname,
 	bool		printTableInitialized = false;
 	int			i;
 	char	   *view_def = NULL;
-	char	   *headers[6];
+	char	   *headers[9];
 	char	  **seq_values = NULL;
 	char	  **modifiers = NULL;
 	char	  **ptr;
@@ -1130,6 +1130,7 @@ describeOneTableDetails(const char *schemaname,
 
 	retval = false;
 
+	myopt.default_footer = false;
 	/* This output looks confusing in expanded mode. */
 	myopt.expanded = false;
 
@@ -1395,7 +1396,7 @@ describeOneTableDetails(const char *schemaname,
 	if (verbose)
 	{
 		headers[cols++] = gettext_noop("Storage");
-		if (tableinfo.relkind == 'r')
+		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'f')
 			headers[cols++] = gettext_noop("Stats target");
 		/* Column comments, if the relkind supports this feature. */
 		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
@@ -1498,7 +1499,7 @@ describeOneTableDetails(const char *schemaname,
 							  false, false);
 
 			/* Statistics target, if the relkind supports this feature */
-			if (tableinfo.relkind == 'r')
+			if (tableinfo.relkind == 'r' || tableinfo.relkind == 'f')
 			{
 				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 1),
 								  false, false);
@@ -1786,20 +1787,13 @@ describeOneTableDetails(const char *schemaname,
 		/* print table (and column) check constraints */
 		if (tableinfo.checks)
 		{
-			char *is_only;
-
-			if (pset.sversion >= 90200)
-				is_only = "r.conisonly";
-			else
-				is_only = "false AS conisonly";
-
 			printfPQExpBuffer(&buf,
-							  "SELECT r.conname, %s, "
+							  "SELECT r.conname, "
 							  "pg_catalog.pg_get_constraintdef(r.oid, true)\n"
 							  "FROM pg_catalog.pg_constraint r\n"
-				   "WHERE r.conrelid = '%s' AND r.contype = 'c'\n"
-				   			  "ORDER BY 2 DESC, 1;",
-							  is_only, oid);
+							  "WHERE r.conrelid = '%s' AND r.contype = 'c'\n"
+							  "ORDER BY 1;",
+							  oid);
 			result = PSQLexec(buf.data, false);
 			if (!result)
 				goto error_return;
@@ -1812,10 +1806,9 @@ describeOneTableDetails(const char *schemaname,
 				for (i = 0; i < tuples; i++)
 				{
 					/* untranslated contraint name and def */
-					printfPQExpBuffer(&buf, "    \"%s\"%s%s",
+					printfPQExpBuffer(&buf, "    \"%s\" %s",
 									  PQgetvalue(result, i, 0),
-									  (strcmp(PQgetvalue(result, i, 1), "t") == 0) ? " (ONLY) ":" ",
-									  PQgetvalue(result, i, 2));
+									  PQgetvalue(result, i, 1));
 
 					printTableAddFooter(&cont, buf.data);
 				}
@@ -2371,6 +2364,8 @@ describeRoles(const char *pattern, bool verbose)
 	const char	align = 'l';
 	char	  **attr;
 
+	myopt.default_footer = false;
+
 	initPQExpBuffer(&buf);
 
 	if (pset.sversion >= 80100)
@@ -2378,7 +2373,7 @@ describeRoles(const char *pattern, bool verbose)
 		printfPQExpBuffer(&buf,
 						  "SELECT r.rolname, r.rolsuper, r.rolinherit,\n"
 						  "  r.rolcreaterole, r.rolcreatedb, r.rolcanlogin,\n"
-						  "  r.rolconnlimit,\n"
+						  "  r.rolconnlimit, r.rolvaliduntil,\n"
 						  "  ARRAY(SELECT b.rolname\n"
 						  "        FROM pg_catalog.pg_auth_members m\n"
 				 "        JOIN pg_catalog.pg_roles b ON (m.roleid = b.oid)\n"
@@ -2406,7 +2401,8 @@ describeRoles(const char *pattern, bool verbose)
 						  "  u.usesuper AS rolsuper,\n"
 						  "  true AS rolinherit, false AS rolcreaterole,\n"
 					 "  u.usecreatedb AS rolcreatedb, true AS rolcanlogin,\n"
-						  "  -1 AS rolconnlimit,\n"
+						  "  -1 AS rolconnlimit,"
+						  "  u.valuntil as rolvaliduntil,\n"
 						  "  ARRAY(SELECT g.groname FROM pg_catalog.pg_group g WHERE u.usesysid = ANY(g.grolist)) as memberof"
 						  "\nFROM pg_catalog.pg_user u\n");
 
@@ -2453,7 +2449,7 @@ describeRoles(const char *pattern, bool verbose)
 			add_role_attribute(&buf, _("Cannot login"));
 
 		if (pset.sversion >= 90100)
-			if (strcmp(PQgetvalue(res, i, (verbose ? 9 : 8)), "t") == 0)
+			if (strcmp(PQgetvalue(res, i, (verbose ? 10 : 9)), "t") == 0)
 				add_role_attribute(&buf, _("Replication"));
 
 		conns = atoi(PQgetvalue(res, i, 6));
@@ -2471,14 +2467,22 @@ describeRoles(const char *pattern, bool verbose)
 								  conns);
 		}
 
+		if (strcmp(PQgetvalue(res, i, 7), "") != 0)
+		{
+			if (buf.len > 0)
+				appendPQExpBufferStr(&buf, "\n");
+			appendPQExpBufferStr(&buf, _("Password valid until "));
+			appendPQExpBufferStr(&buf, PQgetvalue(res, i, 7));
+		}
+
 		attr[i] = pg_strdup(buf.data);
 
 		printTableAddCell(&cont, attr[i], false, false);
 
-		printTableAddCell(&cont, PQgetvalue(res, i, 7), false, false);
+		printTableAddCell(&cont, PQgetvalue(res, i, 8), false, false);
 
 		if (verbose && pset.sversion >= 80200)
-			printTableAddCell(&cont, PQgetvalue(res, i, 8), false, false);
+			printTableAddCell(&cont, PQgetvalue(res, i, 9), false, false);
 	}
 	termPQExpBuffer(&buf);
 
@@ -3057,6 +3061,13 @@ listCollations(const char *pattern, bool verbose, bool showSystem)
 	printQueryOpt myopt = pset.popt;
 	static const bool translate_columns[] = {false, false, false, false, false};
 
+	if (pset.sversion < 90100)
+	{
+		fprintf(stderr, _("The server (version %d.%d) does not support collations.\n"),
+				pset.sversion / 10000, (pset.sversion / 100) % 100);
+		return true;
+	}
+
 	initPQExpBuffer(&buf);
 
 	printfPQExpBuffer(&buf,
@@ -3361,7 +3372,7 @@ describeOneTSParser(const char *oid, const char *nspname, const char *prsname)
 		sprintf(title, _("Text search parser \"%s\""), prsname);
 	myopt.title = title;
 	myopt.footers = NULL;
-	myopt.default_footer = false;
+	myopt.topt.default_footer = false;
 	myopt.translate_header = true;
 	myopt.translate_columns = translate_columns;
 
@@ -3392,7 +3403,7 @@ describeOneTSParser(const char *oid, const char *nspname, const char *prsname)
 		sprintf(title, _("Token types for parser \"%s\""), prsname);
 	myopt.title = title;
 	myopt.footers = NULL;
-	myopt.default_footer = true;
+	myopt.topt.default_footer = true;
 	myopt.translate_header = true;
 	myopt.translate_columns = NULL;
 
@@ -3724,7 +3735,7 @@ describeOneTSConfig(const char *oid, const char *nspname, const char *cfgname,
 	myopt.nullPrint = NULL;
 	myopt.title = title.data;
 	myopt.footers = NULL;
-	myopt.default_footer = false;
+	myopt.topt.default_footer = false;
 	myopt.translate_header = true;
 
 	printQuery(res, &myopt, pset.queryFout, pset.logfile);

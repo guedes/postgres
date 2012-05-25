@@ -225,6 +225,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	result = makeNode(PlannedStmt);
 
 	result->commandType = parse->commandType;
+	result->queryId = parse->queryId;
 	result->hasReturning = (parse->returningList != NIL);
 	result->hasModifyingCTE = parse->hasModifyingCTE;
 	result->canSetTag = parse->canSetTag;
@@ -233,7 +234,6 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	result->rtable = glob->finalrtable;
 	result->resultRelations = glob->resultRelations;
 	result->utilityStmt = parse->utilityStmt;
-	result->intoClause = parse->intoClause;
 	result->subplans = glob->subplans;
 	result->rewindPlanIDs = glob->rewindPlanIDs;
 	result->rowMarks = glob->finalrowmarks;
@@ -529,22 +529,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 			List	   *rowMarks;
 
 			/*
-			 * Deal with the RETURNING clause if any.  It's convenient to pass
-			 * the returningList through setrefs.c now rather than at top
-			 * level (if we waited, handling inherited UPDATE/DELETE would be
-			 * much harder).
+			 * Set up the RETURNING list-of-lists, if needed.
 			 */
 			if (parse->returningList)
-			{
-				List	   *rlist;
-
-				Assert(parse->resultRelation);
-				rlist = set_returning_clause_references(root,
-														parse->returningList,
-														plan,
-													  parse->resultRelation);
-				returningLists = list_make1(rlist);
-			}
+				returningLists = list_make1(parse->returningList);
 			else
 				returningLists = NIL;
 
@@ -889,15 +877,8 @@ inheritance_planner(PlannerInfo *root)
 
 		/* Build list of per-relation RETURNING targetlists */
 		if (parse->returningList)
-		{
-			List	   *rlist;
-
-			rlist = set_returning_clause_references(&subroot,
-												subroot.parse->returningList,
-													subplan,
-													appinfo->child_relid);
-			returningLists = lappend(returningLists, rlist);
-		}
+			returningLists = lappend(returningLists,
+									 subroot.parse->returningList);
 	}
 
 	/* Mark result as unordered (probably unnecessary) */
@@ -3288,7 +3269,7 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	comparisonCost = 2.0 * (indexExprCost.startup + indexExprCost.per_tuple);
 
 	/* Estimate the cost of seq scan + sort */
-	seqScanPath = create_seqscan_path(root, rel);
+	seqScanPath = create_seqscan_path(root, rel, NULL);
 	cost_sort(&seqScanAndSortPath, root, NIL,
 			  seqScanPath->total_cost, rel->tuples, rel->width,
 			  comparisonCost, maintenance_work_mem, -1.0);

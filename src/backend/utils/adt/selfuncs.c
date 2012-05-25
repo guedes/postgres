@@ -3182,8 +3182,13 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows)
 	double		numdistinct;
 	ListCell   *l;
 
-	/* We should not be called unless query has GROUP BY (or DISTINCT) */
-	Assert(groupExprs != NIL);
+	/*
+	 * If no grouping columns, there's exactly one group.  (This can't happen
+	 * for normal cases with GROUP BY or DISTINCT, but it is possible for
+	 * corner cases with set operations.)
+	 */
+	if (groupExprs == NIL)
+		return 1.0;
 
 	/*
 	 * Count groups derived from boolean grouping expressions.	For other
@@ -3874,7 +3879,7 @@ convert_string_datum(Datum value, Oid typid)
 	{
 		char	   *xfrmstr;
 		size_t		xfrmlen;
-		size_t		xfrmlen2;
+		size_t		xfrmlen2 PG_USED_FOR_ASSERTS_ONLY;
 
 		/*
 		 * Note: originally we guessed at a suitable output buffer size, and
@@ -6408,7 +6413,7 @@ btcostestimate(PG_FUNCTION_ARGS)
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lcc);
 		Expr	   *clause;
 		Node	   *leftop,
-				   *rightop;
+				   *rightop PG_USED_FOR_ASSERTS_ONLY;
 		Oid			clause_op;
 		int			op_strategy;
 		bool		is_null_op = false;

@@ -22,6 +22,10 @@
 #include "parser/keywords.h"
 
 
+/* Globals from keywords.c */
+extern const ScanKeyword FEScanKeywords[];
+extern const int NumFEScanKeywords;
+
 /* Globals exported by this file */
 int			quote_all_identifiers = 0;
 const char *progname = NULL;
@@ -49,6 +53,7 @@ static void AddAcl(PQExpBuffer aclbuf, const char *keyword,
 #ifdef WIN32
 static bool parallel_init_done = false;
 static DWORD tls_index;
+static DWORD mainThreadId;
 #endif
 
 void
@@ -59,6 +64,7 @@ init_parallel_dump_utils(void)
 	{
 		tls_index = TlsAlloc();
 		parallel_init_done = true;
+		mainThreadId = GetCurrentThreadId();
 	}
 #endif
 }
@@ -148,8 +154,8 @@ fmtId(const char *rawid)
 		 * that's fine, since we already know we have all-lower-case.
 		 */
 		const ScanKeyword *keyword = ScanKeywordLookup(rawid,
-													   ScanKeywords,
-													   NumScanKeywords);
+													   FEScanKeywords,
+													   NumFEScanKeywords);
 
 		if (keyword != NULL && keyword->category != UNRESERVED_KEYWORD)
 			need_quotes = true;
@@ -1313,12 +1319,23 @@ on_exit_nicely(on_exit_nicely_callback function, void *arg)
 	on_exit_nicely_index++;
 }
 
-/* Run accumulated on_exit_nicely callbacks and then exit quietly. */
+/*
+ * Run accumulated on_exit_nicely callbacks in reverse order and then exit
+ * quietly.  This needs to be thread-safe.
+ */
 void
 exit_nicely(int code)
 {
-	while (--on_exit_nicely_index >= 0)
-		(*on_exit_nicely_list[on_exit_nicely_index].function)(code,
-			on_exit_nicely_list[on_exit_nicely_index].arg);
+	int		i;
+
+	for (i = on_exit_nicely_index - 1; i >= 0; i--)
+		(*on_exit_nicely_list[i].function)(code,
+			on_exit_nicely_list[i].arg);
+
+#ifdef WIN32
+	if (parallel_init_done && GetCurrentThreadId() != mainThreadId)
+		ExitThread(code);
+#endif
+
 	exit(code);
 }

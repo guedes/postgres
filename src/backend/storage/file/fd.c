@@ -103,7 +103,7 @@ int			max_files_per_process = 1000;
  * Note: the value of max_files_per_process is taken into account while
  * setting this variable, and so need not be tested separately.
  */
-static int	max_safe_fds = 32;	/* default if not changed */
+int			max_safe_fds = 32;	/* default if not changed */
 
 
 /* Debugging.... */
@@ -685,7 +685,7 @@ LruInsert(File file)
 		/* seek to the right position */
 		if (vfdP->seekPos != (off_t) 0)
 		{
-			off_t		returnValue;
+			off_t		returnValue PG_USED_FOR_ASSERTS_ONLY;
 
 			returnValue = lseek(vfdP->fd, vfdP->seekPos, SEEK_SET);
 			Assert(returnValue != (off_t) -1);

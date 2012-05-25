@@ -84,7 +84,7 @@ typedef uint32 AclMode;			/* a bitmask of privilege bits */
 
 /*
  * Query -
- *	  Parse analysis turns all statements into a Query tree (via transformStmt)
+ *	  Parse analysis turns all statements into a Query tree
  *	  for further processing by the rewriter and planner.
  *
  *	  Utility statements (i.e. non-optimizable statements) have the
@@ -103,6 +103,8 @@ typedef struct Query
 
 	QuerySource querySource;	/* where did I come from? */
 
+	uint32		queryId;		/* query identifier (can be set by plugins) */
+
 	bool		canSetTag;		/* do I set the command result tag? */
 
 	Node	   *utilityStmt;	/* non-null if this is DECLARE CURSOR or a
@@ -110,8 +112,6 @@ typedef struct Query
 
 	int			resultRelation; /* rtable index of target relation for
 								 * INSERT/UPDATE/DELETE; 0 for SELECT */
-
-	IntoClause *intoClause;		/* target for SELECT INTO / CREATE TABLE AS */
 
 	bool		hasAggs;		/* has aggregates in tlist or havingQual */
 	bool		hasWindowFuncs; /* has window functions in tlist */
@@ -1009,7 +1009,7 @@ typedef struct SelectStmt
 	 */
 	List	   *distinctClause; /* NULL, list of DISTINCT ON exprs, or
 								 * lcons(NIL,NIL) for all (SELECT DISTINCT) */
-	IntoClause *intoClause;		/* target for SELECT INTO / CREATE TABLE AS */
+	IntoClause *intoClause;		/* target for SELECT INTO */
 	List	   *targetList;		/* the target list (of ResTarget) */
 	List	   *fromClause;		/* the FROM clause */
 	Node	   *whereClause;	/* WHERE qualification */
@@ -1528,6 +1528,7 @@ typedef struct Constraint
 	int			location;		/* token location, or -1 if unknown */
 
 	/* Fields used for constraints with expressions (CHECK and DEFAULT): */
+	bool		is_no_inherit;	/* is constraint non-inheritable? */
 	Node	   *raw_expr;		/* expr, as untransformed parse tree */
 	char	   *cooked_expr;	/* expr, as nodeToString representation */
 
@@ -1909,6 +1910,7 @@ typedef struct DropStmt
 	ObjectType	removeType;		/* object type */
 	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
 	bool		missing_ok;		/* skip error if object is missing? */
+	bool		concurrent;		/* drop index concurrently? */
 } DropStmt;
 
 /* ----------------------
@@ -2396,6 +2398,25 @@ typedef struct ExplainStmt
 } ExplainStmt;
 
 /* ----------------------
+ *		CREATE TABLE AS Statement (a/k/a SELECT INTO)
+ *
+ * A query written as CREATE TABLE AS will produce this node type natively.
+ * A query written as SELECT ... INTO will be transformed to this form during
+ * parse analysis.
+ *
+ * The "query" field is handled similarly to EXPLAIN, though note that it
+ * can be a SELECT or an EXECUTE, but not other DML statements.
+ * ----------------------
+ */
+typedef struct CreateTableAsStmt
+{
+	NodeTag		type;
+	Node	   *query;			/* the query (see comments above) */
+	IntoClause *into;			/* destination table */
+	bool		is_select_into;	/* it was written as SELECT INTO */
+} CreateTableAsStmt;
+
+/* ----------------------
  * Checkpoint Statement
  * ----------------------
  */
@@ -2509,7 +2530,6 @@ typedef struct ExecuteStmt
 {
 	NodeTag		type;
 	char	   *name;			/* The name of the plan to execute */
-	IntoClause *into;			/* Optional table to store results in */
 	List	   *params;			/* Values to assign to parameters */
 } ExecuteStmt;
 

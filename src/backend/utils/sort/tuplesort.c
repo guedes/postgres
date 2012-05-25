@@ -345,6 +345,12 @@ struct Tuplesortstate
 	SortSupport	sortKeys;		/* array of length nKeys */
 
 	/*
+	 * This variable is shared by the single-key MinimalTuple case and the
+	 * Datum case (which both use qsort_ssup()).  Otherwise it's NULL.
+	 */
+	SortSupport	onlyKey;
+
+	/*
 	 * These variables are specific to the CLUSTER case; they are set by
 	 * tuplesort_begin_cluster.  Note CLUSTER also uses tupDesc and
 	 * indexScanKey.
@@ -364,9 +370,6 @@ struct Tuplesortstate
 
 	/* These are specific to the index_hash subcase: */
 	uint32		hash_mask;		/* mask for sortable part of hash code */
-
-	/* This is initialized when, and only when, there's just one key. */
-	SortSupport	onlyKey;
 
 	/*
 	 * These variables are specific to the Datum case; they are set by
@@ -497,7 +500,11 @@ static void reversedirection_datum(Tuplesortstate *state);
 static void free_sort_tuple(Tuplesortstate *state, SortTuple *stup);
 
 /*
- * Special version of qsort, just for SortTuple objects.
+ * Special versions of qsort just for SortTuple objects.  qsort_tuple() sorts
+ * any variant of SortTuples, using the appropriate comparetup function.
+ * qsort_ssup() is specialized for the case where the comparetup function
+ * reduces to ApplySortComparator(), that is single-key MinimalTuple sorts
+ * and Datum sorts.
  */
 #include "qsort_tuple.c"
 
@@ -1168,6 +1175,7 @@ puttuple_common(Tuplesortstate *state, SortTuple *tuple)
 			{
 				/* new tuple <= top of the heap, so we can discard it */
 				free_sort_tuple(state, tuple);
+				CHECK_FOR_INTERRUPTS();
 			}
 			else
 			{
@@ -1235,6 +1243,7 @@ tuplesort_performsort(Tuplesortstate *state)
 			 */
 			if (state->memtupcount > 1)
 			{
+				/* Can we use the single-key sort function? */
 				if (state->onlyKey != NULL)
 					qsort_ssup(state->memtuples, state->memtupcount,
 							   state->onlyKey);
@@ -2431,6 +2440,7 @@ make_bounded_heap(Tuplesortstate *state)
 		{
 			/* New tuple would just get thrown out, so skip it */
 			free_sort_tuple(state, &state->memtuples[i]);
+			CHECK_FOR_INTERRUPTS();
 		}
 		else
 		{
@@ -2518,6 +2528,8 @@ tuplesort_heap_insert(Tuplesortstate *state, SortTuple *tuple,
 	memtuples = state->memtuples;
 	Assert(state->memtupcount < state->memtupsize);
 
+	CHECK_FOR_INTERRUPTS();
+
 	/*
 	 * Sift-up the new entry, per Knuth 5.2.3 exercise 16. Note that Knuth is
 	 * using 1-based array indexes, not 0-based.
@@ -2549,6 +2561,9 @@ tuplesort_heap_siftup(Tuplesortstate *state, bool checkIndex)
 
 	if (--state->memtupcount <= 0)
 		return;
+
+	CHECK_FOR_INTERRUPTS();
+
 	n = state->memtupcount;
 	tuple = &memtuples[n];		/* tuple that must be reinserted */
 	i = 0;						/* i is where the "hole" is */
@@ -3054,7 +3069,6 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 	 * they *must* get compared at some stage of the sort --- otherwise the
 	 * sort algorithm wouldn't have checked whether one must appear before the
 	 * other.
-	 *
 	 */
 	if (state->enforceUnique && !equal_hasnull)
 	{
@@ -3236,9 +3250,9 @@ reversedirection_index_hash(Tuplesortstate *state)
 static int
 comparetup_datum(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
 {
-	/* Not currently needed */
-	elog(ERROR, "comparetup_datum() should not be called");
-	return 0;
+	return ApplySortComparator(a->datum1, a->isnull1,
+							   b->datum1, b->isnull1,
+							   state->onlyKey);
 }
 
 static void

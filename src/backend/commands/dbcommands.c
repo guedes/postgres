@@ -123,6 +123,7 @@ createdb(const CreatedbStmt *stmt)
 	const char *dbtemplate = NULL;
 	char	   *dbcollate = NULL;
 	char	   *dbctype = NULL;
+	char	   *canonname;
 	int			encoding = -1;
 	int			dbconnlimit = -1;
 	int			notherbackends;
@@ -318,15 +319,17 @@ createdb(const CreatedbStmt *stmt)
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("invalid server encoding %d", encoding)));
 
-	/* Check that the chosen locales are valid */
-	if (!check_locale(LC_COLLATE, dbcollate))
+	/* Check that the chosen locales are valid, and get canonical spellings */
+	if (!check_locale(LC_COLLATE, dbcollate, &canonname))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("invalid locale name %s", dbcollate)));
-	if (!check_locale(LC_CTYPE, dbctype))
+				 errmsg("invalid locale name: \"%s\"", dbcollate)));
+	dbcollate = canonname;
+	if (!check_locale(LC_CTYPE, dbctype, &canonname))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("invalid locale name %s", dbctype)));
+				 errmsg("invalid locale name: \"%s\"", dbctype)));
+	dbctype = canonname;
 
 	check_encoding_locale_matches(encoding, dbcollate, dbctype);
 
@@ -689,10 +692,10 @@ check_encoding_locale_matches(int encoding, const char *collate, const char *cty
 		  (encoding == PG_SQL_ASCII && superuser())))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("encoding %s does not match locale %s",
+				 errmsg("encoding \"%s\" does not match locale \"%s\"",
 						pg_encoding_to_char(encoding),
 						ctype),
-			   errdetail("The chosen LC_CTYPE setting requires encoding %s.",
+			   errdetail("The chosen LC_CTYPE setting requires encoding \"%s\".",
 						 pg_encoding_to_char(ctype_encoding))));
 
 	if (!(collate_encoding == encoding ||
@@ -704,10 +707,10 @@ check_encoding_locale_matches(int encoding, const char *collate, const char *cty
 		  (encoding == PG_SQL_ASCII && superuser())))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("encoding %s does not match locale %s",
+				 errmsg("encoding \"%s\" does not match locale \"%s\"",
 						pg_encoding_to_char(encoding),
 						collate),
-			 errdetail("The chosen LC_COLLATE setting requires encoding %s.",
+			 errdetail("The chosen LC_COLLATE setting requires encoding \"%s\".",
 					   pg_encoding_to_char(collate_encoding))));
 }
 

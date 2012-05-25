@@ -29,6 +29,7 @@
 #include "commands/collationcmds.h"
 #include "commands/conversioncmds.h"
 #include "commands/copy.h"
+#include "commands/createas.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/discard.h"
@@ -127,9 +128,7 @@ CommandIsReadOnly(Node *parsetree)
 		switch (stmt->commandType)
 		{
 			case CMD_SELECT:
-				if (stmt->intoClause != NULL)
-					return false;		/* SELECT INTO */
-				else if (stmt->rowMarks != NIL)
+				if (stmt->rowMarks != NIL)
 					return false;		/* SELECT FOR UPDATE/SHARE */
 				else if (stmt->hasModifyingCTE)
 					return false;		/* data-modifying CTE */
@@ -198,6 +197,7 @@ check_xact_readonly(Node *parsetree)
 		case T_CreateSchemaStmt:
 		case T_CreateSeqStmt:
 		case T_CreateStmt:
+		case T_CreateTableAsStmt:
 		case T_CreateTableSpaceStmt:
 		case T_CreateTrigStmt:
 		case T_CompositeTypeStmt:
@@ -631,10 +631,15 @@ standard_ProcessUtility(Node *parsetree,
 		case T_DropStmt:
 			switch (((DropStmt *) parsetree)->removeType)
 			{
+				case OBJECT_INDEX:
+					if (((DropStmt *) parsetree)->concurrent)
+						PreventTransactionChain(isTopLevel,
+											"DROP INDEX CONCURRENTLY");
+					/* fall through */
+
 				case OBJECT_TABLE:
 				case OBJECT_SEQUENCE:
 				case OBJECT_VIEW:
-				case OBJECT_INDEX:
 				case OBJECT_FOREIGN_TABLE:
 					RemoveRelations((DropStmt *) parsetree);
 					break;
@@ -673,7 +678,8 @@ standard_ProcessUtility(Node *parsetree,
 			break;
 
 		case T_ExecuteStmt:
-			ExecuteQuery((ExecuteStmt *) parsetree, queryString, params,
+			ExecuteQuery((ExecuteStmt *) parsetree, NULL,
+						 queryString, params,
 						 dest, completionTag);
 			break;
 
@@ -1036,6 +1042,11 @@ standard_ProcessUtility(Node *parsetree,
 			ExplainQuery((ExplainStmt *) parsetree, queryString, params, dest);
 			break;
 
+		case T_CreateTableAsStmt:
+			ExecCreateTableAs((CreateTableAsStmt *) parsetree,
+							  queryString, params, completionTag);
+			break;
+
 		case T_VariableSetStmt:
 			ExecSetVariableStmt((VariableSetStmt *) parsetree);
 			break;
@@ -1230,8 +1241,6 @@ UtilityReturnsTuples(Node *parsetree)
 				ExecuteStmt *stmt = (ExecuteStmt *) parsetree;
 				PreparedStatement *entry;
 
-				if (stmt->into)
-					return false;
 				entry = FetchPreparedStatement(stmt->name, false);
 				if (!entry)
 					return false;		/* not our business to raise error */
@@ -1282,8 +1291,6 @@ UtilityTupleDescriptor(Node *parsetree)
 				ExecuteStmt *stmt = (ExecuteStmt *) parsetree;
 				PreparedStatement *entry;
 
-				if (stmt->into)
-					return NULL;
 				entry = FetchPreparedStatement(stmt->name, false);
 				if (!entry)
 					return NULL;	/* not our business to raise error */
@@ -1317,9 +1324,8 @@ QueryReturnsTuples(Query *parsetree)
 	switch (parsetree->commandType)
 	{
 		case CMD_SELECT:
-			/* returns tuples ... unless it's DECLARE CURSOR or SELECT INTO */
-			if (parsetree->utilityStmt == NULL &&
-				parsetree->intoClause == NULL)
+			/* returns tuples ... unless it's DECLARE CURSOR */
+			if (parsetree->utilityStmt == NULL)
 				return true;
 			break;
 		case CMD_INSERT:
@@ -1339,6 +1345,37 @@ QueryReturnsTuples(Query *parsetree)
 	return false;				/* default */
 }
 #endif
+
+
+/*
+ * UtilityContainsQuery
+ *		Return the contained Query, or NULL if there is none
+ *
+ * Certain utility statements, such as EXPLAIN, contain a Query.
+ * This function encapsulates knowledge of exactly which ones do.
+ * We assume it is invoked only on already-parse-analyzed statements
+ * (else the contained parsetree isn't a Query yet).
+ */
+Query *
+UtilityContainsQuery(Node *parsetree)
+{
+	switch (nodeTag(parsetree))
+	{
+		case T_ExplainStmt:
+			Assert(IsA(((ExplainStmt *) parsetree)->query, Query));
+			return (Query *) ((ExplainStmt *) parsetree)->query;
+
+		case T_CreateTableAsStmt:
+			/* might or might not contain a Query ... */
+			if (IsA(((CreateTableAsStmt *) parsetree)->query, Query))
+				return (Query *) ((CreateTableAsStmt *) parsetree)->query;
+			Assert(IsA(((CreateTableAsStmt *) parsetree)->query, ExecuteStmt));
+			return NULL;
+
+		default:
+			return NULL;
+	}
+}
 
 
 /*
@@ -1907,6 +1944,13 @@ CreateCommandTag(Node *parsetree)
 			tag = "EXPLAIN";
 			break;
 
+		case T_CreateTableAsStmt:
+			if (((CreateTableAsStmt *) parsetree)->is_select_into)
+				tag = "SELECT INTO";
+			else
+				tag = "CREATE TABLE AS";
+			break;
+
 		case T_VariableSetStmt:
 			switch (((VariableSetStmt *) parsetree)->kind)
 			{
@@ -2060,8 +2104,6 @@ CreateCommandTag(Node *parsetree)
 							Assert(IsA(stmt->utilityStmt, DeclareCursorStmt));
 							tag = "DECLARE CURSOR";
 						}
-						else if (stmt->intoClause != NULL)
-							tag = "SELECT INTO";
 						else if (stmt->rowMarks != NIL)
 						{
 							/* not 100% but probably close enough */
@@ -2110,8 +2152,6 @@ CreateCommandTag(Node *parsetree)
 							Assert(IsA(stmt->utilityStmt, DeclareCursorStmt));
 							tag = "DECLARE CURSOR";
 						}
-						else if (stmt->intoClause != NULL)
-							tag = "SELECT INTO";
 						else if (stmt->rowMarks != NIL)
 						{
 							/* not 100% but probably close enough */
@@ -2179,7 +2219,7 @@ GetCommandLogLevel(Node *parsetree)
 
 		case T_SelectStmt:
 			if (((SelectStmt *) parsetree)->intoClause)
-				lev = LOGSTMT_DDL;		/* CREATE AS, SELECT INTO */
+				lev = LOGSTMT_DDL;		/* SELECT INTO */
 			else
 				lev = LOGSTMT_ALL;
 			break;
@@ -2429,6 +2469,10 @@ GetCommandLogLevel(Node *parsetree)
 			}
 			break;
 
+		case T_CreateTableAsStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
 		case T_VariableSetStmt:
 			lev = LOGSTMT_ALL;
 			break;
@@ -2529,10 +2573,7 @@ GetCommandLogLevel(Node *parsetree)
 				switch (stmt->commandType)
 				{
 					case CMD_SELECT:
-						if (stmt->intoClause != NULL)
-							lev = LOGSTMT_DDL;	/* CREATE AS, SELECT INTO */
-						else
-							lev = LOGSTMT_ALL;	/* SELECT or DECLARE CURSOR */
+						lev = LOGSTMT_ALL;
 						break;
 
 					case CMD_UPDATE:
@@ -2558,10 +2599,7 @@ GetCommandLogLevel(Node *parsetree)
 				switch (stmt->commandType)
 				{
 					case CMD_SELECT:
-						if (stmt->intoClause != NULL)
-							lev = LOGSTMT_DDL;	/* CREATE AS, SELECT INTO */
-						else
-							lev = LOGSTMT_ALL;	/* SELECT or DECLARE CURSOR */
+						lev = LOGSTMT_ALL;
 						break;
 
 					case CMD_UPDATE:
