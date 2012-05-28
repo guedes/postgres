@@ -142,7 +142,12 @@ get_loadable_libraries(void)
 		DbInfo	   *active_db = &old_cluster.dbarr.dbs[dbnum];
 		PGconn	   *conn = connectToServer(&old_cluster, active_db->db_name);
 
-		/* Fetch all libraries referenced in this DB */
+		/*
+		 *	Fetch all libraries referenced in this DB.  We can't exclude
+		 *	the "pg_catalog" schema because, while such functions are not
+		 *	explicitly dumped by pg_dump, they do reference implicit objects
+		 *	that pg_dump does dump, e.g. CREATE LANGUAGE plperl.
+		 */
 		ress[dbnum] = executeQueryOrDie(conn,
 										"SELECT DISTINCT probin "
 										"FROM	pg_catalog.pg_proc "
@@ -240,6 +245,12 @@ check_loadable_libraries(void)
 		 *	For this case, we could check pg_pltemplate, but that only works
 		 *	for languages, and does not help with function shared objects,
 		 *	so we just do a general fix.
+		 *
+		 *	Some systems have plpython_call_handler() that references
+		 *	"plpython" defined in the "public" schema, causing pg_dump to
+		 *	dump it an generate an error on pg_dumpall restore;  not sure
+		 *	on the cause, see:
+		 *	http://archives.postgresql.org/pgsql-hackers/2012-03/msg01101.php
 		 */
 		if (GET_MAJOR_VERSION(old_cluster.major_version) < 901 &&
 			strcmp(lib, "$libdir/plpython") == 0)
