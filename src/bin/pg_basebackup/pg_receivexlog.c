@@ -40,7 +40,7 @@
 char	   *basedir = NULL;
 int			verbose = 0;
 int			noloop = 0;
-int			standby_message_timeout = 10;		/* 10 sec = default */
+int			standby_message_timeout = 10 * 1000;		/* 10 sec = default */
 volatile bool time_to_abort = false;
 
 
@@ -52,17 +52,16 @@ static bool stop_streaming(XLogRecPtr segendpos, uint32 timeline, bool segment_f
 static void
 usage(void)
 {
-	printf(_("%s receives PostgreSQL streaming transaction logs\n\n"),
+	printf(_("%s receives PostgreSQL streaming transaction logs.\n\n"),
 		   progname);
 	printf(_("Usage:\n"));
 	printf(_("  %s [OPTION]...\n"), progname);
-	printf(_("\nOptions controlling the output:\n"));
-	printf(_("  -D, --dir=directory       receive xlog files into this directory\n"));
-	printf(_("\nGeneral options:\n"));
-	printf(_("  -n, --noloop              do not loop on connection lost\n"));
-	printf(_("  -v, --verbose             output verbose messages\n"));
-	printf(_("  -?, --help                show this help, then exit\n"));
-	printf(_("  -V, --version             output version information, then exit\n"));
+	printf(_("\nOptions:\n"));
+	printf(_("  -D, --directory=DIR      receive transaction log files into this directory\n"));
+	printf(_("  -n, --noloop             do not loop on connection lost\n"));
+	printf(_("  -v, --verbose            output verbose messages\n"));
+	printf(_("  -V, --version            output version information, then exit\n"));
+	printf(_("  -?, --help               show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
 	printf(_("  -s, --statusint=INTERVAL time between status packets sent to server (in seconds)\n"));
 	printf(_("  -h, --host=HOSTNAME      database server host or socket directory\n"));
@@ -92,7 +91,7 @@ stop_streaming(XLogRecPtr segendpos, uint32 timeline, bool segment_finished)
 /*
  * Determine starting location for streaming, based on:
  * 1. If there are existing xlog segments, start at the end of the last one
- *    that is complete (size matches XLogSegSize)
+ *	  that is complete (size matches XLogSegSize)
  * 2. If no valid xlog exists, start from the beginning of the current
  *	  WAL segment.
  */
@@ -190,9 +189,10 @@ FindStreamingStart(XLogRecPtr currentpos, uint32 currenttimeline)
 	if (high_log > 0 || high_seg > 0)
 	{
 		XLogRecPtr	high_ptr;
+
 		/*
-		 * Move the starting pointer to the start of the next segment,
-		 * since the highest one we've seen was completed.
+		 * Move the starting pointer to the start of the next segment, since
+		 * the highest one we've seen was completed.
 		 */
 		NextLogSeg(high_log, high_seg);
 
@@ -284,7 +284,6 @@ sigint_handler(int signum)
 {
 	time_to_abort = true;
 }
-
 #endif
 
 int
@@ -293,7 +292,7 @@ main(int argc, char **argv)
 	static struct option long_options[] = {
 		{"help", no_argument, NULL, '?'},
 		{"version", no_argument, NULL, 'V'},
-		{"dir", required_argument, NULL, 'D'},
+		{"directory", required_argument, NULL, 'D'},
 		{"host", required_argument, NULL, 'h'},
 		{"port", required_argument, NULL, 'p'},
 		{"username", required_argument, NULL, 'U'},
@@ -356,7 +355,7 @@ main(int argc, char **argv)
 				dbgetpassword = 1;
 				break;
 			case 's':
-				standby_message_timeout = atoi(optarg);
+				standby_message_timeout = atoi(optarg) * 1000;
 				if (standby_message_timeout < 0)
 				{
 					fprintf(stderr, _("%s: invalid status interval \"%s\"\n"),
@@ -413,9 +412,10 @@ main(int argc, char **argv)
 	{
 		StreamLog();
 		if (time_to_abort)
+
 			/*
-			 * We've been Ctrl-C'ed. That's not an error, so exit without
-			 * an errorcode.
+			 * We've been Ctrl-C'ed. That's not an error, so exit without an
+			 * errorcode.
 			 */
 			exit(0);
 		else if (noloop)

@@ -23,6 +23,7 @@
 #include "access/xlog_internal.h"
 #include "replication/walprotocol.h"
 #include "utils/datetime.h"
+#include "utils/timestamp.h"
 
 #include "receivelog.h"
 #include "streamutil.h"
@@ -51,7 +52,7 @@ open_walfile(XLogRecPtr startpoint, uint32 timeline, char *basedir, char *namebu
 {
 	int			f;
 	char		fn[MAXPGPATH];
-	struct stat	statbuf;
+	struct stat statbuf;
 	char	   *zerobuf;
 	int			bytes;
 
@@ -62,7 +63,7 @@ open_walfile(XLogRecPtr startpoint, uint32 timeline, char *basedir, char *namebu
 	f = open(fn, O_WRONLY | O_CREAT | PG_BINARY, S_IRUSR | S_IWUSR);
 	if (f == -1)
 	{
-		fprintf(stderr, _("%s: Could not open WAL segment %s: %s\n"),
+		fprintf(stderr, _("%s: could not open WAL segment %s: %s\n"),
 				progname, fn, strerror(errno));
 		return -1;
 	}
@@ -79,7 +80,7 @@ open_walfile(XLogRecPtr startpoint, uint32 timeline, char *basedir, char *namebu
 		return -1;
 	}
 	if (statbuf.st_size == XLogSegSize)
-		return f; /* File is open and ready to use */
+		return f;				/* File is open and ready to use */
 	if (statbuf.st_size != 0)
 	{
 		fprintf(stderr, _("%s: WAL segment %s is %d bytes, should be 0 or %d\n"),
@@ -146,8 +147,8 @@ close_walfile(int walfile, char *basedir, char *walname, bool segment_complete)
 	}
 
 	/*
-	 * Rename the .partial file only if we've completed writing the
-	 * whole segment or segment_complete is true.
+	 * Rename the .partial file only if we've completed writing the whole
+	 * segment or segment_complete is true.
 	 */
 	if (currpos == XLOG_SEG_SIZE || segment_complete)
 	{
@@ -193,6 +194,51 @@ localGetCurrentTimestamp(void)
 #endif
 
 	return result;
+}
+
+/*
+ * Local version of TimestampDifference(), since we are not
+ * linked with backend code.
+ */
+static void
+localTimestampDifference(TimestampTz start_time, TimestampTz stop_time,
+						 long *secs, int *microsecs)
+{
+	TimestampTz diff = stop_time - start_time;
+
+	if (diff <= 0)
+	{
+		*secs = 0;
+		*microsecs = 0;
+	}
+	else
+	{
+#ifdef HAVE_INT64_TIMESTAMP
+		*secs = (long) (diff / USECS_PER_SEC);
+		*microsecs = (int) (diff % USECS_PER_SEC);
+#else
+		*secs = (long) diff;
+		*microsecs = (int) ((diff - *secs) * 1000000.0);
+#endif
+	}
+}
+
+/*
+ * Local version of TimestampDifferenceExceeds(), since we are not
+ * linked with backend code.
+ */
+static bool
+localTimestampDifferenceExceeds(TimestampTz start_time,
+								TimestampTz stop_time,
+								int msec)
+{
+	TimestampTz diff = stop_time - start_time;
+
+#ifdef HAVE_INT64_TIMESTAMP
+	return (diff >= msec * INT64CONST(1000));
+#else
+	return (diff * 1000.0 >= msec);
+#endif
 }
 
 /*
@@ -306,7 +352,8 @@ ReceiveXlogStream(PGconn *conn, XLogRecPtr startpos, uint32 timeline, char *sysi
 		 */
 		now = localGetCurrentTimestamp();
 		if (standby_message_timeout > 0 &&
-			last_status < now - standby_message_timeout * 1000000)
+			localTimestampDifferenceExceeds(last_status, now,
+											standby_message_timeout))
 		{
 			/* Time to send feedback! */
 			char		replybuf[sizeof(StandbyReplyMessage) + 1];
@@ -345,10 +392,16 @@ ReceiveXlogStream(PGconn *conn, XLogRecPtr startpos, uint32 timeline, char *sysi
 			FD_SET(PQsocket(conn), &input_mask);
 			if (standby_message_timeout)
 			{
-				timeout.tv_sec = last_status + standby_message_timeout - now - 1;
+				TimestampTz targettime;
+
+				targettime = TimestampTzPlusMilliseconds(last_status,
+												standby_message_timeout - 1);
+				localTimestampDifference(now,
+										 targettime,
+										 &timeout.tv_sec,
+										 (int *) &timeout.tv_usec);
 				if (timeout.tv_sec <= 0)
 					timeout.tv_sec = 1; /* Always sleep at least 1 sec */
-				timeout.tv_usec = 0;
 				timeoutptr = &timeout;
 			}
 			else
@@ -366,7 +419,8 @@ ReceiveXlogStream(PGconn *conn, XLogRecPtr startpos, uint32 timeline, char *sysi
 			}
 			else if (r < 0)
 			{
-				fprintf(stderr, _("%s: select() failed: %m\n"), progname);
+				fprintf(stderr, _("%s: select() failed: %s\n"),
+						progname, strerror(errno));
 				return false;
 			}
 			/* Else there is actually data on the socket */
@@ -390,9 +444,8 @@ ReceiveXlogStream(PGconn *conn, XLogRecPtr startpos, uint32 timeline, char *sysi
 		if (copybuf[0] == 'k')
 		{
 			/*
-			 * keepalive message, sent in 9.2 and newer. We just ignore
-			 * this message completely, but need to skip past it in the
-			 * stream.
+			 * keepalive message, sent in 9.2 and newer. We just ignore this
+			 * message completely, but need to skip past it in the stream.
 			 */
 			if (r != STREAMING_KEEPALIVE_SIZE)
 			{

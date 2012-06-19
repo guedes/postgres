@@ -78,7 +78,7 @@ PostgreSQL documentation
     <variablelist>
      <varlistentry>
       <term><option>-D <replaceable class="parameter">directory</replaceable></option></term>
-      <term><option>--dir=<replaceable class="parameter">directory</replaceable></option></term>
+      <term><option>--directory=<replaceable class="parameter">directory</replaceable></option></term>
       <listitem>
        <para>
         Directory to write the output to.
@@ -129,8 +129,8 @@ PostgreSQL documentation
        <para>
         Specifies the number of seconds between status packets sent back to the
         server. This is required if replication timeout is configured on the
-        server, and allows for easier monitoring. The default value is
-        10 seconds.
+        server, and allows for easier monitoring. A value of zero disables the
+        status updates completely. The default value is 10 seconds.
        </para>
       </listitem>
      </varlistentry>
@@ -211,7 +211,7 @@ PostgreSQL documentation
    </para>
 
    <para>
-    Other, less commonly used, options are also available:
+    Other options are also available:
 
     <variablelist>
      <varlistentry>
@@ -260,7 +260,13 @@ PostgreSQL documentation
    recycle transaction log files even if the backups are not properly
    archived, since there is no command that fails. This can be worked
    around by having an <xref linkend="guc-archive-command"> that fails
-   when the file has not been properly archived yet.
+   when the file has not been properly archived yet, for example:
+<programlisting>
+archive_command = 'sleep 5 &amp;&amp; test -f /mnt/server/archivedir/%f'
+</programlisting>
+   The initial timeout is necessary because
+   <application>pg_receivexlog</application> works using asynchronous
+   replication and can therefore be slightly behind the master.
   </para>
 
  </refsect1>

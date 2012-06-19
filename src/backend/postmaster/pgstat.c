@@ -1404,16 +1404,16 @@ pgstat_ping(void)
  * pgstat_send_inquiry() -
  *
  *	Notify collector that we need fresh data.
- *	ts specifies the minimum acceptable timestamp for the stats file.
  * ----------
  */
 static void
-pgstat_send_inquiry(TimestampTz ts)
+pgstat_send_inquiry(TimestampTz clock_time, TimestampTz cutoff_time)
 {
 	PgStat_MsgInquiry msg;
 
 	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_INQUIRY);
-	msg.inquiry_time = ts;
+	msg.clock_time = clock_time;
+	msg.cutoff_time = cutoff_time;
 	pgstat_send(&msg, sizeof(msg));
 }
 
@@ -1522,7 +1522,7 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
 
 	/*
 	 * Compute the new f_total_time as the total elapsed time added to the
-	 * pre-call value of f_total_time.  This is necessary to avoid
+	 * pre-call value of f_total_time.	This is necessary to avoid
 	 * double-counting any time taken by recursive calls of myself.  (We do
 	 * not need any similar kluge for self time, since that already excludes
 	 * any recursive calls.)
@@ -2836,7 +2836,7 @@ pgstat_get_backend_current_activity(int pid, bool checkUser)
  * pgstat_get_crashed_backend_activity() -
  *
  *	Return a string representing the current activity of the backend with
- *	the specified PID.  Like the function above, but reads shared memory with
+ *	the specified PID.	Like the function above, but reads shared memory with
  *	the expectation that it may be corrupt.  On success, copy the string
  *	into the "buffer" argument and return that pointer.  On failure,
  *	return NULL.
@@ -2845,7 +2845,7 @@ pgstat_get_backend_current_activity(int pid, bool checkUser)
  *	query that crashed a backend.  In particular, no attempt is made to
  *	follow the correct concurrency protocol when accessing the
  *	BackendStatusArray.  But that's OK, in the worst case we'll return a
- *	corrupted message.  We also must take care not to trip on ereport(ERROR).
+ *	corrupted message.	We also must take care not to trip on ereport(ERROR).
  * ----------
  */
 const char *
@@ -2890,8 +2890,8 @@ pgstat_get_crashed_backend_activity(int pid, char *buffer, int buflen)
 
 			/*
 			 * Copy only ASCII-safe characters so we don't run into encoding
-			 * problems when reporting the message; and be sure not to run
-			 * off the end of memory.
+			 * problems when reporting the message; and be sure not to run off
+			 * the end of memory.
 			 */
 			ascii_safe_strlcpy(buffer, activity,
 							   Min(buflen, pgstat_track_activity_query_size));
@@ -3070,7 +3070,7 @@ PgstatCollectorMain(int argc, char *argv[])
 	 * every message; instead, do that only after a recv() fails to obtain a
 	 * message.  (This effectively means that if backends are sending us stuff
 	 * like mad, we won't notice postmaster death until things slack off a
-	 * bit; which seems fine.)  To do that, we have an inner loop that
+	 * bit; which seems fine.)	To do that, we have an inner loop that
 	 * iterates as long as recv() succeeds.  We do recognize got_SIGHUP inside
 	 * the inner loop, which means that such interrupts will get serviced but
 	 * the latch won't get cleared until next time there is a break in the
@@ -3234,13 +3234,14 @@ PgstatCollectorMain(int argc, char *argv[])
 		/* Sleep until there's something to do */
 #ifndef WIN32
 		wr = WaitLatchOrSocket(&pgStatLatch,
-							   WL_LATCH_SET | WL_POSTMASTER_DEATH | WL_SOCKET_READABLE,
+					 WL_LATCH_SET | WL_POSTMASTER_DEATH | WL_SOCKET_READABLE,
 							   pgStatSock,
 							   -1L);
 #else
+
 		/*
 		 * Windows, at least in its Windows Server 2003 R2 incarnation,
-		 * sometimes loses FD_READ events.  Waking up and retrying the recv()
+		 * sometimes loses FD_READ events.	Waking up and retrying the recv()
 		 * fixes that, so don't sleep indefinitely.  This is a crock of the
 		 * first water, but until somebody wants to debug exactly what's
 		 * happening there, this is the best we can do.  The two-second
@@ -3249,9 +3250,9 @@ PgstatCollectorMain(int argc, char *argv[])
 		 * backend_read_statsfile.
 		 */
 		wr = WaitLatchOrSocket(&pgStatLatch,
-							   WL_LATCH_SET | WL_POSTMASTER_DEATH | WL_SOCKET_READABLE | WL_TIMEOUT,
+		WL_LATCH_SET | WL_POSTMASTER_DEATH | WL_SOCKET_READABLE | WL_TIMEOUT,
 							   pgStatSock,
-							   2 * 1000L /* msec */);
+							   2 * 1000L /* msec */ );
 #endif
 
 		/*
@@ -3632,7 +3633,7 @@ pgstat_read_statsfile(Oid onlydb, bool permanent)
 
 	/*
 	 * Set the current timestamp (will be kept only in case we can't load an
-	 * existing statsfile.
+	 * existing statsfile).
 	 */
 	globalStats.stat_reset_timestamp = GetCurrentTimestamp();
 
@@ -3921,8 +3922,8 @@ pgstat_read_statsfile_timestamp(bool permanent, TimestampTz *ts)
 static void
 backend_read_statsfile(void)
 {
-	TimestampTz cur_ts;
-	TimestampTz min_ts;
+	TimestampTz min_ts = 0;
+	TimestampTz ref_ts = 0;
 	int			count;
 
 	/* already read it? */
@@ -3931,43 +3932,88 @@ backend_read_statsfile(void)
 	Assert(!pgStatRunningInCollector);
 
 	/*
-	 * We set the minimum acceptable timestamp to PGSTAT_STAT_INTERVAL msec
-	 * before now.	This indirectly ensures that the collector needn't write
-	 * the file more often than PGSTAT_STAT_INTERVAL.  In an autovacuum
-	 * worker, however, we want a lower delay to avoid using stale data, so we
-	 * use PGSTAT_RETRY_DELAY (since the number of worker is low, this
-	 * shouldn't be a problem).
-	 *
-	 * Note that we don't recompute min_ts after sleeping; so we might end up
-	 * accepting a file a bit older than PGSTAT_STAT_INTERVAL.	In practice
-	 * that shouldn't happen, though, as long as the sleep time is less than
-	 * PGSTAT_STAT_INTERVAL; and we don't want to lie to the collector about
-	 * what our cutoff time really is.
-	 */
-	cur_ts = GetCurrentTimestamp();
-	if (IsAutoVacuumWorkerProcess())
-		min_ts = TimestampTzPlusMilliseconds(cur_ts, -PGSTAT_RETRY_DELAY);
-	else
-		min_ts = TimestampTzPlusMilliseconds(cur_ts, -PGSTAT_STAT_INTERVAL);
-
-	/*
 	 * Loop until fresh enough stats file is available or we ran out of time.
 	 * The stats inquiry message is sent repeatedly in case collector drops
 	 * it; but not every single time, as that just swamps the collector.
 	 */
 	for (count = 0; count < PGSTAT_POLL_LOOP_COUNT; count++)
 	{
+		bool		ok;
 		TimestampTz file_ts = 0;
+		TimestampTz cur_ts;
 
 		CHECK_FOR_INTERRUPTS();
 
-		if (pgstat_read_statsfile_timestamp(false, &file_ts) &&
-			file_ts >= min_ts)
+		ok = pgstat_read_statsfile_timestamp(false, &file_ts);
+
+		cur_ts = GetCurrentTimestamp();
+		/* Calculate min acceptable timestamp, if we didn't already */
+		if (count == 0 || cur_ts < ref_ts)
+		{
+			/*
+			 * We set the minimum acceptable timestamp to PGSTAT_STAT_INTERVAL
+			 * msec before now.  This indirectly ensures that the collector
+			 * needn't write the file more often than PGSTAT_STAT_INTERVAL.
+			 * In an autovacuum worker, however, we want a lower delay to
+			 * avoid using stale data, so we use PGSTAT_RETRY_DELAY (since the
+			 * number of workers is low, this shouldn't be a problem).
+			 *
+			 * We don't recompute min_ts after sleeping, except in the
+			 * unlikely case that cur_ts went backwards.  So we might end up
+			 * accepting a file a bit older than PGSTAT_STAT_INTERVAL.  In
+			 * practice that shouldn't happen, though, as long as the sleep
+			 * time is less than PGSTAT_STAT_INTERVAL; and we don't want to
+			 * tell the collector that our cutoff time is less than what we'd
+			 * actually accept.
+			 */
+			ref_ts = cur_ts;
+			if (IsAutoVacuumWorkerProcess())
+				min_ts = TimestampTzPlusMilliseconds(ref_ts,
+													 -PGSTAT_RETRY_DELAY);
+			else
+				min_ts = TimestampTzPlusMilliseconds(ref_ts,
+													 -PGSTAT_STAT_INTERVAL);
+		}
+
+		/*
+		 * If the file timestamp is actually newer than cur_ts, we must have
+		 * had a clock glitch (system time went backwards) or there is clock
+		 * skew between our processor and the stats collector's processor.
+		 * Accept the file, but send an inquiry message anyway to make
+		 * pgstat_recv_inquiry do a sanity check on the collector's time.
+		 */
+		if (ok && file_ts > cur_ts)
+		{
+			/*
+			 * A small amount of clock skew between processors isn't terribly
+			 * surprising, but a large difference is worth logging.  We
+			 * arbitrarily define "large" as 1000 msec.
+			 */
+			if (file_ts >= TimestampTzPlusMilliseconds(cur_ts, 1000))
+			{
+				char	   *filetime;
+				char	   *mytime;
+
+				/* Copy because timestamptz_to_str returns a static buffer */
+				filetime = pstrdup(timestamptz_to_str(file_ts));
+				mytime = pstrdup(timestamptz_to_str(cur_ts));
+				elog(LOG, "stats collector's time %s is later than backend local time %s",
+					 filetime, mytime);
+				pfree(filetime);
+				pfree(mytime);
+			}
+
+			pgstat_send_inquiry(cur_ts, min_ts);
+			break;
+		}
+
+		/* Normal acceptance case: file is not older than cutoff time */
+		if (ok && file_ts >= min_ts)
 			break;
 
 		/* Not there or too old, so kick the collector and wait a bit */
 		if ((count % PGSTAT_INQ_LOOP_COUNT) == 0)
-			pgstat_send_inquiry(min_ts);
+			pgstat_send_inquiry(cur_ts, min_ts);
 
 		pg_usleep(PGSTAT_RETRY_DELAY * 1000L);
 	}
@@ -4035,8 +4081,46 @@ pgstat_clear_snapshot(void)
 static void
 pgstat_recv_inquiry(PgStat_MsgInquiry *msg, int len)
 {
-	if (msg->inquiry_time > last_statrequest)
-		last_statrequest = msg->inquiry_time;
+	/*
+	 * Advance last_statrequest if this requestor has a newer cutoff time
+	 * than any previous request.
+	 */
+	if (msg->cutoff_time > last_statrequest)
+		last_statrequest = msg->cutoff_time;
+
+	/*
+	 * If the requestor's local clock time is older than last_statwrite, we
+	 * should suspect a clock glitch, ie system time going backwards; though
+	 * the more likely explanation is just delayed message receipt.  It is
+	 * worth expending a GetCurrentTimestamp call to be sure, since a large
+	 * retreat in the system clock reading could otherwise cause us to neglect
+	 * to update the stats file for a long time.
+	 */
+	if (msg->clock_time < last_statwrite)
+	{
+		TimestampTz cur_ts = GetCurrentTimestamp();
+
+		if (cur_ts < last_statwrite)
+		{
+			/*
+			 * Sure enough, time went backwards.  Force a new stats file write
+			 * to get back in sync; but first, log a complaint.
+			 */
+			char	   *writetime;
+			char	   *mytime;
+
+			/* Copy because timestamptz_to_str returns a static buffer */
+			writetime = pstrdup(timestamptz_to_str(last_statwrite));
+			mytime = pstrdup(timestamptz_to_str(cur_ts));
+			elog(LOG, "last_statwrite %s is later than collector's time %s",
+				 writetime, mytime);
+			pfree(writetime);
+			pfree(mytime);
+
+			last_statrequest = cur_ts;
+			last_statwrite = last_statrequest - 1;
+		}
+	}
 }
 
 
