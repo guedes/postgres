@@ -63,6 +63,7 @@
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
+#include "utils/timeout.h"
 #include "utils/timestamp.h"
 
 
@@ -81,6 +82,10 @@ bool		am_cascading_walsender = false;		/* Am I cascading WAL to
 int			max_wal_senders = 0;	/* the maximum number of concurrent walsenders */
 int			replication_timeout = 60 * 1000;	/* maximum time to send one
 												 * WAL data message */
+/*
+ * State for WalSndWakeupRequest
+ */
+bool wake_wal_senders = false;
 
 /*
  * These variables are used similarly to openLogFile/Id/Seg/Off,
@@ -1341,7 +1346,7 @@ WalSndSignals(void)
 	pqsignal(SIGINT, SIG_IGN);	/* not used */
 	pqsignal(SIGTERM, WalSndShutdownHandler);	/* request shutdown */
 	pqsignal(SIGQUIT, WalSndQuickDieHandler);	/* hard crash time */
-	pqsignal(SIGALRM, SIG_IGN);
+	InitializeTimeouts();		/* establishes SIGALRM handler */
 	pqsignal(SIGPIPE, SIG_IGN);
 	pqsignal(SIGUSR1, WalSndXLogSendHandler);	/* request WAL sending */
 	pqsignal(SIGUSR2, WalSndLastCycleHandler);	/* request a last cycle and
@@ -1395,7 +1400,12 @@ WalSndShmemInit(void)
 	}
 }
 
-/* Wake up all walsenders */
+/*
+ * Wake up all walsenders
+ *
+ * This will be called inside critical sections, so throwing an error is not
+ * adviseable.
+ */
 void
 WalSndWakeup(void)
 {
@@ -1501,12 +1511,19 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 
 		if (walsnd->pid != 0)
 		{
-			sync_priority[i] = walsnd->sync_standby_priority;
+			/*
+			 * Treat a standby such as a pg_basebackup background process
+			 * which always returns an invalid flush location, as an
+			 * asynchronous standby.
+			 */
+			sync_priority[i] = XLogRecPtrIsInvalid(walsnd->flush) ?
+				0 : walsnd->sync_standby_priority;
 
 			if (walsnd->state == WALSNDSTATE_STREAMING &&
 				walsnd->sync_standby_priority > 0 &&
 				(priority == 0 ||
-				 priority > walsnd->sync_standby_priority))
+				 priority > walsnd->sync_standby_priority) &&
+				!XLogRecPtrIsInvalid(walsnd->flush))
 			{
 				priority = walsnd->sync_standby_priority;
 				sync_standby = i;

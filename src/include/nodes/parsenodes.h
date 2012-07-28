@@ -1113,6 +1113,7 @@ typedef enum ObjectType
 	OBJECT_CONVERSION,
 	OBJECT_DATABASE,
 	OBJECT_DOMAIN,
+	OBJECT_EVENT_TRIGGER,
 	OBJECT_EXTENSION,
 	OBJECT_FDW,
 	OBJECT_FOREIGN_SERVER,
@@ -1731,6 +1732,32 @@ typedef struct CreateTrigStmt
 } CreateTrigStmt;
 
 /* ----------------------
+ *		Create EVENT TRIGGER Statement
+ * ----------------------
+ */
+typedef struct CreateEventTrigStmt
+{
+	NodeTag		type;
+	char	   *trigname;		/* TRIGGER's name */
+	char	   *eventname;		/* event's identifier */
+	List	   *whenclause;		/* list of DefElems indicating filtering */
+	List	   *funcname;		/* qual. name of function to call */
+} CreateEventTrigStmt;
+
+/* ----------------------
+ *		Alter EVENT TRIGGER Statement
+ * ----------------------
+ */
+typedef struct AlterEventTrigStmt
+{
+	NodeTag		type;
+	char	   *trigname;		/* TRIGGER's name */
+	char        tgenabled;		/* trigger's firing configuration WRT
+								 * session_replication_role */
+} AlterEventTrigStmt;
+
+/* ----------------------
+ *		Create/Drop PROCEDURAL LANGUAGE Statements
  *		Create PROCEDURAL LANGUAGE Statements
  * ----------------------
  */
@@ -2018,10 +2045,11 @@ typedef struct FetchStmt
  *		Create Index Statement
  *
  * This represents creation of an index and/or an associated constraint.
- * If indexOid isn't InvalidOid, we are not creating an index, just a
- * UNIQUE/PKEY constraint using an existing index.	isconstraint must always
- * be true in this case, and the fields describing the index properties are
- * empty.
+ * If isconstraint is true, we should create a pg_constraint entry along
+ * with the index.  But if indexOid isn't InvalidOid, we are not creating an
+ * index, just a UNIQUE/PKEY constraint using an existing index.  isconstraint
+ * must always be true in this case, and the fields describing the index
+ * properties are empty.
  * ----------------------
  */
 typedef struct IndexStmt
@@ -2031,15 +2059,16 @@ typedef struct IndexStmt
 	RangeVar   *relation;		/* relation to build index on */
 	char	   *accessMethod;	/* name of access method (eg. btree) */
 	char	   *tableSpace;		/* tablespace, or NULL for default */
-	List	   *indexParams;	/* a list of IndexElem */
-	List	   *options;		/* options from WITH clause */
+	List	   *indexParams;	/* columns to index: a list of IndexElem */
+	List	   *options;		/* WITH clause options: a list of DefElem */
 	Node	   *whereClause;	/* qualification (partial-index predicate) */
 	List	   *excludeOpNames; /* exclusion operator names, or NIL if none */
+	char	   *idxcomment;		/* comment to apply to index, or NULL */
 	Oid			indexOid;		/* OID of an existing index, if any */
-	Oid			oldNode;		/* relfilenode of my former self */
+	Oid			oldNode;		/* relfilenode of existing storage, if any */
 	bool		unique;			/* is index unique? */
-	bool		primary;		/* is index on primary key? */
-	bool		isconstraint;	/* is it from a CONSTRAINT clause? */
+	bool		primary;		/* is index a primary key? */
+	bool		isconstraint;	/* is it for a pkey/unique constraint? */
 	bool		deferrable;		/* is the constraint DEFERRABLE? */
 	bool		initdeferred;	/* is the constraint INITIALLY DEFERRED? */
 	bool		concurrent;		/* should this be a concurrent index build? */

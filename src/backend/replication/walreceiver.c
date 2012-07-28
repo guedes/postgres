@@ -52,10 +52,8 @@
 #include "utils/resowner.h"
 #include "utils/timestamp.h"
 
-/* Global variable to indicate if this process is a walreceiver process */
-bool		am_walreceiver;
 
-/* GUC variable */
+/* GUC variables */
 int			wal_receiver_status_interval;
 bool		hot_standby_feedback;
 
@@ -73,7 +71,7 @@ walrcv_disconnect_type walrcv_disconnect = NULL;
  * corresponding the filename of recvFile, used for error messages.
  */
 static int	recvFile = -1;
-static TimeLineID	recvFileTLI = -1;
+static TimeLineID	recvFileTLI = 0;
 static XLogSegNo recvSegNo = 0;
 static uint32 recvOff = 0;
 
@@ -175,8 +173,6 @@ WalReceiverMain(void)
 
 	/* use volatile pointer to prevent code rearrangement */
 	volatile WalRcvData *walrcv = WalRcv;
-
-	am_walreceiver = true;
 
 	/*
 	 * WalRcv should be set up already (if we are a backend, we inherit this
@@ -280,6 +276,11 @@ WalReceiverMain(void)
 	EnableWalRcvImmediateExit();
 	walrcv_connect(conninfo, startpoint);
 	DisableWalRcvImmediateExit();
+
+	/* Initialize LogstreamResult, reply_message and feedback_message */
+	LogstreamResult.Write = LogstreamResult.Flush = GetXLogReplayRecPtr(NULL);
+	MemSet(&reply_message, 0, sizeof(reply_message));
+	MemSet(&feedback_message, 0, sizeof(feedback_message));
 
 	/* Loop until end-of-streaming or error */
 	for (;;)

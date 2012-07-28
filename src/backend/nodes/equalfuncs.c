@@ -1250,6 +1250,7 @@ _equalIndexStmt(const IndexStmt *a, const IndexStmt *b)
 	COMPARE_NODE_FIELD(options);
 	COMPARE_NODE_FIELD(whereClause);
 	COMPARE_NODE_FIELD(excludeOpNames);
+	COMPARE_STRING_FIELD(idxcomment);
 	COMPARE_SCALAR_FIELD(indexOid);
 	COMPARE_SCALAR_FIELD(oldNode);
 	COMPARE_SCALAR_FIELD(unique);
@@ -1787,6 +1788,26 @@ _equalCreateTrigStmt(const CreateTrigStmt *a, const CreateTrigStmt *b)
 	COMPARE_SCALAR_FIELD(deferrable);
 	COMPARE_SCALAR_FIELD(initdeferred);
 	COMPARE_NODE_FIELD(constrrel);
+
+	return true;
+}
+
+static bool
+_equalCreateEventTrigStmt(const CreateEventTrigStmt *a, const CreateEventTrigStmt *b)
+{
+	COMPARE_STRING_FIELD(trigname);
+	COMPARE_SCALAR_FIELD(eventname);
+	COMPARE_NODE_FIELD(funcname);
+	COMPARE_NODE_FIELD(whenclause);
+
+	return true;
+}
+
+static bool
+_equalAlterEventTrigStmt(const AlterEventTrigStmt *a, const AlterEventTrigStmt *b)
+{
+	COMPARE_STRING_FIELD(trigname);
+	COMPARE_SCALAR_FIELD(tgenabled);
 
 	return true;
 }
@@ -2870,6 +2891,12 @@ equal(const void *a, const void *b)
 			break;
 		case T_CreateTrigStmt:
 			retval = _equalCreateTrigStmt(a, b);
+			break;
+		case T_CreateEventTrigStmt:
+			retval = _equalCreateEventTrigStmt(a, b);
+			break;
+		case T_AlterEventTrigStmt:
+			retval = _equalAlterEventTrigStmt(a, b);
 			break;
 		case T_CreatePLangStmt:
 			retval = _equalCreatePLangStmt(a, b);

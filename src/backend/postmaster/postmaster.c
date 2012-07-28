@@ -118,6 +118,7 @@
 #include "utils/datetime.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/timeout.h"
 
 #ifdef EXEC_BACKEND
 #include "storage/spin.h"
@@ -337,6 +338,7 @@ static void reaper(SIGNAL_ARGS);
 static void sigusr1_handler(SIGNAL_ARGS);
 static void startup_die(SIGNAL_ARGS);
 static void dummy_handler(SIGNAL_ARGS);
+static void StartupPacketTimeoutHandler(void);
 static void CleanupBackend(int pid, int exitstatus);
 static void HandleChildCrash(int pid, int exitstatus, const char *procname);
 static void LogChildExit(int lev, const char *procname,
@@ -377,7 +379,9 @@ static void InitPostmasterDeathWatchHandle(void);
 #ifdef EXEC_BACKEND
 
 #ifdef WIN32
-static pid_t win32_waitpid(int *exitstatus);
+#define WNOHANG 0				/* ignored, so any integer value will do */
+
+static pid_t waitpid(pid_t pid, int *exitstatus, int options);
 static void WINAPI pgwin32_deadchild_callback(PVOID lpParameter, BOOLEAN TimerOrWaitFired);
 
 static HANDLE win32ChildQueue;
@@ -388,7 +392,7 @@ typedef struct
 	HANDLE		procHandle;
 	DWORD		procId;
 } win32_deadchild_waitinfo;
-#endif
+#endif /* WIN32 */
 
 static pid_t backend_forkexec(Port *port);
 static pid_t internal_forkexec(int argc, char *argv[], Port *port);
@@ -2268,33 +2272,13 @@ reaper(SIGNAL_ARGS)
 	int			pid;			/* process id of dead child process */
 	int			exitstatus;		/* its exit status */
 
-	/* These macros hide platform variations in getting child status */
-#ifdef HAVE_WAITPID
-	int			status;			/* child exit status */
-
-#define LOOPTEST()		((pid = waitpid(-1, &status, WNOHANG)) > 0)
-#define LOOPHEADER()	(exitstatus = status)
-#else							/* !HAVE_WAITPID */
-#ifndef WIN32
-	union wait	status;			/* child exit status */
-
-#define LOOPTEST()		((pid = wait3(&status, WNOHANG, NULL)) > 0)
-#define LOOPHEADER()	(exitstatus = status.w_status)
-#else							/* WIN32 */
-#define LOOPTEST()		((pid = win32_waitpid(&exitstatus)) > 0)
-#define LOOPHEADER()
-#endif   /* WIN32 */
-#endif   /* HAVE_WAITPID */
-
 	PG_SETMASK(&BlockSig);
 
 	ereport(DEBUG4,
 			(errmsg_internal("reaping dead processes")));
 
-	while (LOOPTEST())
+	while ((pid = waitpid(-1, &exitstatus, WNOHANG)) > 0)
 	{
-		LOOPHEADER();
-
 		/*
 		 * Check if this child was a startup process.
 		 */
@@ -3433,7 +3417,7 @@ BackendInitialize(Port *port)
 	 */
 	pqsignal(SIGTERM, startup_die);
 	pqsignal(SIGQUIT, startup_die);
-	pqsignal(SIGALRM, startup_die);
+	InitializeTimeouts();		/* establishes SIGALRM handler */
 	PG_SETMASK(&StartupBlockSig);
 
 	/*
@@ -3487,9 +3471,18 @@ BackendInitialize(Port *port)
 	 * time delay, so that a broken client can't hog a connection
 	 * indefinitely.  PreAuthDelay and any DNS interactions above don't count
 	 * against the time limit.
+	 *
+	 * Note: AuthenticationTimeout is applied here while waiting for the
+	 * startup packet, and then again in InitPostgres for the duration of any
+	 * authentication operations.  So a hostile client could tie up the
+	 * process for nearly twice AuthenticationTimeout before we kick him off.
+	 *
+	 * Note: because PostgresMain will call InitializeTimeouts again, the
+	 * registration of STARTUP_PACKET_TIMEOUT will be lost.  This is okay
+	 * since we never use it again after this function.
 	 */
-	if (!enable_sig_alarm(AuthenticationTimeout * 1000, false))
-		elog(FATAL, "could not set timer for startup packet timeout");
+	RegisterTimeout(STARTUP_PACKET_TIMEOUT, StartupPacketTimeoutHandler);
+	enable_timeout_after(STARTUP_PACKET_TIMEOUT, AuthenticationTimeout * 1000);
 
 	/*
 	 * Receive the startup packet (which might turn out to be a cancel request
@@ -3526,8 +3519,7 @@ BackendInitialize(Port *port)
 	/*
 	 * Disable the timeout, and prevent SIGTERM/SIGQUIT again.
 	 */
-	if (!disable_sig_alarm(false))
-		elog(FATAL, "could not disable timer for startup packet timeout");
+	disable_timeout(STARTUP_PACKET_TIMEOUT, false);
 	PG_SETMASK(&BlockSig);
 }
 
@@ -4329,8 +4321,8 @@ sigusr1_handler(SIGNAL_ARGS)
 }
 
 /*
- * Timeout or shutdown signal from postmaster while processing startup packet.
- * Cleanup and exit(1).
+ * SIGTERM or SIGQUIT while processing startup packet.
+ * Clean up and exit(1).
  *
  * XXX: possible future improvement: try to send a message indicating
  * why we are disconnecting.  Problem is to be sure we don't block while
@@ -4356,6 +4348,17 @@ static void
 dummy_handler(SIGNAL_ARGS)
 {
 }
+
+/*
+ * Timeout while processing startup packet.
+ * As for startup_die(), we clean up and exit(1).
+ */
+static void
+StartupPacketTimeoutHandler(void)
+{
+	proc_exit(1);
+}
+
 
 /*
  * RandomSalt
@@ -5045,8 +5048,12 @@ ShmemBackendArrayRemove(Backend *bn)
 
 #ifdef WIN32
 
+/*
+ * Subset implementation of waitpid() for Windows.  We assume pid is -1
+ * (that is, check all child processes) and options is WNOHANG (don't wait).
+ */
 static pid_t
-win32_waitpid(int *exitstatus)
+waitpid(pid_t pid, int *exitstatus, int options)
 {
 	DWORD		dwd;
 	ULONG_PTR	key;
