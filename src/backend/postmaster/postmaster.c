@@ -157,7 +157,9 @@ static Backend *ShmemBackendArray;
 
 /* The socket number we are listening for connections on */
 int			PostPortNumber;
-char	   *UnixSocketDir;
+/* The directory names for Unix socket(s) */
+char	   *Unix_socket_directories;
+/* The TCP listen address(es) */
 char	   *ListenAddresses;
 
 /*
@@ -441,6 +443,7 @@ typedef struct
 	pid_t		PostmasterPid;
 	TimestampTz PgStartTime;
 	TimestampTz PgReloadTime;
+	pg_time_t	first_syslogger_file_time;
 	bool		redirection_done;
 	bool		IsBinaryUpgrade;
 	int			max_safe_fds;
@@ -611,7 +614,7 @@ PostmasterMain(int argc, char *argv[])
 				break;
 
 			case 'k':
-				SetConfigOption("unix_socket_directory", optarg, PGC_POSTMASTER, PGC_S_ARGV);
+				SetConfigOption("unix_socket_directories", optarg, PGC_POSTMASTER, PGC_S_ARGV);
 				break;
 
 			case 'l':
@@ -762,9 +765,14 @@ PostmasterMain(int argc, char *argv[])
 	/*
 	 * Check for invalid combinations of GUC settings.
 	 */
-	if (ReservedBackends >= MaxBackends)
+	if (ReservedBackends >= MaxConnections)
 	{
 		write_stderr("%s: superuser_reserved_connections must be less than max_connections\n", progname);
+		ExitPostmaster(1);
+	}
+	if (max_wal_senders >= MaxConnections)
+	{
+		write_stderr("%s: max_wal_senders must be less than max_connections\n", progname);
 		ExitPostmaster(1);
 	}
 	if (XLogArchiveMode && wal_level == WAL_LEVEL_MINIMAL)
@@ -817,7 +825,7 @@ PostmasterMain(int argc, char *argv[])
 	 * data directory interlock is more reliable than the socket-file
 	 * interlock (thanks to whoever decided to put socket files in /tmp :-().
 	 * For the same reason, it's best to grab the TCP socket(s) before the
-	 * Unix socket.
+	 * Unix socket(s).
 	 */
 	CreateDataDirLockFile(true);
 
@@ -850,7 +858,7 @@ PostmasterMain(int argc, char *argv[])
 		/* Need a modifiable copy of ListenAddresses */
 		rawstring = pstrdup(ListenAddresses);
 
-		/* Parse string into list of identifiers */
+		/* Parse string into list of hostnames */
 		if (!SplitIdentifierString(rawstring, ',', &elemlist))
 		{
 			/* syntax error in list */
@@ -866,12 +874,12 @@ PostmasterMain(int argc, char *argv[])
 			if (strcmp(curhost, "*") == 0)
 				status = StreamServerPort(AF_UNSPEC, NULL,
 										  (unsigned short) PostPortNumber,
-										  UnixSocketDir,
+										  NULL,
 										  ListenSocket, MAXLISTEN);
 			else
 				status = StreamServerPort(AF_UNSPEC, curhost,
 										  (unsigned short) PostPortNumber,
-										  UnixSocketDir,
+										  NULL,
 										  ListenSocket, MAXLISTEN);
 
 			if (status == STATUS_OK)
@@ -890,7 +898,7 @@ PostmasterMain(int argc, char *argv[])
 								curhost)));
 		}
 
-		if (!success && list_length(elemlist))
+		if (!success && elemlist != NIL)
 			ereport(FATAL,
 					(errmsg("could not create any TCP/IP sockets")));
 
@@ -937,13 +945,54 @@ PostmasterMain(int argc, char *argv[])
 #endif
 
 #ifdef HAVE_UNIX_SOCKETS
-	status = StreamServerPort(AF_UNIX, NULL,
-							  (unsigned short) PostPortNumber,
-							  UnixSocketDir,
-							  ListenSocket, MAXLISTEN);
-	if (status != STATUS_OK)
-		ereport(WARNING,
-				(errmsg("could not create Unix-domain socket")));
+	if (Unix_socket_directories)
+	{
+		char	   *rawstring;
+		List	   *elemlist;
+		ListCell   *l;
+		int			success = 0;
+
+		/* Need a modifiable copy of Unix_socket_directories */
+		rawstring = pstrdup(Unix_socket_directories);
+
+		/* Parse string into list of directories */
+		if (!SplitDirectoriesString(rawstring, ',', &elemlist))
+		{
+			/* syntax error in list */
+			ereport(FATAL,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid list syntax for \"unix_socket_directories\"")));
+		}
+
+		foreach(l, elemlist)
+		{
+			char	   *socketdir = (char *) lfirst(l);
+
+			status = StreamServerPort(AF_UNIX, NULL,
+									  (unsigned short) PostPortNumber,
+									  socketdir,
+									  ListenSocket, MAXLISTEN);
+
+			if (status == STATUS_OK)
+			{
+				success++;
+				/* record the first successful Unix socket in lockfile */
+				if (success == 1)
+					AddToDataDirLockFile(LOCK_FILE_LINE_SOCKET_DIR, socketdir);
+			}
+			else
+				ereport(WARNING,
+						(errmsg("could not create Unix-domain socket in directory \"%s\"",
+								socketdir)));
+		}
+
+		if (!success && elemlist != NIL)
+			ereport(FATAL,
+					(errmsg("could not create any Unix-domain sockets")));
+
+		list_free_deep(elemlist);
+		pfree(rawstring);
+	}
 #endif
 
 	/*
@@ -1433,15 +1482,15 @@ ServerLoop(void)
 		}
 
 		/*
-		 * Touch the socket and lock file every 58 minutes, to ensure that
+		 * Touch Unix socket and lock files every 58 minutes, to ensure that
 		 * they are not removed by overzealous /tmp-cleaning tasks.  We assume
 		 * no one runs cleaners with cutoff times of less than an hour ...
 		 */
 		now = time(NULL);
 		if (now - last_touch_time >= 58 * SECS_PER_MINUTE)
 		{
-			TouchSocketFile();
-			TouchSocketLockFile();
+			TouchSocketFiles();
+			TouchSocketLockFiles();
 			last_touch_time = now;
 		}
 	}
@@ -4701,7 +4750,7 @@ MaxLivePostmasterChildren(void)
 
 /*
  * The following need to be available to the save/restore_backend_variables
- * functions
+ * functions.  They are marked NON_EXEC_STATIC in their home modules.
  */
 extern slock_t *ShmemLock;
 extern LWLock *LWLockArray;
@@ -4709,6 +4758,7 @@ extern slock_t *ProcStructLock;
 extern PGPROC *AuxiliaryProcs;
 extern PMSignalData *PMSignalState;
 extern pgsocket pgStatSock;
+extern pg_time_t first_syslogger_file_time;
 
 #ifndef WIN32
 #define write_inheritable_socket(dest, src, childpid) ((*(dest) = (src)), true)
@@ -4761,6 +4811,7 @@ save_backend_variables(BackendParameters *param, Port *port,
 	param->PostmasterPid = PostmasterPid;
 	param->PgStartTime = PgStartTime;
 	param->PgReloadTime = PgReloadTime;
+	param->first_syslogger_file_time = first_syslogger_file_time;
 
 	param->redirection_done = redirection_done;
 	param->IsBinaryUpgrade = IsBinaryUpgrade;
@@ -4985,6 +5036,7 @@ restore_backend_variables(BackendParameters *param, Port *port)
 	PostmasterPid = param->PostmasterPid;
 	PgStartTime = param->PgStartTime;
 	PgReloadTime = param->PgReloadTime;
+	first_syslogger_file_time = param->first_syslogger_file_time;
 
 	redirection_done = param->redirection_done;
 	IsBinaryUpgrade = param->IsBinaryUpgrade;

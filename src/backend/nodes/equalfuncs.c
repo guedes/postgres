@@ -976,12 +976,12 @@ _equalSelectStmt(const SelectStmt *a, const SelectStmt *b)
 	COMPARE_NODE_FIELD(groupClause);
 	COMPARE_NODE_FIELD(havingClause);
 	COMPARE_NODE_FIELD(windowClause);
-	COMPARE_NODE_FIELD(withClause);
 	COMPARE_NODE_FIELD(valuesLists);
 	COMPARE_NODE_FIELD(sortClause);
 	COMPARE_NODE_FIELD(limitOffset);
 	COMPARE_NODE_FIELD(limitCount);
 	COMPARE_NODE_FIELD(lockingClause);
+	COMPARE_NODE_FIELD(withClause);
 	COMPARE_SCALAR_FIELD(op);
 	COMPARE_SCALAR_FIELD(all);
 	COMPARE_NODE_FIELD(larg);
@@ -2161,6 +2161,7 @@ _equalWindowDef(const WindowDef *a, const WindowDef *b)
 static bool
 _equalRangeSubselect(const RangeSubselect *a, const RangeSubselect *b)
 {
+	COMPARE_SCALAR_FIELD(lateral);
 	COMPARE_NODE_FIELD(subquery);
 	COMPARE_NODE_FIELD(alias);
 
@@ -2170,6 +2171,7 @@ _equalRangeSubselect(const RangeSubselect *a, const RangeSubselect *b)
 static bool
 _equalRangeFunction(const RangeFunction *a, const RangeFunction *b)
 {
+	COMPARE_SCALAR_FIELD(lateral);
 	COMPARE_NODE_FIELD(funccallnode);
 	COMPARE_NODE_FIELD(alias);
 	COMPARE_NODE_FIELD(coldeflist);
@@ -2287,6 +2289,7 @@ _equalRangeTblEntry(const RangeTblEntry *a, const RangeTblEntry *b)
 	COMPARE_NODE_FIELD(ctecolcollations);
 	COMPARE_NODE_FIELD(alias);
 	COMPARE_NODE_FIELD(eref);
+	COMPARE_SCALAR_FIELD(lateral);
 	COMPARE_SCALAR_FIELD(inh);
 	COMPARE_SCALAR_FIELD(inFromCl);
 	COMPARE_SCALAR_FIELD(requiredPerms);

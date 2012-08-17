@@ -1156,7 +1156,7 @@ static void
 setup_config(void)
 {
 	char	  **conflines;
-	char		repltok[TZ_STRLEN_MAX + 100];
+	char		repltok[MAXPGPATH];
 	char		path[MAXPGPATH];
 	const char *default_timezone;
 
@@ -1177,6 +1177,15 @@ setup_config(void)
 		snprintf(repltok, sizeof(repltok), "shared_buffers = %dkB",
 				 n_buffers * (BLCKSZ / 1024));
 	conflines = replace_token(conflines, "#shared_buffers = 32MB", repltok);
+
+#ifdef HAVE_UNIX_SOCKETS
+	snprintf(repltok, sizeof(repltok), "#unix_socket_directories = '%s'",
+			 DEFAULT_PGSOCKET_DIR);
+#else
+	snprintf(repltok, sizeof(repltok), "#unix_socket_directories = ''");
+#endif
+	conflines = replace_token(conflines, "#unix_socket_directories = '/tmp'",
+							  repltok);
 
 #if DEF_PGPORT != 5432
 	snprintf(repltok, sizeof(repltok), "#port = %d", DEF_PGPORT);
@@ -1386,7 +1395,7 @@ bootstrap_template1(void)
 	bki_lines = replace_token(bki_lines, "FLOAT8PASSBYVAL",
 							  FLOAT8PASSBYVAL ? "true" : "false");
 
-	bki_lines = replace_token(bki_lines, "POSTGRES", username);
+	bki_lines = replace_token(bki_lines, "POSTGRES", escape_quotes(username));
 
 	bki_lines = replace_token(bki_lines, "ENCODING", encodingid);
 
@@ -2034,8 +2043,8 @@ setup_privileges(void)
 
 	PG_CMD_OPEN;
 
-	priv_lines = replace_token(privileges_setup,
-							   "$POSTGRES_SUPERUSERNAME", username);
+	priv_lines = replace_token(privileges_setup, "$POSTGRES_SUPERUSERNAME",
+							   escape_quotes(username));
 	for (line = priv_lines; *line != NULL; line++)
 		PG_CMD_PUTS(*line);
 
@@ -3047,7 +3056,6 @@ main(int argc, char *argv[])
 	canonicalize_path(pg_data);
 
 #ifdef WIN32
-
 	/*
 	 * Before we execute another program, make sure that we are running with a
 	 * restricted token. If not, re-execute ourselves with one.

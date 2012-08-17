@@ -1973,6 +1973,7 @@ _copyRangeTblEntry(const RangeTblEntry *from)
 	COPY_NODE_FIELD(ctecolcollations);
 	COPY_NODE_FIELD(alias);
 	COPY_NODE_FIELD(eref);
+	COPY_SCALAR_FIELD(lateral);
 	COPY_SCALAR_FIELD(inh);
 	COPY_SCALAR_FIELD(inFromCl);
 	COPY_SCALAR_FIELD(requiredPerms);
@@ -2250,6 +2251,7 @@ _copyRangeSubselect(const RangeSubselect *from)
 {
 	RangeSubselect *newnode = makeNode(RangeSubselect);
 
+	COPY_SCALAR_FIELD(lateral);
 	COPY_NODE_FIELD(subquery);
 	COPY_NODE_FIELD(alias);
 
@@ -2261,6 +2263,7 @@ _copyRangeFunction(const RangeFunction *from)
 {
 	RangeFunction *newnode = makeNode(RangeFunction);
 
+	COPY_SCALAR_FIELD(lateral);
 	COPY_NODE_FIELD(funccallnode);
 	COPY_NODE_FIELD(alias);
 	COPY_NODE_FIELD(coldeflist);
@@ -2494,12 +2497,12 @@ _copySelectStmt(const SelectStmt *from)
 	COPY_NODE_FIELD(groupClause);
 	COPY_NODE_FIELD(havingClause);
 	COPY_NODE_FIELD(windowClause);
-	COPY_NODE_FIELD(withClause);
 	COPY_NODE_FIELD(valuesLists);
 	COPY_NODE_FIELD(sortClause);
 	COPY_NODE_FIELD(limitOffset);
 	COPY_NODE_FIELD(limitCount);
 	COPY_NODE_FIELD(lockingClause);
+	COPY_NODE_FIELD(withClause);
 	COPY_SCALAR_FIELD(op);
 	COPY_SCALAR_FIELD(all);
 	COPY_NODE_FIELD(larg);
