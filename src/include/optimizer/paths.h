@@ -4,7 +4,7 @@
  *	  prototypes for various files in optimizer/path
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/paths.h
@@ -124,10 +124,12 @@ extern void add_child_rel_equivalences(PlannerInfo *root,
 						   RelOptInfo *child_rel);
 extern void mutate_eclass_expressions(PlannerInfo *root,
 						  Node *(*mutator) (),
-						  void *context);
+						  void *context,
+						  bool include_child_exprs);
 extern List *generate_implied_equalities_for_indexcol(PlannerInfo *root,
 										 IndexOptInfo *index,
-										 int indexcol);
+										 int indexcol,
+										 Relids prohibited_rels);
 extern bool have_relevant_eclass_joinclause(PlannerInfo *root,
 								RelOptInfo *rel1, RelOptInfo *rel2);
 extern bool has_relevant_eclass_joinclause(PlannerInfo *root,

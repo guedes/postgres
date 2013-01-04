@@ -4,7 +4,7 @@
  *	  prototypes for postgres.c.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/tcop/tcopprot.h
@@ -19,8 +19,9 @@
 #ifndef TCOPPROT_H
 #define TCOPPROT_H
 
-#include "executor/execdesc.h"
+#include "nodes/params.h"
 #include "nodes/parsenodes.h"
+#include "nodes/plannodes.h"
 #include "storage/procsignal.h"
 #include "utils/guc.h"
 

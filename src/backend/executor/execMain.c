@@ -26,7 +26,7 @@
  *	before ExecutorEnd.  This can be omitted only in case of EXPLAIN,
  *	which should also omit ExecutorRun.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -37,6 +37,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -922,9 +923,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 /*
  * Check that a proposed result relation is a legal target for the operation
  *
- * In most cases parser and/or planner should have noticed this already, but
- * let's make sure.  In the view case we do need a test here, because if the
- * view wasn't rewritten by a rule, it had better have an INSTEAD trigger.
+ * Generally the parser and/or planner should have noticed any such mistake
+ * already, but let's make sure.
  *
  * Note: when changing this function, you probably also need to look at
  * CheckValidRowMarkRel.
@@ -952,6 +952,13 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 							RelationGetRelationName(resultRel))));
 			break;
 		case RELKIND_VIEW:
+			/*
+			 * Okay only if there's a suitable INSTEAD OF trigger.  Messages
+			 * here should match rewriteHandler.c's rewriteTargetView, except
+			 * that we omit errdetail because we haven't got the information
+			 * handy (and given that we really shouldn't get here anyway,
+			 * it's not worth great exertion to get).
+			 */
 			switch (operation)
 			{
 				case CMD_INSERT:
@@ -960,7 +967,7 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						   errmsg("cannot insert into view \"%s\"",
 								  RelationGetRelationName(resultRel)),
-						   errhint("You need an unconditional ON INSERT DO INSTEAD rule or an INSTEAD OF INSERT trigger.")));
+						   errhint("To make the view insertable, provide an unconditional ON INSERT DO INSTEAD rule or an INSTEAD OF INSERT trigger.")));
 					break;
 				case CMD_UPDATE:
 					if (!trigDesc || !trigDesc->trig_update_instead_row)
@@ -968,7 +975,7 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						   errmsg("cannot update view \"%s\"",
 								  RelationGetRelationName(resultRel)),
-						   errhint("You need an unconditional ON UPDATE DO INSTEAD rule or an INSTEAD OF UPDATE trigger.")));
+						   errhint("To make the view updatable, provide an unconditional ON UPDATE DO INSTEAD rule or an INSTEAD OF UPDATE trigger.")));
 					break;
 				case CMD_DELETE:
 					if (!trigDesc || !trigDesc->trig_delete_instead_row)
@@ -976,7 +983,7 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						   errmsg("cannot delete from view \"%s\"",
 								  RelationGetRelationName(resultRel)),
-						   errhint("You need an unconditional ON DELETE DO INSTEAD rule or an INSTEAD OF DELETE trigger.")));
+						   errhint("To make the view updatable, provide an unconditional ON DELETE DO INSTEAD rule or an INSTEAD OF DELETE trigger.")));
 					break;
 				default:
 					elog(ERROR, "unrecognized CmdType: %d", (int) operation);
@@ -1027,7 +1034,7 @@ CheckValidRowMarkRel(Relation rel, RowMarkType markType)
 							RelationGetRelationName(rel))));
 			break;
 		case RELKIND_VIEW:
-			/* Should not get here */
+			/* Should not get here; planner should have expanded the view */
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("cannot lock rows in view \"%s\"",
@@ -1801,8 +1808,7 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 		if (heap_fetch(relation, &SnapshotDirty, &tuple, &buffer, true, NULL))
 		{
 			HTSU_Result test;
-			ItemPointerData update_ctid;
-			TransactionId update_xmax;
+			HeapUpdateFailureData hufd;
 
 			/*
 			 * If xmin isn't what we're expecting, the slot must have been
@@ -1837,13 +1843,13 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 			/*
 			 * If tuple was inserted by our own transaction, we have to check
 			 * cmin against es_output_cid: cmin >= current CID means our
-			 * command cannot see the tuple, so we should ignore it.  Without
-			 * this we are open to the "Halloween problem" of indefinitely
-			 * re-updating the same tuple. (We need not check cmax because
-			 * HeapTupleSatisfiesDirty will consider a tuple deleted by our
-			 * transaction dead, regardless of cmax.)  We just checked that
-			 * priorXmax == xmin, so we can test that variable instead of
-			 * doing HeapTupleHeaderGetXmin again.
+			 * command cannot see the tuple, so we should ignore it.
+			 * Otherwise heap_lock_tuple() will throw an error, and so would
+			 * any later attempt to update or delete the tuple.  (We need not
+			 * check cmax because HeapTupleSatisfiesDirty will consider a
+			 * tuple deleted by our transaction dead, regardless of cmax.)
+			 * Wee just checked that priorXmax == xmin, so we can test that
+			 * variable instead of doing HeapTupleHeaderGetXmin again.
 			 */
 			if (TransactionIdIsCurrentTransactionId(priorXmax) &&
 				HeapTupleHeaderGetCmin(tuple.t_data) >= estate->es_output_cid)
@@ -1855,17 +1861,29 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 			/*
 			 * This is a live tuple, so now try to lock it.
 			 */
-			test = heap_lock_tuple(relation, &tuple, &buffer,
-								   &update_ctid, &update_xmax,
+			test = heap_lock_tuple(relation, &tuple,
 								   estate->es_output_cid,
-								   lockmode, false);
+								   lockmode, false /* wait */,
+								   &buffer, &hufd);
 			/* We now have two pins on the buffer, get rid of one */
 			ReleaseBuffer(buffer);
 
 			switch (test)
 			{
 				case HeapTupleSelfUpdated:
-					/* treat it as deleted; do not process */
+					/*
+					 * The target tuple was already updated or deleted by the
+					 * current command, or by a later command in the current
+					 * transaction.  We *must* ignore the tuple in the former
+					 * case, so as to avoid the "Halloween problem" of
+					 * repeated update attempts.  In the latter case it might
+					 * be sensible to fetch the updated tuple instead, but
+					 * doing so would require changing heap_lock_tuple as well
+					 * as heap_update and heap_delete to not complain about
+					 * updating "invisible" tuples, which seems pretty scary.
+					 * So for now, treat the tuple as deleted and do not
+					 * process.
+					 */
 					ReleaseBuffer(buffer);
 					return NULL;
 
@@ -1879,12 +1897,12 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 						ereport(ERROR,
 								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 								 errmsg("could not serialize access due to concurrent update")));
-					if (!ItemPointerEquals(&update_ctid, &tuple.t_self))
+					if (!ItemPointerEquals(&hufd.ctid, &tuple.t_self))
 					{
 						/* it was updated, so look at the updated version */
-						tuple.t_self = update_ctid;
+						tuple.t_self = hufd.ctid;
 						/* updated row should have xmin matching this xmax */
-						priorXmax = update_xmax;
+						priorXmax = hufd.xmax;
 						continue;
 					}
 					/* tuple was deleted, so give up */

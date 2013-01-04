@@ -5,7 +5,7 @@
  *	  commands.  At one time acted as an interface between the Lisp and C
  *	  systems.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/twophase.h"
 #include "access/xact.h"
@@ -707,7 +708,7 @@ standard_ProcessUtility(Node *parsetree,
 			{
 				uint64		processed;
 
-				processed = DoCopy((CopyStmt *) parsetree, queryString);
+				DoCopy((CopyStmt *) parsetree, queryString, &processed);
 				if (completionTag)
 					snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
 							 "COPY " UINT64_FORMAT, processed);
@@ -777,7 +778,7 @@ standard_ProcessUtility(Node *parsetree,
 				ListCell   *l;
 				LOCKMODE	lockmode;
 
-				if (isCompleteQuery)	
+				if (isCompleteQuery)
 					EventTriggerDDLCommandStart(parsetree);
 
 				/*
@@ -831,7 +832,7 @@ standard_ProcessUtility(Node *parsetree,
 			{
 				AlterDomainStmt *stmt = (AlterDomainStmt *) parsetree;
 
-				if (isCompleteQuery)	
+				if (isCompleteQuery)
 					EventTriggerDDLCommandStart(parsetree);
 
 				/*
@@ -888,7 +889,7 @@ standard_ProcessUtility(Node *parsetree,
 			break;
 
 		case T_AlterDefaultPrivilegesStmt:
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			ExecAlterDefaultPrivilegesStmt((AlterDefaultPrivilegesStmt *) parsetree);
 			break;
@@ -900,7 +901,7 @@ standard_ProcessUtility(Node *parsetree,
 			{
 				DefineStmt *stmt = (DefineStmt *) parsetree;
 
-				if (isCompleteQuery)	
+				if (isCompleteQuery)
 					EventTriggerDDLCommandStart(parsetree);
 
 				switch (stmt->kind)
@@ -949,7 +950,7 @@ standard_ProcessUtility(Node *parsetree,
 			{
 				CompositeTypeStmt *stmt = (CompositeTypeStmt *) parsetree;
 
-				if (isCompleteQuery)	
+				if (isCompleteQuery)
 					EventTriggerDDLCommandStart(parsetree);
 
 				DefineCompositeType(stmt->typevar, stmt->coldeflist);
@@ -957,44 +958,37 @@ standard_ProcessUtility(Node *parsetree,
 			break;
 
 		case T_CreateEnumStmt:	/* CREATE TYPE AS ENUM */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			DefineEnum((CreateEnumStmt *) parsetree);
 			break;
 
 		case T_CreateRangeStmt:	/* CREATE TYPE AS RANGE */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			DefineRange((CreateRangeStmt *) parsetree);
 			break;
 
 		case T_AlterEnumStmt:	/* ALTER TYPE (enum) */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
-
-			/*
-			 * We disallow this in transaction blocks, because we can't cope
-			 * with enum OID values getting into indexes and then having their
-			 * defining pg_enum entries go away.
-			 */
-			PreventTransactionChain(isTopLevel, "ALTER TYPE ... ADD");
-			AlterEnum((AlterEnumStmt *) parsetree);
+			AlterEnum((AlterEnumStmt *) parsetree, isTopLevel);
 			break;
 
 		case T_ViewStmt:		/* CREATE VIEW */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			DefineView((ViewStmt *) parsetree, queryString);
 			break;
 
 		case T_CreateFunctionStmt:		/* CREATE FUNCTION */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			CreateFunction((CreateFunctionStmt *) parsetree, queryString);
 			break;
 
 		case T_AlterFunctionStmt:		/* ALTER FUNCTION */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			AlterFunction((AlterFunctionStmt *) parsetree);
 			break;
@@ -1003,7 +997,7 @@ standard_ProcessUtility(Node *parsetree,
 			{
 				IndexStmt  *stmt = (IndexStmt *) parsetree;
 
-				if (isCompleteQuery)	
+				if (isCompleteQuery)
 					EventTriggerDDLCommandStart(parsetree);
 				if (stmt->concurrent)
 					PreventTransactionChain(isTopLevel,
@@ -1025,19 +1019,19 @@ standard_ProcessUtility(Node *parsetree,
 			break;
 
 		case T_RuleStmt:		/* CREATE RULE */
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			DefineRule((RuleStmt *) parsetree, queryString);
 			break;
 
 		case T_CreateSeqStmt:
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			DefineSequence((CreateSeqStmt *) parsetree);
 			break;
 
 		case T_AlterSeqStmt:
-			if (isCompleteQuery)	
+			if (isCompleteQuery)
 				EventTriggerDDLCommandStart(parsetree);
 			AlterSequence((AlterSeqStmt *) parsetree);
 			break;
@@ -1122,10 +1116,14 @@ standard_ProcessUtility(Node *parsetree,
 			break;
 
 		case T_VacuumStmt:
-			/* we choose to allow this during "read only" transactions */
-			PreventCommandDuringRecovery("VACUUM");
-			vacuum((VacuumStmt *) parsetree, InvalidOid, true, NULL, false,
-				   isTopLevel);
+			{
+				VacuumStmt *stmt = (VacuumStmt *) parsetree;
+
+				/* we choose to allow this during "read only" transactions */
+				PreventCommandDuringRecovery((stmt->options & VACOPT_VACUUM) ?
+											 "VACUUM" : "ANALYZE");
+				vacuum(stmt, InvalidOid, true, NULL, false, isTopLevel);
+			}
 			break;
 
 		case T_ExplainStmt:
@@ -1503,16 +1501,11 @@ UtilityContainsQuery(Node *parsetree)
 			return qry;
 
 		case T_CreateTableAsStmt:
-			/* might or might not contain a Query ... */
 			qry = (Query *) ((CreateTableAsStmt *) parsetree)->query;
-			if (IsA(qry, Query))
-			{
-				/* Recursion currently can't be necessary here */
-				Assert(qry->commandType != CMD_UTILITY);
-				return qry;
-			}
-			Assert(IsA(qry, ExecuteStmt));
-			return NULL;
+			Assert(IsA(qry, Query));
+			if (qry->commandType == CMD_UTILITY)
+				return UtilityContainsQuery(qry->utilityStmt);
+			return qry;
 
 		default:
 			return NULL;

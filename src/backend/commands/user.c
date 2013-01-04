@@ -3,7 +3,7 @@
  * user.c
  *	  Commands for manipulating roles (formerly called users).
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/commands/user.c
@@ -14,6 +14,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -66,7 +67,7 @@ have_createrole_privilege(void)
 /*
  * CREATE ROLE
  */
-void
+Oid
 CreateRole(CreateRoleStmt *stmt)
 {
 	Relation	pg_authid_rel;
@@ -432,6 +433,8 @@ CreateRole(CreateRoleStmt *stmt)
 	 * Close pg_authid, but keep lock till commit.
 	 */
 	heap_close(pg_authid_rel, NoLock);
+
+	return roleid;
 }
 
 
@@ -442,7 +445,7 @@ CreateRole(CreateRoleStmt *stmt)
  * backwards-compatible ALTER GROUP syntax.  Although it will work to say
  * "ALTER ROLE role ROLE rolenames", we don't document it.
  */
-void
+Oid
 AlterRole(AlterRoleStmt *stmt)
 {
 	Datum		new_record[Natts_pg_authid];
@@ -798,17 +801,20 @@ AlterRole(AlterRoleStmt *stmt)
 	 * Close pg_authid, but keep lock till commit.
 	 */
 	heap_close(pg_authid_rel, NoLock);
+
+	return roleid;
 }
 
 
 /*
  * ALTER ROLE ... SET
  */
-void
+Oid
 AlterRoleSet(AlterRoleSetStmt *stmt)
 {
 	HeapTuple	roletuple;
 	Oid			databaseid = InvalidOid;
+	Oid         roleid;
 
 	roletuple = SearchSysCache1(AUTHNAME, PointerGetDatum(stmt->role));
 
@@ -816,6 +822,8 @@ AlterRoleSet(AlterRoleSetStmt *stmt)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("role \"%s\" does not exist", stmt->role)));
+
+	roleid = HeapTupleGetOid(roletuple);
 
 	/*
 	 * Obtain a lock on the role and make sure it didn't go away in the
@@ -852,6 +860,8 @@ AlterRoleSet(AlterRoleSetStmt *stmt)
 
 	AlterSetting(databaseid, HeapTupleGetOid(roletuple), stmt->setstmt);
 	ReleaseSysCache(roletuple);
+
+	return roleid;
 }
 
 
@@ -1035,7 +1045,7 @@ DropRole(DropRoleStmt *stmt)
 /*
  * Rename role
  */
-void
+Oid
 RenameRole(const char *oldname, const char *newname)
 {
 	HeapTuple	oldtuple,
@@ -1141,6 +1151,8 @@ RenameRole(const char *oldname, const char *newname)
 	 * Close pg_authid, but keep lock till commit.
 	 */
 	heap_close(rel, NoLock);
+
+	return roleid;
 }
 
 /*

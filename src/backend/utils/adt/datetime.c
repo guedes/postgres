@@ -3,7 +3,7 @@
  * datetime.c
  *	  Support functions for date/time types.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <math.h>
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -2175,8 +2176,11 @@ DecodeDate(char *str, int fmask, int *tmask, bool *is2digits,
 	while (*str != '\0' && nf < MAXDATEFIELDS)
 	{
 		/* skip field separators */
-		while (!isalnum((unsigned char) *str))
+		while (*str != '\0' && !isalnum((unsigned char) *str))
 			str++;
+
+		if (*str == '\0')
+			return DTERR_BAD_FORMAT;		/* end of string after separator */
 
 		field[nf] = str;
 		if (isdigit((unsigned char) *str))

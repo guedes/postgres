@@ -13,7 +13,7 @@
  * come from different tuples. In theory, the standard scalar selectivity
  * functions could be used with the combined histogram.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -158,7 +158,10 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		/* Must copy the target values into anl_context */
 		old_cxt = MemoryContextSwitchTo(stats->anl_context);
 
-		if (non_empty_cnt > 0)
+		/*
+		 * Generate a histogram slot entry if there are at least two values.
+		 */
+		if (non_empty_cnt >= 2)
 		{
 			/* Sort bound values */
 			qsort_arg(lowers, non_empty_cnt, sizeof(RangeBound),

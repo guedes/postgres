@@ -4,7 +4,7 @@
  *	  definitions for executor state nodes
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/execnodes.h
@@ -1100,10 +1100,8 @@ typedef struct AppendState
  *		nkeys			number of sort key columns
  *		sortkeys		sort keys in SortSupport representation
  *		slots			current output tuple of each subplan
- *		heap			heap of active tuples (represented as array indexes)
- *		heap_size		number of active heap entries
+ *		heap			heap of active tuples
  *		initialized		true if we have fetched first tuple from each subplan
- *		last_slot		last subplan fetched from (which must be re-called)
  * ----------------
  */
 typedef struct MergeAppendState
@@ -1114,10 +1112,8 @@ typedef struct MergeAppendState
 	int			ms_nkeys;
 	SortSupport ms_sortkeys;	/* array of length ms_nkeys */
 	TupleTableSlot **ms_slots;	/* array of length ms_nplans */
-	int		   *ms_heap;		/* array of length ms_nplans */
-	int			ms_heap_size;	/* current active length of ms_heap[] */
+	struct binaryheap *ms_heap; /* binary heap of slot indices */
 	bool		ms_initialized; /* are subplans started? */
-	int			ms_last_slot;	/* last subplan slot we returned from */
 } MergeAppendState;
 
 /* ----------------

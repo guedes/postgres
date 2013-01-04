@@ -4,20 +4,14 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_basebackup.c
  *-------------------------------------------------------------------------
  */
 
-/*
- * We have to use postgres.h not postgres_fe.h here, because there's so much
- * backend-only stuff in the XLOG include files we need.  But we need a
- * frontend-ish environment otherwise.	Hence this ugly hack.
- */
-#define FRONTEND 1
-#include "postgres.h"
+#include "postgres_fe.h"
 #include "libpq-fe.h"
 
 #include <unistd.h>
@@ -263,7 +257,7 @@ StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier)
 	uint32		hi,
 				lo;
 
-	param = xmalloc0(sizeof(logstreamer_param));
+	param = pg_malloc0(sizeof(logstreamer_param));
 	param->timeline = timeline;
 	param->sysidentifier = sysidentifier;
 
@@ -977,7 +971,7 @@ BaseBackup(void)
 				progname, PQntuples(res), PQnfields(res), 1, 3);
 		disconnect_and_exit(1);
 	}
-	sysidentifier = strdup(PQgetvalue(res, 0, 0));
+	sysidentifier = pg_strdup(PQgetvalue(res, 0, 0));
 	timeline = atoi(PQgetvalue(res, 0, 1));
 	PQclear(res);
 
@@ -1142,7 +1136,7 @@ BaseBackup(void)
 
 		if (verbose)
 			fprintf(stderr,
-					_("%s: waiting for background process to finish streaming...\n"), progname);
+					_("%s: waiting for background process to finish streaming ...\n"), progname);
 
 #ifndef WIN32
 		if (write(bgpipe[1], xlogend, strlen(xlogend)) != strlen(xlogend))
@@ -1286,7 +1280,7 @@ main(int argc, char **argv)
 		switch (c)
 		{
 			case 'D':
-				basedir = xstrdup(optarg);
+				basedir = pg_strdup(optarg);
 				break;
 			case 'F':
 				if (strcmp(optarg, "p") == 0 || strcmp(optarg, "plain") == 0)
@@ -1338,7 +1332,7 @@ main(int argc, char **argv)
 				}
 				break;
 			case 'l':
-				label = xstrdup(optarg);
+				label = pg_strdup(optarg);
 				break;
 			case 'z':
 #ifdef HAVE_LIBZ
@@ -1369,13 +1363,13 @@ main(int argc, char **argv)
 				}
 				break;
 			case 'h':
-				dbhost = xstrdup(optarg);
+				dbhost = pg_strdup(optarg);
 				break;
 			case 'p':
-				dbport = xstrdup(optarg);
+				dbport = pg_strdup(optarg);
 				break;
 			case 'U':
-				dbuser = xstrdup(optarg);
+				dbuser = pg_strdup(optarg);
 				break;
 			case 'w':
 				dbgetpassword = -1;
@@ -1449,7 +1443,7 @@ main(int argc, char **argv)
 	if (format != 'p' && streamwal)
 	{
 		fprintf(stderr,
-				_("%s: wal streaming can only be used in plain mode\n"),
+				_("%s: WAL streaming can only be used in plain mode\n"),
 				progname);
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 				progname);

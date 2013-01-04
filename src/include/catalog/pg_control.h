@@ -5,7 +5,7 @@
  *	  However, we define it here so that the format is documented.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_control.h
@@ -21,7 +21,7 @@
 
 
 /* Version identifier for this pg_control format */
-#define PG_CONTROL_VERSION	931
+#define PG_CONTROL_VERSION	932
 
 /*
  * Body of CheckPoint XLOG records.  This is declared here because we keep
@@ -153,6 +153,7 @@ typedef struct ControlFileData
 	 * pg_start_backup() call, not accompanied by pg_stop_backup().
 	 */
 	XLogRecPtr	minRecoveryPoint;
+	TimeLineID	minRecoveryPointTLI;
 	XLogRecPtr	backupStartPoint;
 	XLogRecPtr	backupEndPoint;
 	bool		backupEndRequired;

@@ -4,7 +4,7 @@
  *		Common support routines for bin/scripts/
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/scripts/common.c
@@ -109,14 +109,8 @@ connectDatabase(const char *dbname, const char *pghost, const char *pgport,
 	do
 	{
 #define PARAMS_ARRAY_SIZE	7
-		const char **keywords = malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-		const char **values = malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-		if (!keywords || !values)
-		{
-			fprintf(stderr, _("%s: out of memory\n"), progname);
-			exit(1);
-		}
+		const char **keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
+		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
 
 		keywords[0] = "host";
 		values[0] = pghost;
@@ -302,6 +296,33 @@ pg_strdup(const char *string)
 		fprintf(stderr, _("out of memory\n"));
 		exit(EXIT_FAILURE);
 	}
+	return tmp;
+}
+
+void *
+pg_malloc(size_t size)
+{
+	void	   *tmp;
+
+	/* Avoid unportable behavior of malloc(0) */
+	if (size == 0)
+		size = 1;
+	tmp = malloc(size);
+	if (!tmp)
+	{
+		fprintf(stderr, _("out of memory\n"));
+		exit(EXIT_FAILURE);
+	}
+	return tmp;
+}
+
+void *
+pg_malloc0(size_t size)
+{
+	void	   *tmp;
+
+	tmp = pg_malloc(size);
+	MemSet(tmp, 0, size);
 	return tmp;
 }
 

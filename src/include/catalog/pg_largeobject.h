@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_largeobject.h
@@ -55,7 +55,6 @@ typedef FormData_pg_largeobject *Form_pg_largeobject;
 
 extern Oid	LargeObjectCreate(Oid loid);
 extern void LargeObjectDrop(Oid loid);
-extern void LargeObjectAlterOwner(Oid loid, Oid newOwnerId);
 extern bool LargeObjectExists(Oid loid);
 
 #endif   /* PG_LARGEOBJECT_H */

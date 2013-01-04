@@ -3,7 +3,7 @@
  * fe-protocol3.c
  *	  functions that are specific to frontend/backend protocol version 3
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -430,9 +430,7 @@ handleSyncLoss(PGconn *conn, char id, int msgLength)
 	pqSaveErrorResult(conn);
 	conn->asyncStatus = PGASYNC_READY;	/* drop out of GetResult wait loop */
 
-	pqsecure_close(conn);
-	closesocket(conn->sock);
-	conn->sock = -1;
+	pqDropConnection(conn);
 	conn->status = CONNECTION_BAD;		/* No more connection to backend */
 }
 
@@ -1486,7 +1484,12 @@ pqGetCopyData3(PGconn *conn, char **buffer, int async)
 			 * expect the state was already changed.
 			 */
 			if (msgLength == -1)
-				conn->asyncStatus = PGASYNC_BUSY;
+			{
+				if (conn->asyncStatus == PGASYNC_COPY_BOTH)
+					conn->asyncStatus = PGASYNC_COPY_IN;
+				else
+					conn->asyncStatus = PGASYNC_BUSY;
+			}
 			return msgLength;	/* end-of-copy or error */
 		}
 		if (msgLength == 0)

@@ -3,7 +3,7 @@
  * spi.c
  *				Server Programming Interface
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/printtup.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
@@ -1126,6 +1127,7 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 	CachedPlan *cplan;
 	List	   *stmt_list;
 	char	   *query_string;
+	Snapshot	snapshot;
 	MemoryContext oldcontext;
 	Portal		portal;
 
@@ -1268,6 +1270,15 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 		}
 	}
 
+	/* Set up the snapshot to use. */
+	if (read_only)
+		snapshot = GetActiveSnapshot();
+	else
+	{
+		CommandCounterIncrement();
+		snapshot = GetTransactionSnapshot();
+	}
+
 	/*
 	 * If the plan has parameters, copy them into the portal.  Note that this
 	 * must be done after revalidating the plan, because in dynamic parameter
@@ -1283,13 +1294,7 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 	/*
 	 * Start portal execution.
 	 */
-	if (read_only)
-		PortalStart(portal, paramLI, 0, true);
-	else
-	{
-		CommandCounterIncrement();
-		PortalStart(portal, paramLI, 0, false);
-	}
+	PortalStart(portal, paramLI, 0, snapshot);
 
 	Assert(portal->strategy != PORTAL_MULTI_QUERY);
 
@@ -1921,25 +1926,31 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 					_SPI_current->processed = _SPI_current->tuptable->alloced -
 						_SPI_current->tuptable->free;
 
+				res = SPI_OK_UTILITY;
+
 				/*
-				 * CREATE TABLE AS is a messy special case for historical
-				 * reasons.  We must set _SPI_current->processed even though
-				 * the tuples weren't returned to the caller, and we must
-				 * return a special result code if the statement was spelled
-				 * SELECT INTO.
+				 * Some utility statements return a row count, even though the
+				 * tuples are not returned to the caller.
 				 */
 				if (IsA(stmt, CreateTableAsStmt))
 				{
 					Assert(strncmp(completionTag, "SELECT ", 7) == 0);
 					_SPI_current->processed = strtoul(completionTag + 7,
 													  NULL, 10);
+
+					/*
+					 * For historical reasons, if CREATE TABLE AS was spelled
+					 * as SELECT INTO, return a special return code.
+					 */
 					if (((CreateTableAsStmt *) stmt)->is_select_into)
 						res = SPI_OK_SELINTO;
-					else
-						res = SPI_OK_UTILITY;
 				}
-				else
-					res = SPI_OK_UTILITY;
+				else if (IsA(stmt, CopyStmt))
+				{
+					Assert(strncmp(completionTag, "COPY ", 5) == 0);
+					_SPI_current->processed = strtoul(completionTag + 5,
+													  NULL, 10);
+				}
 			}
 
 			/*

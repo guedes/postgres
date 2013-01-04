@@ -9,7 +9,7 @@
  * in cluster.c.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -25,6 +25,7 @@
 #include "access/clog.h"
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
@@ -1096,9 +1097,16 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound)
 
 
 /*
- * Open all the indexes of the given relation, obtaining the specified kind
- * of lock on each.  Return an array of Relation pointers for the indexes
- * into *Irel, and the number of indexes into *nindexes.
+ * Open all the vacuumable indexes of the given relation, obtaining the
+ * specified kind of lock on each.	Return an array of Relation pointers for
+ * the indexes into *Irel, and the number of indexes into *nindexes.
+ *
+ * We consider an index vacuumable if it is marked insertable (IndexIsReady).
+ * If it isn't, probably a CREATE INDEX CONCURRENTLY command failed early in
+ * execution, and what we have is too corrupt to be processable.  We will
+ * vacuum even if the index isn't indisvalid; this is important because in a
+ * unique index, uniqueness checks will be performed anyway and had better not
+ * hit dangling index pointers.
  */
 void
 vac_open_indexes(Relation relation, LOCKMODE lockmode,
@@ -1112,20 +1120,29 @@ vac_open_indexes(Relation relation, LOCKMODE lockmode,
 
 	indexoidlist = RelationGetIndexList(relation);
 
-	*nindexes = list_length(indexoidlist);
+	/* allocate enough memory for all indexes */
+	i = list_length(indexoidlist);
 
-	if (*nindexes > 0)
-		*Irel = (Relation *) palloc(*nindexes * sizeof(Relation));
+	if (i > 0)
+		*Irel = (Relation *) palloc(i * sizeof(Relation));
 	else
 		*Irel = NULL;
 
+	/* collect just the ready indexes */
 	i = 0;
 	foreach(indexoidscan, indexoidlist)
 	{
 		Oid			indexoid = lfirst_oid(indexoidscan);
+		Relation	indrel;
 
-		(*Irel)[i++] = index_open(indexoid, lockmode);
+		indrel = index_open(indexoid, lockmode);
+		if (IndexIsReady(indrel->rd_index))
+			(*Irel)[i++] = indrel;
+		else
+			index_close(indrel, lockmode);
 	}
+
+	*nindexes = i;
 
 	list_free(indexoidlist);
 }

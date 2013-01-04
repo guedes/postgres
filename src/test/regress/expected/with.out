@@ -292,6 +292,30 @@ SELECT pg_get_viewdef('vsubdepartment'::regclass, true);
     FROM subdepartment;
 (1 row)
 
+-- Another reverse-listing example
+CREATE VIEW sums_1_100 AS
+WITH RECURSIVE t(n) AS (
+    VALUES (1)
+UNION ALL
+    SELECT n+1 FROM t WHERE n < 100
+)
+SELECT sum(n) FROM t;
+\d+ sums_1_100
+              View "public.sums_1_100"
+ Column |  Type  | Modifiers | Storage | Description 
+--------+--------+-----------+---------+-------------
+ sum    | bigint |           | plain   | 
+View definition:
+ WITH RECURSIVE t(n) AS (
+                 VALUES (1)
+        UNION ALL 
+                 SELECT t_1.n + 1
+                   FROM t t_1
+                  WHERE t_1.n < 100
+        )
+ SELECT sum(t.n) AS sum
+   FROM t;
+
 -- corner case in which sub-WITH gets initialized first
 with recursive q as (
       select * from department
@@ -1210,6 +1234,27 @@ ERROR:  recursive reference to query "outermost" must not appear within a subque
 LINE 2:   WITH innermost as (SELECT 2 FROM outermost) 
                                            ^
 --
+-- This test will fail with the old implementation of PARAM_EXEC parameter
+-- assignment, because the "q1" Var passed down to A's targetlist subselect
+-- looks exactly like the "A.id" Var passed down to C's subselect, causing
+-- the old code to give them the same runtime PARAM_EXEC slot.  But the
+-- lifespans of the two parameters overlap, thanks to B also reading A.
+--
+with
+A as ( select q2 as id, (select q1) as x from int8_tbl ),
+B as ( select id, row_number() over (partition by id) as r from A ),
+C as ( select A.id, array(select B.id from B where B.id = A.id) from A )
+select * from C;
+        id         |                array                
+-------------------+-------------------------------------
+               456 | {456}
+  4567890123456789 | {4567890123456789,4567890123456789}
+               123 | {123}
+  4567890123456789 | {4567890123456789,4567890123456789}
+ -4567890123456789 | {-4567890123456789}
+(5 rows)
+
+--
 -- Test CTEs read in non-initialization orders
 --
 WITH RECURSIVE
@@ -1985,8 +2030,8 @@ SELECT * FROM parent;
 EXPLAIN (VERBOSE, COSTS OFF)
 WITH wcte AS ( INSERT INTO int8_tbl VALUES ( 42, 47 ) RETURNING q2 )
 DELETE FROM a USING wcte WHERE aa = q2;
-                    QUERY PLAN                    
---------------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Delete on public.a
    CTE wcte
      ->  Insert on public.int8_tbl
@@ -1994,31 +2039,31 @@ DELETE FROM a USING wcte WHERE aa = q2;
            ->  Result
                  Output: 42::bigint, 47::bigint
    ->  Nested Loop
-         Output: public.a.ctid, wcte.*
-         Join Filter: (public.a.aa = wcte.q2)
+         Output: a.ctid, wcte.*
+         Join Filter: (a.aa = wcte.q2)
          ->  Seq Scan on public.a
-               Output: public.a.ctid, public.a.aa
+               Output: a.ctid, a.aa
          ->  CTE Scan on wcte
                Output: wcte.*, wcte.q2
    ->  Nested Loop
-         Output: public.a.ctid, wcte.*
-         Join Filter: (public.a.aa = wcte.q2)
-         ->  Seq Scan on public.b a
-               Output: public.a.ctid, public.a.aa
+         Output: b.ctid, wcte.*
+         Join Filter: (b.aa = wcte.q2)
+         ->  Seq Scan on public.b
+               Output: b.ctid, b.aa
          ->  CTE Scan on wcte
                Output: wcte.*, wcte.q2
    ->  Nested Loop
-         Output: public.a.ctid, wcte.*
-         Join Filter: (public.a.aa = wcte.q2)
-         ->  Seq Scan on public.c a
-               Output: public.a.ctid, public.a.aa
+         Output: c.ctid, wcte.*
+         Join Filter: (c.aa = wcte.q2)
+         ->  Seq Scan on public.c
+               Output: c.ctid, c.aa
          ->  CTE Scan on wcte
                Output: wcte.*, wcte.q2
    ->  Nested Loop
-         Output: public.a.ctid, wcte.*
-         Join Filter: (public.a.aa = wcte.q2)
-         ->  Seq Scan on public.d a
-               Output: public.a.ctid, public.a.aa
+         Output: d.ctid, wcte.*
+         Join Filter: (d.aa = wcte.q2)
+         ->  Seq Scan on public.d
+               Output: d.ctid, d.aa
          ->  CTE Scan on wcte
                Output: wcte.*, wcte.q2
 (34 rows)

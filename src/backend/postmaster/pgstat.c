@@ -11,7 +11,7 @@
  *			- Add a pgstat config column to pg_database, so this
  *			  entire thing can be enabled/disabled on a per db basis.
  *
- *	Copyright (c) 2001-2012, PostgreSQL Global Development Group
+ *	Copyright (c) 2001-2013, PostgreSQL Global Development Group
  *
  *	src/backend/postmaster/pgstat.c
  * ----------
@@ -32,6 +32,7 @@
 #include "pgstat.h"
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
@@ -3020,6 +3021,8 @@ PgstatCollectorMain(int argc, char *argv[])
 	if (setsid() < 0)
 		elog(FATAL, "setsid() failed: %m");
 #endif
+
+	InitializeLatchSupport();		/* needed for latch waits */
 
 	/* Initialize private latch for use by signal handlers */
 	InitLatch(&pgStatLatch);

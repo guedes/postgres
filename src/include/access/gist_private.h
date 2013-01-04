@@ -4,7 +4,7 @@
  *	  private declarations for GiST -- declarations related to the
  *	  internal implementation of GiST, not the public API
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/gist_private.h
@@ -167,7 +167,7 @@ typedef GISTScanOpaqueData *GISTScanOpaque;
 #define XLOG_GIST_PAGE_SPLIT		0x30
  /* #define XLOG_GIST_INSERT_COMPLETE	 0x40 */	/* not used anymore */
 #define XLOG_GIST_CREATE_INDEX		0x50
-#define XLOG_GIST_PAGE_DELETE		0x60
+ /* #define XLOG_GIST_PAGE_DELETE		 0x60 */	/* not used anymore */
 
 typedef struct gistxlogPageUpdate
 {
@@ -210,12 +210,6 @@ typedef struct gistxlogPage
 	BlockNumber blkno;
 	int			num;			/* number of index tuples following */
 } gistxlogPage;
-
-typedef struct gistxlogPageDelete
-{
-	RelFileNode node;
-	BlockNumber blkno;
-} gistxlogPageDelete;
 
 /* SplitedPageLayout - gistSplit function result */
 typedef struct SplitedPageLayout

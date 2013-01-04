@@ -3,7 +3,7 @@
  * pg_shdepend.c
  *	  routines to support manipulation of the pg_shdepend relation
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
@@ -31,6 +32,7 @@
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_largeobject.h"
+#include "catalog/pg_largeobject_metadata.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opclass.h"
@@ -39,6 +41,7 @@
 #include "catalog/pg_shdepend.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "commands/alter.h"
 #include "commands/dbcommands.h"
 #include "commands/collationcmds.h"
 #include "commands/conversioncmds.h"
@@ -1216,8 +1219,12 @@ shdepDropOwned(List *roleids, DropBehavior behavior)
 			Form_pg_shdepend sdepForm = (Form_pg_shdepend) GETSTRUCT(tuple);
 			ObjectAddress obj;
 
-			/* We only operate on objects in the current database */
-			if (sdepForm->dbid != MyDatabaseId)
+			/*
+			 * We only operate on shared objects and objects in the current
+			 * database
+			 */
+			if (sdepForm->dbid != MyDatabaseId &&
+				sdepForm->dbid != InvalidOid)
 				continue;
 
 			switch (sdepForm->deptype)
@@ -1330,20 +1337,8 @@ shdepReassignOwned(List *roleids, Oid newrole)
 			/* Issue the appropriate ALTER OWNER call */
 			switch (sdepForm->classid)
 			{
-				case CollationRelationId:
-					AlterCollationOwner_oid(sdepForm->objid, newrole);
-					break;
-
-				case ConversionRelationId:
-					AlterConversionOwner_oid(sdepForm->objid, newrole);
-					break;
-
 				case TypeRelationId:
 					AlterTypeOwnerInternal(sdepForm->objid, newrole, true);
-					break;
-
-				case OperatorRelationId:
-					AlterOperatorOwner_oid(sdepForm->objid, newrole);
 					break;
 
 				case NamespaceRelationId:
@@ -1360,32 +1355,12 @@ shdepReassignOwned(List *roleids, Oid newrole)
 					ATExecChangeOwner(sdepForm->objid, newrole, true, AccessExclusiveLock);
 					break;
 
-				case ProcedureRelationId:
-					AlterFunctionOwner_oid(sdepForm->objid, newrole);
-					break;
-
-				case LanguageRelationId:
-					AlterLanguageOwner_oid(sdepForm->objid, newrole);
-					break;
-
-				case LargeObjectRelationId:
-					LargeObjectAlterOwner(sdepForm->objid, newrole);
-					break;
-
 				case DefaultAclRelationId:
 
 					/*
 					 * Ignore default ACLs; they should be handled by DROP
 					 * OWNED, not REASSIGN OWNED.
 					 */
-					break;
-
-				case OperatorClassRelationId:
-					AlterOpClassOwner_oid(sdepForm->objid, newrole);
-					break;
-
-				case OperatorFamilyRelationId:
-					AlterOpFamilyOwner_oid(sdepForm->objid, newrole);
 					break;
 
 				case ForeignServerRelationId:
@@ -1396,12 +1371,34 @@ shdepReassignOwned(List *roleids, Oid newrole)
 					AlterForeignDataWrapperOwner_oid(sdepForm->objid, newrole);
 					break;
 
-				case ExtensionRelationId:
-					AlterExtensionOwner_oid(sdepForm->objid, newrole);
-					break;
-
 				case EventTriggerRelationId:
 					AlterEventTriggerOwner_oid(sdepForm->objid, newrole);
+					break;
+
+				/* Generic alter owner cases */
+				case CollationRelationId:
+				case ConversionRelationId:
+				case OperatorRelationId:
+				case ProcedureRelationId:
+				case LanguageRelationId:
+				case LargeObjectRelationId:
+				case OperatorFamilyRelationId:
+				case OperatorClassRelationId:
+				case ExtensionRelationId:
+					{
+						Oid			classId = sdepForm->classid;
+						Relation	catalog;
+
+						if (classId == LargeObjectRelationId)
+							classId = LargeObjectMetadataRelationId;
+
+						catalog = heap_open(classId, RowExclusiveLock);
+
+						AlterObjectOwner_internal(catalog, sdepForm->objid,
+												  newrole);
+
+						heap_close(catalog, NoLock);
+					}
 					break;
 
 				default:

@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/command.c
  */
@@ -99,7 +99,7 @@ HandleSlashCmds(PsqlScanState scan_state,
 	char	   *cmd;
 	char	   *arg;
 
-	psql_assert(scan_state);
+	Assert(scan_state != NULL);
 
 	/* Parse off the command name */
 	cmd = psql_scan_slash_command(scan_state);
@@ -1472,7 +1472,7 @@ prompt_for_password(const char *username)
 	{
 		char	   *prompt_text;
 
-		prompt_text = malloc(strlen(username) + 100);
+		prompt_text = pg_malloc(strlen(username) + 100);
 		snprintf(prompt_text, strlen(username) + 100,
 				 _("Password for user %s: "), username);
 		result = simple_prompt(prompt_text, 100, false);
@@ -1549,7 +1549,7 @@ do_connect(char *dbname, char *user, char *host, char *port)
 	}
 	else if (o_conn && user && strcmp(PQuser(o_conn), user) == 0)
 	{
-		password = strdup(PQpass(o_conn));
+		password = pg_strdup(PQpass(o_conn));
 	}
 
 	while (true)
@@ -1694,8 +1694,8 @@ connection_warnings(bool in_startup)
 		else if (in_startup)
 			printf("%s (%s)\n", pset.progname, PG_VERSION);
 
-		if (pset.sversion / 100 != client_ver / 100)
-			printf(_("WARNING: %s version %d.%d, server version %d.%d.\n"
+		if (pset.sversion / 100 > client_ver / 100)
+			printf(_("WARNING: %s major version %d.%d, server major version %d.%d.\n"
 					 "         Some psql features might not work.\n"),
 				 pset.progname, client_ver / 10000, (client_ver / 100) % 100,
 				   pset.sversion / 10000, (pset.sversion / 100) % 100);
@@ -1819,7 +1819,7 @@ editFile(const char *fname, int lineno)
 	char	   *sys;
 	int			result;
 
-	psql_assert(fname);
+	Assert(fname != NULL);
 
 	/* Find an editor to use */
 	editorName = getenv("PSQL_EDITOR");
@@ -2177,7 +2177,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 {
 	size_t		vallen = 0;
 
-	psql_assert(param);
+	Assert(param != NULL);
 
 	if (value)
 		vallen = strlen(value);

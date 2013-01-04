@@ -8,7 +8,7 @@
  * postgres.h.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1995, Regents of the University of California
  *
  * src/include/postgres_fe.h
@@ -23,5 +23,17 @@
 #endif
 
 #include "c.h"
+
+/*
+ * Assert() can be used in both frontend and backend code. In frontend code it
+ * just calls the standard assert, if it's available. If use of assertions is
+ * not configured, it does nothing.
+ */
+#ifdef USE_ASSERT_CHECKING
+#include <assert.h>
+#define Assert(p) assert(p)
+#else
+#define Assert(p)
+#endif
 
 #endif   /* POSTGRES_FE_H */

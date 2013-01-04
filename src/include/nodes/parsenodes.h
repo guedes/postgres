@@ -10,7 +10,7 @@
  * the location.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/parsenodes.h
@@ -1157,6 +1157,7 @@ typedef struct CreateSchemaStmt
 	char	   *schemaname;		/* the name of the schema to create */
 	char	   *authid;			/* the owner of the created schema */
 	List	   *schemaElts;		/* schema components (list of parsenodes) */
+	bool		if_not_exists;	/* just do nothing if schema already exists? */
 } CreateSchemaStmt;
 
 typedef enum DropBehavior
@@ -1196,6 +1197,7 @@ typedef enum AlterTableType
 	AT_ReAddIndex,				/* internal to commands/tablecmds.c */
 	AT_AddConstraint,			/* add constraint */
 	AT_AddConstraintRecurse,	/* internal to commands/tablecmds.c */
+	AT_ReAddConstraint,			/* internal to commands/tablecmds.c */
 	AT_ValidateConstraint,		/* validate constraint */
 	AT_ValidateConstraintRecurse,		/* internal to commands/tablecmds.c */
 	AT_ProcessedConstraint,		/* pre-processed add constraint (local in
@@ -2168,7 +2170,6 @@ typedef struct AlterObjectSchemaStmt
 	RangeVar   *relation;		/* in case it's a table */
 	List	   *object;			/* in case it's some other object */
 	List	   *objarg;			/* argument types, if applicable */
-	char	   *addname;		/* additional name if needed */
 	char	   *newschema;		/* the new schema */
 	bool		missing_ok;		/* skip error if missing? */
 } AlterObjectSchemaStmt;
@@ -2184,7 +2185,6 @@ typedef struct AlterOwnerStmt
 	RangeVar   *relation;		/* in case it's a table */
 	List	   *object;			/* in case it's some other object */
 	List	   *objarg;			/* argument types, if applicable */
-	char	   *addname;		/* additional name if needed */
 	char	   *newowner;		/* the new owner */
 } AlterOwnerStmt;
 
@@ -2306,6 +2306,7 @@ typedef struct AlterEnumStmt
 	char	   *newVal;			/* new enum value's name */
 	char	   *newValNeighbor; /* neighboring enum value, if specified */
 	bool		newValIsAfter;	/* place new enum value after neighbor? */
+	bool		skipIfExists;	/* no error if label already exists */
 } AlterEnumStmt;
 
 /* ----------------------

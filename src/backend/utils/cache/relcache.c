@@ -3,7 +3,7 @@
  * relcache.c
  *	  POSTGRES relation descriptor cache code
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,6 +33,7 @@
 #include "access/reloptions.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -69,7 +70,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relmapper.h"
-#include "utils/resowner.h"
+#include "utils/resowner_private.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 
@@ -852,20 +853,33 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 		case RELPERSISTENCE_UNLOGGED:
 		case RELPERSISTENCE_PERMANENT:
 			relation->rd_backend = InvalidBackendId;
+			relation->rd_islocaltemp = false;
 			break;
 		case RELPERSISTENCE_TEMP:
 			if (isTempOrToastNamespace(relation->rd_rel->relnamespace))
+			{
 				relation->rd_backend = MyBackendId;
+				relation->rd_islocaltemp = true;
+			}
 			else
 			{
 				/*
-				 * If it's a local temp table, but not one of ours, we have to
-				 * use the slow, grotty method to figure out the owning
-				 * backend.
+				 * If it's a temp table, but not one of ours, we have to use
+				 * the slow, grotty method to figure out the owning backend.
+				 *
+				 * Note: it's possible that rd_backend gets set to MyBackendId
+				 * here, in case we are looking at a pg_class entry left over
+				 * from a crashed backend that coincidentally had the same
+				 * BackendId we're using.  We should *not* consider such a
+				 * table to be "ours"; this is why we need the separate
+				 * rd_islocaltemp flag.  The pg_class entry will get flushed
+				 * if/when we clean out the corresponding temp table namespace
+				 * in preparation for using it.
 				 */
 				relation->rd_backend =
 					GetTempNamespaceBackendId(relation->rd_rel->relnamespace);
 				Assert(relation->rd_backend != InvalidBackendId);
+				relation->rd_islocaltemp = false;
 			}
 			break;
 		default:
@@ -1386,6 +1400,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	relation->rd_createSubid = InvalidSubTransactionId;
 	relation->rd_newRelfilenodeSubid = InvalidSubTransactionId;
 	relation->rd_backend = InvalidBackendId;
+	relation->rd_islocaltemp = false;
 
 	/*
 	 * initialize relation tuple form
@@ -1730,9 +1745,23 @@ RelationReloadIndexInfo(Relation relation)
 				 RelationGetRelid(relation));
 		index = (Form_pg_index) GETSTRUCT(tuple);
 
+		/*
+		 * Basically, let's just copy all the bool fields.  There are one or
+		 * two of these that can't actually change in the current code, but
+		 * it's not worth it to track exactly which ones they are.  None of
+		 * the array fields are allowed to change, though.
+		 */
+		relation->rd_index->indisunique = index->indisunique;
+		relation->rd_index->indisprimary = index->indisprimary;
+		relation->rd_index->indisexclusion = index->indisexclusion;
+		relation->rd_index->indimmediate = index->indimmediate;
+		relation->rd_index->indisclustered = index->indisclustered;
 		relation->rd_index->indisvalid = index->indisvalid;
 		relation->rd_index->indcheckxmin = index->indcheckxmin;
 		relation->rd_index->indisready = index->indisready;
+		relation->rd_index->indislive = index->indislive;
+
+		/* Copy xmin too, as that is needed to make sense of indcheckxmin */
 		HeapTupleHeaderSetXmin(relation->rd_indextuple->t_data,
 							   HeapTupleHeaderGetXmin(tuple->t_data));
 
@@ -2134,8 +2163,14 @@ RelationCacheInvalidate(void)
 		/* Must close all smgr references to avoid leaving dangling ptrs */
 		RelationCloseSmgr(relation);
 
-		/* Ignore new relations, since they are never cross-backend targets */
-		if (relation->rd_createSubid != InvalidSubTransactionId)
+		/*
+		 * Ignore new relations; no other backend will manipulate them before
+		 * we commit.  Likewise, before replacing a relation's relfilenode, we
+		 * shall have acquired AccessExclusiveLock and drained any applicable
+		 * pending invalidations.
+		 */
+		if (relation->rd_createSubid != InvalidSubTransactionId ||
+			relation->rd_newRelfilenodeSubid != InvalidSubTransactionId)
 			continue;
 
 		relcacheInvalsReceived++;
@@ -2523,16 +2558,19 @@ RelationBuildLocalRelation(const char *relname,
 	/* needed when bootstrapping: */
 	rel->rd_rel->relowner = BOOTSTRAP_SUPERUSERID;
 
-	/* set up persistence; rd_backend is a function of persistence type */
+	/* set up persistence and relcache fields dependent on it */
 	rel->rd_rel->relpersistence = relpersistence;
 	switch (relpersistence)
 	{
 		case RELPERSISTENCE_UNLOGGED:
 		case RELPERSISTENCE_PERMANENT:
 			rel->rd_backend = InvalidBackendId;
+			rel->rd_islocaltemp = false;
 			break;
 		case RELPERSISTENCE_TEMP:
+			Assert(isTempOrToastNamespace(relnamespace));
 			rel->rd_backend = MyBackendId;
+			rel->rd_islocaltemp = true;
 			break;
 		default:
 			elog(ERROR, "invalid relpersistence: %c", relpersistence);
@@ -3298,6 +3336,10 @@ CheckConstraintFetch(Relation relation)
  * so that we must recompute the index list on next request.  This handles
  * creation or deletion of an index.
  *
+ * Indexes that are marked not IndexIsLive are omitted from the returned list.
+ * Such indexes are expected to be dropped momentarily, and should not be
+ * touched at all by any caller of this function.
+ *
  * The returned list is guaranteed to be sorted in order by OID.  This is
  * needed by the executor, since for index types that we obtain exclusive
  * locks on when updating the index, all backends must lock the indexes in
@@ -3357,9 +3399,12 @@ RelationGetIndexList(Relation relation)
 		bool		isnull;
 
 		/*
-		 * Ignore any indexes that are currently being dropped
+		 * Ignore any indexes that are currently being dropped.  This will
+		 * prevent them from being searched, inserted into, or considered in
+		 * HOT-safety decisions.  It's unsafe to touch such an index at all
+		 * since its catalog entries could disappear at any instant.
 		 */
-		if (!index->indisvalid && !index->indisready)
+		if (!IndexIsLive(index))
 			continue;
 
 		/* Add index's OID to result list in the proper order */
@@ -3378,7 +3423,8 @@ RelationGetIndexList(Relation relation)
 		indclass = (oidvector *) DatumGetPointer(indclassDatum);
 
 		/* Check to see if it is a unique, non-partial btree index on OID */
-		if (index->indnatts == 1 &&
+		if (IndexIsValid(index) &&
+			index->indnatts == 1 &&
 			index->indisunique && index->indimmediate &&
 			index->indkey.values[0] == ObjectIdAttributeNumber &&
 			indclass->values[0] == OID_BTREE_OPS_OID &&
@@ -3548,12 +3594,6 @@ RelationGetIndexExpressions(Relation relation)
 	 */
 	result = (List *) eval_const_expressions(NULL, (Node *) result);
 
-	/*
-	 * Also mark any coercion format fields as "don't care", so that the
-	 * planner can match to both explicit and implicit coercions.
-	 */
-	set_coercionform_dontcare((Node *) result);
-
 	/* May as well fix opfuncids too */
 	fix_opfuncids((Node *) result);
 
@@ -3620,12 +3660,6 @@ RelationGetIndexPredicate(Relation relation)
 
 	result = (List *) canonicalize_qual((Expr *) result);
 
-	/*
-	 * Also mark any coercion format fields as "don't care", so that the
-	 * planner can match to both explicit and implicit coercions.
-	 */
-	set_coercionform_dontcare((Node *) result);
-
 	/* Also convert to implicit-AND format */
 	result = make_ands_implicit((Expr *) result);
 
@@ -3685,6 +3719,13 @@ RelationGetIndexAttrBitmap(Relation relation)
 
 	/*
 	 * For each index, add referenced attributes to indexattrs.
+	 *
+	 * Note: we consider all indexes returned by RelationGetIndexList, even if
+	 * they are not indisready or indisvalid.  This is important because an
+	 * index for which CREATE INDEX CONCURRENTLY has just started must be
+	 * included in HOT-safety decisions (see README.HOT).  If a DROP INDEX
+	 * CONCURRENTLY is far enough along that we should ignore the index, it
+	 * won't be returned at all by RelationGetIndexList.
 	 */
 	indexattrs = NULL;
 	foreach(l, indexoidlist)

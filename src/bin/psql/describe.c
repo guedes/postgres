@@ -6,13 +6,15 @@
  * with servers of versions 7.4 and up.  It's okay to omit irrelevant
  * information for an old server, but not to fail outright.
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/describe.c
  */
 #include "postgres_fe.h"
 
 #include <ctype.h>
+
+#include "catalog/pg_default_acl.h"
 
 #include "common.h"
 #include "describe.h"
@@ -774,7 +776,7 @@ permissionsList(const char *pattern)
 /*
  * \ddp
  *
- * List DefaultACLs.  The pattern can match either schema or role name.
+ * List Default ACLs.  The pattern can match either schema or role name.
  */
 bool
 listDefaultACLs(const char *pattern)
@@ -796,13 +798,18 @@ listDefaultACLs(const char *pattern)
 	printfPQExpBuffer(&buf,
 			   "SELECT pg_catalog.pg_get_userbyid(d.defaclrole) AS \"%s\",\n"
 					  "  n.nspname AS \"%s\",\n"
-					  "  CASE d.defaclobjtype WHEN 'r' THEN '%s' WHEN 'S' THEN '%s' WHEN 'f' THEN '%s' END AS \"%s\",\n"
+					  "  CASE d.defaclobjtype WHEN '%c' THEN '%s' WHEN '%c' THEN '%s' WHEN '%c' THEN '%s' WHEN '%c' THEN '%s' END AS \"%s\",\n"
 					  "  ",
 					  gettext_noop("Owner"),
 					  gettext_noop("Schema"),
+					  DEFACLOBJ_RELATION,
 					  gettext_noop("table"),
+					  DEFACLOBJ_SEQUENCE,
 					  gettext_noop("sequence"),
+					  DEFACLOBJ_FUNCTION,
 					  gettext_noop("function"),
+					  DEFACLOBJ_TYPE,
+					  gettext_noop("type"),
 					  gettext_noop("Type"));
 
 	printACLColumn(&buf, "d.defaclacl");
@@ -1236,13 +1243,14 @@ describeOneTableDetails(const char *schemaname,
 	tableinfo.hastriggers = strcmp(PQgetvalue(res, 0, 4), "t") == 0;
 	tableinfo.hasoids = strcmp(PQgetvalue(res, 0, 5), "t") == 0;
 	tableinfo.reloptions = (pset.sversion >= 80200) ?
-		strdup(PQgetvalue(res, 0, 6)) : 0;
+		pg_strdup(PQgetvalue(res, 0, 6)) : NULL;
 	tableinfo.tablespace = (pset.sversion >= 80000) ?
 		atooid(PQgetvalue(res, 0, 7)) : 0;
-	tableinfo.reloftype = (pset.sversion >= 90000 && strcmp(PQgetvalue(res, 0, 8), "") != 0) ?
-		strdup(PQgetvalue(res, 0, 8)) : 0;
-	tableinfo.relpersistence = (pset.sversion >= 90100 && strcmp(PQgetvalue(res, 0, 9), "") != 0) ?
-		PQgetvalue(res, 0, 9)[0] : 0;
+	tableinfo.reloftype = (pset.sversion >= 90000 &&
+						   strcmp(PQgetvalue(res, 0, 8), "") != 0) ?
+		pg_strdup(PQgetvalue(res, 0, 8)) : NULL;
+	tableinfo.relpersistence = (pset.sversion >= 90100) ?
+		*(PQgetvalue(res, 0, 9)) : 0;
 	PQclear(res);
 	res = NULL;
 
@@ -1381,7 +1389,7 @@ describeOneTableDetails(const char *schemaname,
 	{
 		show_modifiers = true;
 		headers[cols++] = gettext_noop("Modifiers");
-		modifiers = pg_malloc_zero((numrows + 1) * sizeof(*modifiers));
+		modifiers = pg_malloc0((numrows + 1) * sizeof(*modifiers));
 	}
 
 	if (tableinfo.relkind == 'S')
@@ -2223,7 +2231,7 @@ describeOneTableDetails(const char *schemaname,
 			printTableAddFooter(&cont, buf.data);
 		}
 
-		/* OIDs and options */
+		/* OIDs, if verbose */
 		if (verbose)
 		{
 			const char *s = _("Has OIDs");
@@ -2231,23 +2239,21 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&buf, "%s: %s", s,
 							  (tableinfo.hasoids ? _("yes") : _("no")));
 			printTableAddFooter(&cont, buf.data);
-
-			/* print reloptions */
-			if (pset.sversion >= 80200)
-			{
-				if (tableinfo.reloptions && tableinfo.reloptions[0] != '\0')
-				{
-					const char *t = _("Options");
-
-					printfPQExpBuffer(&buf, "%s: %s", t,
-									  tableinfo.reloptions);
-					printTableAddFooter(&cont, buf.data);
-				}
-			}
 		}
 
+		/* Tablespace info */
 		add_tablespace_footer(&cont, tableinfo.relkind, tableinfo.tablespace,
 							  true);
+	}
+
+	/* reloptions, if verbose */
+	if (verbose &&
+		tableinfo.reloptions && tableinfo.reloptions[0] != '\0')
+	{
+		const char *t = _("Options");
+
+		printfPQExpBuffer(&buf, "%s: %s", t, tableinfo.reloptions);
+		printTableAddFooter(&cont, buf.data);
 	}
 
 	printTable(&cont, pset.queryFout, pset.logfile);
@@ -2418,7 +2424,7 @@ describeRoles(const char *pattern, bool verbose)
 		return false;
 
 	nrows = PQntuples(res);
-	attr = pg_malloc_zero((nrows + 1) * sizeof(*attr));
+	attr = pg_malloc0((nrows + 1) * sizeof(*attr));
 
 	printTableInit(&cont, &myopt, _("List of roles"), ncols, nrows);
 
@@ -2523,16 +2529,19 @@ listDbRoleSettings(const char *pattern, const char *pattern2)
 	{
 		bool		havewhere;
 
-		printfPQExpBuffer(&buf, "SELECT rolname AS role, datname AS database,\n"
-				"pg_catalog.array_to_string(setconfig, E'\\n') AS settings\n"
+		printfPQExpBuffer(&buf, "SELECT rolname AS \"%s\", datname AS \"%s\",\n"
+				"pg_catalog.array_to_string(setconfig, E'\\n') AS \"%s\"\n"
 						  "FROM pg_db_role_setting AS s\n"
 				   "LEFT JOIN pg_database ON pg_database.oid = setdatabase\n"
-						  "LEFT JOIN pg_roles ON pg_roles.oid = setrole\n");
+						  "LEFT JOIN pg_roles ON pg_roles.oid = setrole\n",
+						  gettext_noop("Role"),
+						  gettext_noop("Database"),
+						  gettext_noop("Settings"));
 		havewhere = processSQLNamePattern(pset.db, &buf, pattern, false, false,
 									   NULL, "pg_roles.rolname", NULL, NULL);
 		processSQLNamePattern(pset.db, &buf, pattern2, havewhere, false,
 							  NULL, "pg_database.datname", NULL, NULL);
-		appendPQExpBufferStr(&buf, "ORDER BY role, database;");
+		appendPQExpBufferStr(&buf, "ORDER BY 1, 2;");
 	}
 	else
 	{

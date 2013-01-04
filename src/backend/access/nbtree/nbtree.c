@@ -8,7 +8,7 @@
  *	  This file contains only the public interface routines.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -18,6 +18,7 @@
  */
 #include "postgres.h"
 
+#include "access/heapam_xlog.h"
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "catalog/index.h"
@@ -583,6 +584,10 @@ btmarkpos(PG_FUNCTION_ARGS)
 	else
 		so->markItemIndex = -1;
 
+	/* Also record the current positions of any array keys */
+	if (so->numArrayKeys)
+		_bt_mark_array_keys(scan);
+
 	PG_RETURN_VOID();
 }
 
@@ -594,6 +599,10 @@ btrestrpos(PG_FUNCTION_ARGS)
 {
 	IndexScanDesc scan = (IndexScanDesc) PG_GETARG_POINTER(0);
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	/* Restore the marked positions of any array keys */
+	if (so->numArrayKeys)
+		_bt_restore_array_keys(scan);
 
 	if (so->markItemIndex >= 0)
 	{

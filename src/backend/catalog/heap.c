@@ -3,7 +3,7 @@
  * heap.c
  *	  code to create and destroy POSTGRES heap relations
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,6 +29,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -48,6 +49,7 @@
 #include "catalog/pg_type.h"
 #include "catalog/pg_type_fn.h"
 #include "catalog/storage.h"
+#include "catalog/storage_xlog.h"
 #include "commands/tablecmds.h"
 #include "commands/typecmds.h"
 #include "miscadmin.h"
@@ -984,7 +986,8 @@ heap_create_with_catalog(const char *relname,
 						 OnCommitAction oncommit,
 						 Datum reloptions,
 						 bool use_user_acl,
-						 bool allow_system_table_mods)
+						 bool allow_system_table_mods,
+						 bool is_internal)
 {
 	Relation	pg_class_desc;
 	Relation	new_rel_desc;
@@ -1274,8 +1277,15 @@ heap_create_with_catalog(const char *relname,
 	}
 
 	/* Post creation hook for new relation */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   RelationRelationId, relid, 0, NULL);
+	if (object_access_hook)
+	{
+		ObjectAccessPostCreate	post_create_args;
+
+		memset(&post_create_args, 0, sizeof(ObjectAccessPostCreate));
+		post_create_args.is_internal = is_internal;
+		(*object_access_hook)(OAT_POST_CREATE, RelationRelationId,
+							  relid, 0, &post_create_args);
+    }
 
 	/*
 	 * Store any supplied constraints and defaults.
@@ -1415,6 +1425,47 @@ DeleteAttributeTuples(Oid relid)
 
 	scan = systable_beginscan(attrel, AttributeRelidNumIndexId, true,
 							  SnapshotNow, 1, key);
+
+	/* Delete all the matching tuples */
+	while ((atttup = systable_getnext(scan)) != NULL)
+		simple_heap_delete(attrel, &atttup->t_self);
+
+	/* Clean up after the scan */
+	systable_endscan(scan);
+	heap_close(attrel, RowExclusiveLock);
+}
+
+/*
+ *		DeleteSystemAttributeTuples
+ *
+ * Remove pg_attribute rows for system columns of the given relid.
+ *
+ * Note: this is only used when converting a table to a view.  Views don't
+ * have system columns, so we should remove them from pg_attribute.
+ */
+void
+DeleteSystemAttributeTuples(Oid relid)
+{
+	Relation	attrel;
+	SysScanDesc scan;
+	ScanKeyData key[2];
+	HeapTuple	atttup;
+
+	/* Grab an appropriate lock on the pg_attribute relation */
+	attrel = heap_open(AttributeRelationId, RowExclusiveLock);
+
+	/* Use the index to scan only system attributes of the target relation */
+	ScanKeyInit(&key[0],
+				Anum_pg_attribute_attrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+	ScanKeyInit(&key[1],
+				Anum_pg_attribute_attnum,
+				BTLessEqualStrategyNumber, F_INT2LE,
+				Int16GetDatum(0));
+
+	scan = systable_beginscan(attrel, AttributeRelidNumIndexId, true,
+							  SnapshotNow, 2, key);
 
 	/* Delete all the matching tuples */
 	while ((atttup = systable_getnext(scan)) != NULL)

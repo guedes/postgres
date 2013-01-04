@@ -113,6 +113,13 @@
      </varlistentry>
 
      <varlistentry>
+      <term><option>-j</option></term>
+      <term><option>--jobs</option></term>
+      <listitem><para>number of simultaneous processes or threads to use
+      </para></listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>-k</option></term>
       <term><option>--link</option></term>
       <listitem><para>use hard links instead of copying files to the new cluster</para></listitem>
@@ -331,10 +338,15 @@ NET STOP pgsql-8.3  (<productname>PostgreSQL</> 8.3 and older used a different s
      requires that the old and new cluster data directories be in the
      same file system.  See <literal>pg_upgrade --help</> for a full
      list of options.
-   </para>
+    </para>
 
-   <para>
-   </para>
+    <para>
+     The <option>--jobs</> option allows multiple CPU cores to be used
+     to dump and reload database schemas in parallel;  a good place to
+     start is the number of CPU cores on the server.  This option can
+     dramatically reduce the time to upgrade a multi-database server
+     running on a multiprocessor machine.
+    </para>
 
     <para>
      For Windows users, you must be logged into an administrative account, and
@@ -367,8 +379,10 @@ pg_upgrade.exe
      Obviously, no one should be accessing the clusters during the
      upgrade.  <application>pg_upgrade</> defaults to running servers
      on port 50432 to avoid unintended client connections.
-     You can use the same port numbers for both clusters because the
-     old and new clusters will not be running at the same time.
+     You can use the same port number for both clusters when doing an
+     upgrade because the old and new clusters will not be running at the
+     same time.  However, when checking an old running server, the old
+     and new port numbers must be different.
     </para>
 
     <para>
@@ -518,9 +532,19 @@ psql --username postgres --file script.sql postgres
   </para>
 
   <para>
+   If using a pre-9.1 old server that is using a non-default Unix-domain
+   socket directory or a default that differs from the default of the
+   new cluster, set <envar>PGHOST</> to point to the old server's socket
+   location.  (This is not relevant on Windows.)
+  </para>
+
+  <para>
    A Log-Shipping Standby Server (<xref linkend="warm-standby">) cannot
    be upgraded because the server must allow writes.  The simplest way
-   is to upgrade the primary and use rsync to rebuild the standbys.
+   is to upgrade the primary and use <command>rsync</> to rebuild the
+   standbys.  You can run <command>rsync</> while the primary is down,
+   or as part of a base backup (<xref linkend="backup-base-backup">)
+   which overwrites the old standby cluster.
   </para>
 
   <para>

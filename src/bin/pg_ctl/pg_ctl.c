@@ -2,7 +2,7 @@
  *
  * pg_ctl --- start/stops/restarts the PostgreSQL server
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  *
  * src/bin/pg_ctl/pg_ctl.c
  *
@@ -20,6 +20,7 @@
 #include "postgres_fe.h"
 #include "libpq-fe.h"
 
+#include <fcntl.h>
 #include <locale.h>
 #include <signal.h>
 #include <time.h>
@@ -118,7 +119,7 @@ write_stderr(const char *fmt,...)
    the supplied arguments. */
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 static void *pg_malloc(size_t size);
-static char *xstrdup(const char *s);
+static char *pg_strdup(const char *s);
 static void do_advice(void);
 static void do_help(void);
 static void set_mode(char *modeopt);
@@ -233,6 +234,9 @@ pg_malloc(size_t size)
 {
 	void	   *result;
 
+	/* Avoid unportable behavior of malloc(0) */
+	if (size == 0)
+		size = 1;
 	result = malloc(size);
 	if (!result)
 	{
@@ -244,7 +248,7 @@ pg_malloc(size_t size)
 
 
 static char *
-xstrdup(const char *s)
+pg_strdup(const char *s)
 {
 	char	   *result;
 
@@ -292,8 +296,13 @@ get_pgpid(void)
 	}
 	if (fscanf(pidf, "%ld", &pid) != 1)
 	{
-		write_stderr(_("%s: invalid data in PID file \"%s\"\n"),
-					 progname, pid_file);
+		/* Is the file empty? */
+		if (ftell(pidf) == 0 && feof(pidf))
+			write_stderr(_("%s: the PID file \"%s\" is empty\n"),
+						 progname, pid_file);
+		else
+			write_stderr(_("%s: invalid data in PID file \"%s\"\n"),
+						 progname, pid_file);
 		exit(1);
 	}
 	fclose(pidf);
@@ -307,50 +316,84 @@ get_pgpid(void)
 static char **
 readfile(const char *path)
 {
-	FILE	   *infile;
-	int			maxlength = 1,
-				linelen = 0;
-	int			nlines = 0;
+	int			fd;
+	int			nlines;
 	char	  **result;
 	char	   *buffer;
-	int			c;
+	char	   *linebegin;
+	int			i;
+	int			n;
+	int			len;
+	struct stat	statbuf;
 
-	if ((infile = fopen(path, "r")) == NULL)
+	/*
+	 * Slurp the file into memory.
+	 *
+	 * The file can change concurrently, so we read the whole file into memory
+	 * with a single read() call. That's not guaranteed to get an atomic
+	 * snapshot, but in practice, for a small file, it's close enough for the
+	 * current use.
+	 */
+	fd = open(path, O_RDONLY | PG_BINARY, 0);
+	if (fd < 0)
 		return NULL;
-
-	/* pass over the file twice - the first time to size the result */
-
-	while ((c = fgetc(infile)) != EOF)
+	if (fstat(fd, &statbuf) < 0)
 	{
-		linelen++;
-		if (c == '\n')
-		{
-			nlines++;
-			if (linelen > maxlength)
-				maxlength = linelen;
-			linelen = 0;
-		}
+		close(fd);
+		return NULL;
+	}
+	if (statbuf.st_size == 0)
+	{
+		/* empty file */
+		close(fd);
+		result = (char **) pg_malloc(sizeof(char *));
+		*result = NULL;
+		return result;
+	}
+	buffer = pg_malloc(statbuf.st_size + 1);
+
+	len = read(fd, buffer, statbuf.st_size + 1);
+	close(fd);
+	if (len != statbuf.st_size)
+	{
+		/* oops, the file size changed between fstat and read */
+		free(buffer);
+		return NULL;
 	}
 
-	/* handle last line without a terminating newline (yuck) */
-	if (linelen)
-		nlines++;
-	if (linelen > maxlength)
-		maxlength = linelen;
-
-	/* set up the result and the line buffer */
-	result = (char **) pg_malloc((nlines + 1) * sizeof(char *));
-	buffer = (char *) pg_malloc(maxlength + 1);
-
-	/* now reprocess the file and store the lines */
-	rewind(infile);
+	/*
+	 * Count newlines. We expect there to be a newline after each full line,
+	 * including one at the end of file. If there isn't a newline at the end,
+	 * any characters after the last newline will be ignored.
+	 */
 	nlines = 0;
-	while (fgets(buffer, maxlength + 1, infile) != NULL)
-		result[nlines++] = xstrdup(buffer);
+	for (i = 0; i < len; i++)
+	{
+		if (buffer[i] == '\n')
+			nlines++;
+	}
 
-	fclose(infile);
+	/* set up the result buffer */
+	result = (char **) pg_malloc((nlines + 1) * sizeof(char *));
+
+	/* now split the buffer into lines */
+	linebegin = buffer;
+	n = 0;
+	for (i = 0; i < len; i++)
+	{
+		if (buffer[i] == '\n')
+		{
+			int		slen = &buffer[i] - linebegin + 1;
+			char   *linebuf = pg_malloc(slen + 1);
+			memcpy(linebuf, linebegin, slen);
+			linebuf[slen] = '\0';
+			result[n++] = linebuf;
+			linebegin = &buffer[i + 1];
+		}
+	}
+	result[n] = NULL;
+
 	free(buffer);
-	result[nlines] = NULL;
 
 	return result;
 }
@@ -1926,7 +1969,7 @@ adjust_data_dir(void)
 	if (exec_path == NULL)
 		my_exec_path = find_other_exec_or_die(argv0, "postgres", PG_BACKEND_VERSIONSTR);
 	else
-		my_exec_path = xstrdup(exec_path);
+		my_exec_path = pg_strdup(exec_path);
 
 	snprintf(cmd, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s -C data_directory" SYSTEMQUOTE,
 			 my_exec_path, pgdata_opt ? pgdata_opt : "", post_opts ?
@@ -1946,7 +1989,7 @@ adjust_data_dir(void)
 		*strchr(filename, '\n') = '\0';
 
 	free(pg_data);
-	pg_data = xstrdup(filename);
+	pg_data = pg_strdup(filename);
 	canonicalize_path(pg_data);
 }
 
@@ -2037,7 +2080,7 @@ main(int argc, char **argv)
 						char	   *pgdata_D;
 						char	   *env_var = pg_malloc(strlen(optarg) + 8);
 
-						pgdata_D = xstrdup(optarg);
+						pgdata_D = pg_strdup(optarg);
 						canonicalize_path(pgdata_D);
 						snprintf(env_var, strlen(optarg) + 8, "PGDATA=%s",
 								 pgdata_D);
@@ -2055,22 +2098,22 @@ main(int argc, char **argv)
 						break;
 					}
 				case 'l':
-					log_file = xstrdup(optarg);
+					log_file = pg_strdup(optarg);
 					break;
 				case 'm':
 					set_mode(optarg);
 					break;
 				case 'N':
-					register_servicename = xstrdup(optarg);
+					register_servicename = pg_strdup(optarg);
 					break;
 				case 'o':
-					post_opts = xstrdup(optarg);
+					post_opts = pg_strdup(optarg);
 					break;
 				case 'p':
-					exec_path = xstrdup(optarg);
+					exec_path = pg_strdup(optarg);
 					break;
 				case 'P':
-					register_password = xstrdup(optarg);
+					register_password = pg_strdup(optarg);
 					break;
 				case 's':
 					silent_mode = true;
@@ -2089,16 +2132,11 @@ main(int argc, char **argv)
 					break;
 				case 'U':
 					if (strchr(optarg, '\\'))
-						register_username = xstrdup(optarg);
+						register_username = pg_strdup(optarg);
 					else
 						/* Prepend .\ for local accounts */
 					{
-						register_username = malloc(strlen(optarg) + 3);
-						if (!register_username)
-						{
-							write_stderr(_("%s: out of memory\n"), progname);
-							exit(1);
-						}
+						register_username = pg_malloc(strlen(optarg) + 3);
 						strcpy(register_username, ".\\");
 						strcat(register_username, optarg);
 					}
@@ -2187,9 +2225,9 @@ main(int argc, char **argv)
 	pg_config = getenv("PGDATA");
 	if (pg_config)
 	{
-		pg_config = xstrdup(pg_config);
+		pg_config = pg_strdup(pg_config);
 		canonicalize_path(pg_config);
-		pg_data = xstrdup(pg_config);
+		pg_data = pg_strdup(pg_config);
 	}
 
 	/* -D might point at config-only directory; if so find the real PGDATA */

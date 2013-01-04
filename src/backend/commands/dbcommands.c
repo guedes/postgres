@@ -8,7 +8,7 @@
  * stepping on each others' toes.  Formerly we used table-level locks
  * on pg_database, but that's too coarse-grained.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "access/xlogutils.h"
 #include "catalog/catalog.h"
@@ -45,6 +46,7 @@
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
 #include "storage/copydir.h"
+#include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/ipc.h"
 #include "storage/procarray.h"
@@ -88,7 +90,7 @@ static int	errdetail_busy_db(int notherbackends, int npreparedxacts);
 /*
  * CREATE DATABASE
  */
-void
+Oid
 createdb(const CreatedbStmt *stmt)
 {
 	HeapScanDesc scan;
@@ -653,6 +655,8 @@ createdb(const CreatedbStmt *stmt)
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(createdb_failure_callback,
 								PointerGetDatum(&fparms));
+
+	return dboid;
 }
 
 /*
@@ -898,7 +902,7 @@ dropdb(const char *dbname, bool missing_ok)
 /*
  * Rename database
  */
-void
+Oid
 RenameDatabase(const char *oldname, const char *newname)
 {
 	Oid			db_id;
@@ -975,6 +979,8 @@ RenameDatabase(const char *oldname, const char *newname)
 	 * Close pg_database, but keep lock till commit.
 	 */
 	heap_close(rel, NoLock);
+
+	return db_id;
 }
 
 
@@ -1297,10 +1303,11 @@ movedb_failure_callback(int code, Datum arg)
 /*
  * ALTER DATABASE name ...
  */
-void
+Oid
 AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 {
 	Relation	rel;
+	Oid         dboid;
 	HeapTuple	tuple,
 				newtuple;
 	ScanKeyData scankey;
@@ -1346,7 +1353,7 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 		/* this case isn't allowed within a transaction block */
 		PreventTransactionChain(isTopLevel, "ALTER DATABASE SET TABLESPACE");
 		movedb(stmt->dbname, strVal(dtablespace->arg));
-		return;
+		return InvalidOid;
 	}
 
 	if (dconnlimit)
@@ -1376,6 +1383,8 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
 				 errmsg("database \"%s\" does not exist", stmt->dbname)));
 
+	dboid = HeapTupleGetOid(tuple);
+
 	if (!pg_database_ownercheck(HeapTupleGetOid(tuple), GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_DATABASE,
 					   stmt->dbname);
@@ -1404,13 +1413,15 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 
 	/* Close pg_database, but keep lock till commit */
 	heap_close(rel, NoLock);
+
+	return dboid;
 }
 
 
 /*
  * ALTER DATABASE name SET ...
  */
-void
+Oid
 AlterDatabaseSet(AlterDatabaseSetStmt *stmt)
 {
 	Oid			datid = get_database_oid(stmt->dbname, false);
@@ -1428,15 +1439,18 @@ AlterDatabaseSet(AlterDatabaseSetStmt *stmt)
 	AlterSetting(datid, InvalidOid, stmt->setstmt);
 
 	UnlockSharedObject(DatabaseRelationId, datid, 0, AccessShareLock);
+
+	return datid;
 }
 
 
 /*
  * ALTER DATABASE name OWNER TO newowner
  */
-void
+Oid
 AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 {
+	Oid			db_id;
 	HeapTuple	tuple;
 	Relation	rel;
 	ScanKeyData scankey;
@@ -1461,6 +1475,7 @@ AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
 				 errmsg("database \"%s\" does not exist", dbname)));
 
+	db_id = HeapTupleGetOid(tuple);
 	datForm = (Form_pg_database) GETSTRUCT(tuple);
 
 	/*
@@ -1537,6 +1552,8 @@ AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 
 	/* Close pg_database, but keep lock till commit */
 	heap_close(rel, NoLock);
+
+	return db_id;
 }
 
 
@@ -1989,28 +2006,4 @@ dbase_redo(XLogRecPtr lsn, XLogRecord *record)
 	}
 	else
 		elog(PANIC, "dbase_redo: unknown op code %u", info);
-}
-
-void
-dbase_desc(StringInfo buf, uint8 xl_info, char *rec)
-{
-	uint8		info = xl_info & ~XLR_INFO_MASK;
-
-	if (info == XLOG_DBASE_CREATE)
-	{
-		xl_dbase_create_rec *xlrec = (xl_dbase_create_rec *) rec;
-
-		appendStringInfo(buf, "create db: copy dir %u/%u to %u/%u",
-						 xlrec->src_db_id, xlrec->src_tablespace_id,
-						 xlrec->db_id, xlrec->tablespace_id);
-	}
-	else if (info == XLOG_DBASE_DROP)
-	{
-		xl_dbase_drop_rec *xlrec = (xl_dbase_drop_rec *) rec;
-
-		appendStringInfo(buf, "drop db: dir %u/%u",
-						 xlrec->db_id, xlrec->tablespace_id);
-	}
-	else
-		appendStringInfo(buf, "UNKNOWN");
 }

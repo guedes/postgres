@@ -4,7 +4,7 @@
  *	  Private declarations for SP-GiST access method.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/spgist_private.h
@@ -17,7 +17,8 @@
 #include "access/itup.h"
 #include "access/spgist.h"
 #include "nodes/tidbitmap.h"
-#include "utils/rel.h"
+#include "storage/relfilenode.h"
+#include "utils/relcache.h"
 
 
 /* Page numbers of fixed-location pages */

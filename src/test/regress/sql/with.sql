@@ -178,6 +178,17 @@ SELECT * FROM vsubdepartment ORDER BY name;
 SELECT pg_get_viewdef('vsubdepartment'::regclass);
 SELECT pg_get_viewdef('vsubdepartment'::regclass, true);
 
+-- Another reverse-listing example
+CREATE VIEW sums_1_100 AS
+WITH RECURSIVE t(n) AS (
+    VALUES (1)
+UNION ALL
+    SELECT n+1 FROM t WHERE n < 100
+)
+SELECT sum(n) FROM t;
+
+\d+ sums_1_100
+
 -- corner case in which sub-WITH gets initialized first
 with recursive q as (
       select * from department
@@ -573,6 +584,20 @@ WITH RECURSIVE outermost(x) AS (
     UNION SELECT * from outermost
 )
 SELECT * FROM outermost;
+
+--
+-- This test will fail with the old implementation of PARAM_EXEC parameter
+-- assignment, because the "q1" Var passed down to A's targetlist subselect
+-- looks exactly like the "A.id" Var passed down to C's subselect, causing
+-- the old code to give them the same runtime PARAM_EXEC slot.  But the
+-- lifespans of the two parameters overlap, thanks to B also reading A.
+--
+
+with
+A as ( select q2 as id, (select q1) as x from int8_tbl ),
+B as ( select id, row_number() over (partition by id) as r from A ),
+C as ( select A.id, array(select B.id from B where B.id = A.id) from A )
+select * from C;
 
 --
 -- Test CTEs read in non-initialization orders

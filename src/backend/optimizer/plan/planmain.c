@@ -9,7 +9,7 @@
  * shorn of features like subselects, inheritance, aggregates, grouping,
  * and so on.  (Those are the things planner.c deals with.)
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -267,7 +267,8 @@ query_planner(PlannerInfo *root, List *tlist,
 	 */
 	final_rel = make_one_rel(root, joinlist);
 
-	if (!final_rel || !final_rel->cheapest_total_path)
+	if (!final_rel || !final_rel->cheapest_total_path ||
+		final_rel->cheapest_total_path->param_info != NULL)
 		elog(ERROR, "failed to construct the join relation");
 
 	/*

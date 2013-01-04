@@ -3,7 +3,7 @@
  * bufmgr.c
  *	  buffer manager interface routines
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -46,7 +46,7 @@
 #include "storage/smgr.h"
 #include "storage/standby.h"
 #include "utils/rel.h"
-#include "utils/resowner.h"
+#include "utils/resowner_private.h"
 #include "utils/timestamp.h"
 
 
@@ -270,6 +270,8 @@ ReadBufferWithoutRelcache(RelFileNode rnode, ForkNumber forkNum,
 	bool		hit;
 
 	SMgrRelation smgr = smgropen(rnode, InvalidBackendId);
+
+	Assert(InRecovery);
 
 	return ReadBuffer_common(smgr, RELPERSISTENCE_PERMANENT, forkNum, blockNum,
 							 mode, strategy, &hit);
@@ -1204,9 +1206,9 @@ BufferSync(int flags)
 
 	/*
 	 * Unless this is a shutdown checkpoint, we write only permanent, dirty
-	 * buffers.  But at shutdown time, we write all dirty buffers.
+	 * buffers.  But at shutdown or end of recovery, we write all dirty buffers.
 	 */
-	if (!(flags & CHECKPOINT_IS_SHUTDOWN))
+	if (!((flags & CHECKPOINT_IS_SHUTDOWN) || (flags & CHECKPOINT_END_OF_RECOVERY)))
 		mask |= BM_PERMANENT;
 
 	/*
@@ -1880,16 +1882,13 @@ BufferGetTag(Buffer buffer, RelFileNode *rnode, ForkNumber *forknum,
  * written.)
  *
  * If the caller has an smgr reference for the buffer's relation, pass it
- * as the second parameter.  If not, pass NULL.  In the latter case, the
- * relation will be marked as "transient" so that the corresponding
- * kernel-level file descriptors are closed when the current transaction ends,
- * if any.
+ * as the second parameter.  If not, pass NULL.
  */
 static void
 FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 {
 	XLogRecPtr	recptr;
-	ErrorContextCallback errcontext;
+	ErrorContextCallback errcallback;
 	instr_time	io_start,
 				io_time;
 
@@ -1902,17 +1901,14 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 		return;
 
 	/* Setup error traceback support for ereport() */
-	errcontext.callback = shared_buffer_write_error_callback;
-	errcontext.arg = (void *) buf;
-	errcontext.previous = error_context_stack;
-	error_context_stack = &errcontext;
+	errcallback.callback = shared_buffer_write_error_callback;
+	errcallback.arg = (void *) buf;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
-	/* Find smgr relation for buffer, and mark it as transient */
+	/* Find smgr relation for buffer */
 	if (reln == NULL)
-	{
 		reln = smgropen(buf->tag.rnode, InvalidBackendId);
-		smgrsettransient(reln);
-	}
 
 	TRACE_POSTGRESQL_BUFFER_FLUSH_START(buf->tag.forkNum,
 										buf->tag.blockNum,
@@ -1971,7 +1967,7 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 									   reln->smgr_rnode.node.relNode);
 
 	/* Pop the error context stack */
-	error_context_stack = errcontext.previous;
+	error_context_stack = errcallback.previous;
 }
 
 /*
@@ -2257,13 +2253,13 @@ FlushRelationBuffers(Relation rel)
 			if (RelFileNodeEquals(bufHdr->tag.rnode, rel->rd_node) &&
 				(bufHdr->flags & BM_VALID) && (bufHdr->flags & BM_DIRTY))
 			{
-				ErrorContextCallback errcontext;
+				ErrorContextCallback errcallback;
 
 				/* Setup error traceback support for ereport() */
-				errcontext.callback = local_buffer_write_error_callback;
-				errcontext.arg = (void *) bufHdr;
-				errcontext.previous = error_context_stack;
-				error_context_stack = &errcontext;
+				errcallback.callback = local_buffer_write_error_callback;
+				errcallback.arg = (void *) bufHdr;
+				errcallback.previous = error_context_stack;
+				error_context_stack = &errcallback;
 
 				smgrwrite(rel->rd_smgr,
 						  bufHdr->tag.forkNum,
@@ -2274,7 +2270,7 @@ FlushRelationBuffers(Relation rel)
 				bufHdr->flags &= ~(BM_DIRTY | BM_JUST_DIRTIED);
 
 				/* Pop the error context stack */
-				error_context_stack = errcontext.previous;
+				error_context_stack = errcallback.previous;
 			}
 		}
 

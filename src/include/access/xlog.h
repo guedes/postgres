@@ -3,7 +3,7 @@
  *
  * PostgreSQL transaction log manager
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/xlog.h
@@ -71,11 +71,7 @@ typedef struct XLogRecord
  */
 #define XLR_BKP_BLOCK_MASK		0x0F	/* all info bits used for bkp blocks */
 #define XLR_MAX_BKP_BLOCKS		4
-#define XLR_SET_BKP_BLOCK(iblk) (0x08 >> (iblk))
-#define XLR_BKP_BLOCK_1			XLR_SET_BKP_BLOCK(0)	/* 0x08 */
-#define XLR_BKP_BLOCK_2			XLR_SET_BKP_BLOCK(1)	/* 0x04 */
-#define XLR_BKP_BLOCK_3			XLR_SET_BKP_BLOCK(2)	/* 0x02 */
-#define XLR_BKP_BLOCK_4			XLR_SET_BKP_BLOCK(3)	/* 0x01 */
+#define XLR_BKP_BLOCK(iblk)		(0x08 >> (iblk))		/* iblk in 0..3 */
 
 /* Sync methods */
 #define SYNC_METHOD_FSYNC		0
@@ -94,13 +90,13 @@ extern int	sync_method;
  * If buffer is valid then XLOG will check if buffer must be backed up
  * (ie, whether this is first change of that page since last checkpoint).
  * If so, the whole page contents are attached to the XLOG record, and XLOG
- * sets XLR_BKP_BLOCK_X bit in xl_info.  Note that the buffer must be pinned
+ * sets XLR_BKP_BLOCK(N) bit in xl_info.  Note that the buffer must be pinned
  * and exclusive-locked by the caller, so that it won't change under us.
  * NB: when the buffer is backed up, we DO NOT insert the data pointed to by
  * this XLogRecData struct into the XLOG record, since we assume it's present
  * in the buffer.  Therefore, rmgr redo routines MUST pay attention to
- * XLR_BKP_BLOCK_X to know what is actually stored in the XLOG record.
- * The i'th XLR_BKP_BLOCK bit corresponds to the i'th distinct buffer
+ * XLR_BKP_BLOCK(N) to know what is actually stored in the XLOG record.
+ * The N'th XLR_BKP_BLOCK bit corresponds to the N'th distinct buffer
  * value (ignoring InvalidBuffer) appearing in the rdata chain.
  *
  * When buffer is valid, caller must set buffer_std to indicate whether the
@@ -271,10 +267,12 @@ extern bool XLogNeedsFlush(XLogRecPtr RecPtr);
 extern int XLogFileInit(XLogSegNo segno, bool *use_existent, bool use_lock);
 extern int	XLogFileOpen(XLogSegNo segno);
 
-extern void XLogGetLastRemoved(XLogSegNo *segno);
+extern void CheckXLogRemoved(XLogSegNo segno, TimeLineID tli);
 extern void XLogSetAsyncXactLSN(XLogRecPtr record);
 
-extern void RestoreBkpBlocks(XLogRecPtr lsn, XLogRecord *record, bool cleanup);
+extern Buffer RestoreBackupBlock(XLogRecPtr lsn, XLogRecord *record,
+				   int block_index,
+				   bool get_cleanup_lock, bool keep_buffer);
 
 extern void xlog_redo(XLogRecPtr lsn, XLogRecord *record);
 extern void xlog_desc(StringInfo buf, uint8 xl_info, char *rec);
@@ -285,8 +283,7 @@ extern bool RecoveryInProgress(void);
 extern bool HotStandbyActive(void);
 extern bool XLogInsertAllowed(void);
 extern void GetXLogReceiptTime(TimestampTz *rtime, bool *fromStream);
-extern XLogRecPtr GetXLogReplayRecPtr(XLogRecPtr *restoreLastRecPtr);
-extern XLogRecPtr GetStandbyFlushRecPtr(void);
+extern XLogRecPtr GetXLogReplayRecPtr(TimeLineID *replayTLI);
 extern XLogRecPtr GetXLogInsertRecPtr(void);
 extern XLogRecPtr GetXLogWriteRecPtr(void);
 extern bool RecoveryIsPaused(void);
@@ -312,7 +309,6 @@ extern XLogRecPtr GetRedoRecPtr(void);
 extern XLogRecPtr GetInsertRecPtr(void);
 extern XLogRecPtr GetFlushRecPtr(void);
 extern void GetNextXidAndEpoch(TransactionId *xid, uint32 *epoch);
-extern TimeLineID GetRecoveryTargetTLI(void);
 
 extern bool CheckPromoteSignal(void);
 extern void WakeupRecovery(void);

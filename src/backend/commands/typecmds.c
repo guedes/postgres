@@ -3,7 +3,7 @@
  * typecmds.c
  *	  Routines for SQL commands that manipulate types (and domains).
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,6 +33,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
@@ -110,7 +111,7 @@ static char *domainAddConstraint(Oid domainOid, Oid domainNamespace,
  * DefineType
  *		Registers a new base type.
  */
-void
+Oid
 DefineType(List *names, List *parameters)
 {
 	char	   *typeName;
@@ -224,7 +225,7 @@ DefineType(List *names, List *parameters)
 		 * creating the shell type was all we're supposed to do.
 		 */
 		if (parameters == NIL)
-			return;
+			return InvalidOid;
 	}
 	else
 	{
@@ -592,39 +593,41 @@ DefineType(List *names, List *parameters)
 	/* alignment must be 'i' or 'd' for arrays */
 	alignment = (alignment == 'd') ? 'd' : 'i';
 
-	TypeCreate(array_oid,		/* force assignment of this type OID */
-			   array_type,		/* type name */
-			   typeNamespace,	/* namespace */
-			   InvalidOid,		/* relation oid (n/a here) */
-			   0,				/* relation kind (ditto) */
-			   GetUserId(),		/* owner's ID */
-			   -1,				/* internal size (always varlena) */
-			   TYPTYPE_BASE,	/* type-type (base type) */
-			   TYPCATEGORY_ARRAY,		/* type-category (array) */
-			   false,			/* array types are never preferred */
-			   delimiter,		/* array element delimiter */
-			   F_ARRAY_IN,		/* input procedure */
-			   F_ARRAY_OUT,		/* output procedure */
-			   F_ARRAY_RECV,	/* receive procedure */
-			   F_ARRAY_SEND,	/* send procedure */
-			   typmodinOid,		/* typmodin procedure */
-			   typmodoutOid,	/* typmodout procedure */
-			   F_ARRAY_TYPANALYZE,		/* analyze procedure */
-			   typoid,			/* element type ID */
-			   true,			/* yes this is an array type */
-			   InvalidOid,		/* no further array type */
-			   InvalidOid,		/* base type ID */
-			   NULL,			/* never a default type value */
-			   NULL,			/* binary default isn't sent either */
-			   false,			/* never passed by value */
-			   alignment,		/* see above */
-			   'x',				/* ARRAY is always toastable */
-			   -1,				/* typMod (Domains only) */
-			   0,				/* Array dimensions of typbasetype */
-			   false,			/* Type NOT NULL */
-			   collation);		/* type's collation */
+	typoid = TypeCreate(array_oid,		/* force assignment of this type OID */
+						array_type,		/* type name */
+						typeNamespace,	/* namespace */
+						InvalidOid,		/* relation oid (n/a here) */
+						0,				/* relation kind (ditto) */
+						GetUserId(),		/* owner's ID */
+						-1,				/* internal size (always varlena) */
+						TYPTYPE_BASE,	/* type-type (base type) */
+						TYPCATEGORY_ARRAY,		/* type-category (array) */
+						false,			/* array types are never preferred */
+						delimiter,		/* array element delimiter */
+						F_ARRAY_IN,		/* input procedure */
+						F_ARRAY_OUT,		/* output procedure */
+						F_ARRAY_RECV,	/* receive procedure */
+						F_ARRAY_SEND,	/* send procedure */
+						typmodinOid,		/* typmodin procedure */
+						typmodoutOid,	/* typmodout procedure */
+						F_ARRAY_TYPANALYZE,		/* analyze procedure */
+						typoid,			/* element type ID */
+						true,			/* yes this is an array type */
+						InvalidOid,		/* no further array type */
+						InvalidOid,		/* base type ID */
+						NULL,			/* never a default type value */
+						NULL,			/* binary default isn't sent either */
+						false,			/* never passed by value */
+						alignment,		/* see above */
+						'x',				/* ARRAY is always toastable */
+						-1,				/* typMod (Domains only) */
+						0,				/* Array dimensions of typbasetype */
+						false,			/* Type NOT NULL */
+						collation);		/* type's collation */
 
 	pfree(array_type);
+
+	return typoid;
 }
 
 /*
@@ -670,7 +673,7 @@ RemoveTypeById(Oid typeOid)
  * DefineDomain
  *		Registers a new domain.
  */
-void
+Oid
 DefineDomain(CreateDomainStmt *stmt)
 {
 	char	   *domainName;
@@ -885,9 +888,7 @@ DefineDomain(CreateDomainStmt *stmt)
 						 */
 						defaultValue =
 							deparse_expression(defaultExpr,
-											   deparse_context_for(domainName,
-																 InvalidOid),
-											   false, false);
+											   NIL, false, false);
 						defaultValueBin = nodeToString(defaultExpr);
 					}
 				}
@@ -1041,6 +1042,8 @@ DefineDomain(CreateDomainStmt *stmt)
 	 * Now we can clean up.
 	 */
 	ReleaseSysCache(typeTup);
+
+	return domainoid;
 }
 
 
@@ -1048,7 +1051,7 @@ DefineDomain(CreateDomainStmt *stmt)
  * DefineEnum
  *		Registers a new enum.
  */
-void
+Oid
 DefineEnum(CreateEnumStmt *stmt)
 {
 	char	   *enumName;
@@ -1161,14 +1164,16 @@ DefineEnum(CreateEnumStmt *stmt)
 			   InvalidOid);		/* type's collation */
 
 	pfree(enumArrayName);
+
+	return enumTypeOid;
 }
 
 /*
  * AlterEnum
  *		Adds a new label to an existing enum.
  */
-void
-AlterEnum(AlterEnumStmt *stmt)
+Oid
+AlterEnum(AlterEnumStmt *stmt, bool isTopLevel)
 {
 	Oid			enum_type_oid;
 	TypeName   *typename;
@@ -1182,14 +1187,36 @@ AlterEnum(AlterEnumStmt *stmt)
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type %u", enum_type_oid);
 
+	/*
+	 * Ordinarily we disallow adding values within transaction blocks, because
+	 * we can't cope with enum OID values getting into indexes and then having
+	 * their defining pg_enum entries go away.  However, it's okay if the enum
+	 * type was created in the current transaction, since then there can be
+	 * no such indexes that wouldn't themselves go away on rollback.  (We
+	 * support this case because pg_dump --binary-upgrade needs it.)  We test
+	 * this by seeing if the pg_type row has xmin == current XID and is not
+	 * HEAP_UPDATED.  If it is HEAP_UPDATED, we can't be sure whether the
+	 * type was created or only modified in this xact.  So we are disallowing
+	 * some cases that could theoretically be safe; but fortunately pg_dump
+	 * only needs the simplest case.
+	 */
+	if (HeapTupleHeaderGetXmin(tup->t_data) == GetCurrentTransactionId() &&
+		!(tup->t_data->t_infomask & HEAP_UPDATED))
+		/* safe to do inside transaction block */ ;
+	else
+		PreventTransactionChain(isTopLevel, "ALTER TYPE ... ADD");
+
 	/* Check it's an enum and check user has permission to ALTER the enum */
 	checkEnumOwner(tup);
 
 	/* Add the new label */
 	AddEnumLabel(enum_type_oid, stmt->newVal,
-				 stmt->newValNeighbor, stmt->newValIsAfter);
+				 stmt->newValNeighbor, stmt->newValIsAfter,
+				 stmt->skipIfExists);
 
 	ReleaseSysCache(tup);
+
+	return enum_type_oid;
 }
 
 
@@ -1221,7 +1248,7 @@ checkEnumOwner(HeapTuple tup)
  * DefineRange
  *		Registers a new range type.
  */
-void
+Oid
 DefineRange(CreateRangeStmt *stmt)
 {
 	char	   *typeName;
@@ -1473,6 +1500,8 @@ DefineRange(CreateRangeStmt *stmt)
 
 	/* And create the constructor functions for this range type */
 	makeRangeConstructors(typeName, typeNamespace, typoid, rangeSubtype);
+
+	return typoid;
 }
 
 /*
@@ -2039,7 +2068,7 @@ DefineCompositeType(RangeVar *typevar, List *coldeflist)
  *
  * Routine implementing ALTER DOMAIN SET/DROP DEFAULT statements.
  */
-void
+Oid
 AlterDomainDefault(List *names, Node *defaultRaw)
 {
 	TypeName   *typename;
@@ -2112,9 +2141,7 @@ AlterDomainDefault(List *names, Node *defaultRaw)
 			 * easier for pg_dump).
 			 */
 			defaultValue = deparse_expression(defaultExpr,
-								deparse_context_for(NameStr(typTup->typname),
-													InvalidOid),
-											  false, false);
+											  NIL, false, false);
 
 			/*
 			 * Form an updated tuple with the new default and write it back.
@@ -2166,6 +2193,8 @@ AlterDomainDefault(List *names, Node *defaultRaw)
 	/* Clean up */
 	heap_close(rel, NoLock);
 	heap_freetuple(newtuple);
+
+	return domainoid;
 }
 
 /*
@@ -2173,7 +2202,7 @@ AlterDomainDefault(List *names, Node *defaultRaw)
  *
  * Routine implementing ALTER DOMAIN SET/DROP NOT NULL statements.
  */
-void
+Oid
 AlterDomainNotNull(List *names, bool notNull)
 {
 	TypeName   *typename;
@@ -2201,7 +2230,7 @@ AlterDomainNotNull(List *names, bool notNull)
 	if (typTup->typnotnull == notNull)
 	{
 		heap_close(typrel, RowExclusiveLock);
-		return;
+		return InvalidOid;
 	}
 
 	/* Adding a NOT NULL constraint requires checking existing columns */
@@ -2262,6 +2291,8 @@ AlterDomainNotNull(List *names, bool notNull)
 	/* Clean up */
 	heap_freetuple(tup);
 	heap_close(typrel, RowExclusiveLock);
+
+	return domainoid;
 }
 
 /*
@@ -2269,7 +2300,7 @@ AlterDomainNotNull(List *names, bool notNull)
  *
  * Implements the ALTER DOMAIN DROP CONSTRAINT statement
  */
-void
+Oid
 AlterDomainDropConstraint(List *names, const char *constrName,
 						  DropBehavior behavior, bool missing_ok)
 {
@@ -2346,6 +2377,8 @@ AlterDomainDropConstraint(List *names, const char *constrName,
 					(errmsg("constraint \"%s\" of domain \"%s\" does not exist, skipping",
 							constrName, TypeNameToString(typename))));
 	}
+
+	return domainoid;
 }
 
 /*
@@ -2353,7 +2386,7 @@ AlterDomainDropConstraint(List *names, const char *constrName,
  *
  * Implements the ALTER DOMAIN .. ADD CONSTRAINT statement.
  */
-void
+Oid
 AlterDomainAddConstraint(List *names, Node *newConstraint)
 {
 	TypeName   *typename;
@@ -2449,6 +2482,8 @@ AlterDomainAddConstraint(List *names, Node *newConstraint)
 
 	/* Clean up */
 	heap_close(typrel, RowExclusiveLock);
+
+	return domainoid;
 }
 
 /*
@@ -2456,7 +2491,7 @@ AlterDomainAddConstraint(List *names, Node *newConstraint)
  *
  * Implements the ALTER DOMAIN .. VALIDATE CONSTRAINT statement.
  */
-void
+Oid
 AlterDomainValidateConstraint(List *names, char *constrName)
 {
 	TypeName   *typename;
@@ -2548,6 +2583,8 @@ AlterDomainValidateConstraint(List *names, char *constrName)
 	heap_close(conrel, RowExclusiveLock);
 
 	ReleaseSysCache(tup);
+
+	return domainoid;
 }
 
 static void
@@ -2900,14 +2937,9 @@ domainAddConstraint(Oid domainOid, Oid domainNamespace, Oid baseTypeOid,
 
 	/*
 	 * Deparse it to produce text for consrc.
-	 *
-	 * Since VARNOs aren't allowed in domain constraints, relation context
-	 * isn't required as anything other than a shell.
 	 */
 	ccsrc = deparse_expression(expr,
-							   deparse_context_for(domainName,
-												   InvalidOid),
-							   false, false);
+							   NIL, false, false);
 
 	/*
 	 * Store the constraint in pg_constraint
@@ -2938,7 +2970,7 @@ domainAddConstraint(Oid domainOid, Oid domainNamespace, Oid baseTypeOid,
 						  ccsrc,	/* Source form of check constraint */
 						  true, /* is local */
 						  0,	/* inhcount */
-						  false);		/* is only */
+						  false);		/* connoinherit */
 
 	/*
 	 * Return the compiled constraint expression so the calling routine can
@@ -3071,7 +3103,7 @@ GetDomainConstraints(Oid typeOid)
 /*
  * Execute ALTER TYPE RENAME
  */
-void
+Oid
 RenameType(RenameStmt *stmt)
 {
 	List	   *names = stmt->object;
@@ -3140,12 +3172,14 @@ RenameType(RenameStmt *stmt)
 
 	/* Clean up */
 	heap_close(rel, RowExclusiveLock);
+
+	return typeOid;
 }
 
 /*
  * Change the owner of a type.
  */
-void
+Oid
 AlterTypeOwner(List *names, Oid newOwnerId, ObjectType objecttype)
 {
 	TypeName   *typename;
@@ -3262,6 +3296,8 @@ AlterTypeOwner(List *names, Oid newOwnerId, ObjectType objecttype)
 
 	/* Clean up */
 	heap_close(rel, RowExclusiveLock);
+
+	return typeOid;
 }
 
 /*
@@ -3314,12 +3350,13 @@ AlterTypeOwnerInternal(Oid typeOid, Oid newOwnerId,
 /*
  * Execute ALTER TYPE SET SCHEMA
  */
-void
+Oid
 AlterTypeNamespace(List *names, const char *newschema, ObjectType objecttype)
 {
 	TypeName   *typename;
 	Oid			typeOid;
 	Oid			nspOid;
+	ObjectAddresses	*objsMoved;
 
 	/* Make a TypeName so we can use standard type lookup machinery */
 	typename = makeTypeNameFromNameList(names);
@@ -3335,11 +3372,15 @@ AlterTypeNamespace(List *names, const char *newschema, ObjectType objecttype)
 	/* get schema OID and check its permissions */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterTypeNamespace_oid(typeOid, nspOid);
+	objsMoved = new_object_addresses();
+	AlterTypeNamespace_oid(typeOid, nspOid, objsMoved);
+	free_object_addresses(objsMoved);
+
+	return typeOid;
 }
 
 Oid
-AlterTypeNamespace_oid(Oid typeOid, Oid nspOid)
+AlterTypeNamespace_oid(Oid typeOid, Oid nspOid, ObjectAddresses *objsMoved)
 {
 	Oid			elemOid;
 
@@ -3358,7 +3399,7 @@ AlterTypeNamespace_oid(Oid typeOid, Oid nspOid)
 						 format_type_be(elemOid))));
 
 	/* and do the work */
-	return AlterTypeNamespaceInternal(typeOid, nspOid, false, true);
+	return AlterTypeNamespaceInternal(typeOid, nspOid, false, true, objsMoved);
 }
 
 /*
@@ -3379,7 +3420,8 @@ AlterTypeNamespace_oid(Oid typeOid, Oid nspOid)
 Oid
 AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 						   bool isImplicitArray,
-						   bool errorOnTableType)
+						   bool errorOnTableType,
+						   ObjectAddresses *objsMoved)
 {
 	Relation	rel;
 	HeapTuple	tup;
@@ -3387,6 +3429,17 @@ AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 	Oid			oldNspOid;
 	Oid			arrayOid;
 	bool		isCompositeType;
+	ObjectAddress thisobj;
+
+	/*
+	 * Make sure we haven't moved this object previously.
+	 */
+	thisobj.classId = TypeRelationId;
+	thisobj.objectId = typeOid;
+	thisobj.objectSubId = 0;
+
+	if (object_address_present(&thisobj, objsMoved))
+		return InvalidOid;
 
 	rel = heap_open(TypeRelationId, RowExclusiveLock);
 
@@ -3447,7 +3500,7 @@ AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 
 		AlterRelationNamespaceInternal(classRel, typform->typrelid,
 									   oldNspOid, nspOid,
-									   false);
+									   false, objsMoved);
 
 		heap_close(classRel, RowExclusiveLock);
 
@@ -3456,13 +3509,14 @@ AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 		 * currently support this, but probably will someday).
 		 */
 		AlterConstraintNamespaces(typform->typrelid, oldNspOid,
-								  nspOid, false);
+								  nspOid, false, objsMoved);
 	}
 	else
 	{
 		/* If it's a domain, it might have constraints */
 		if (typform->typtype == TYPTYPE_DOMAIN)
-			AlterConstraintNamespaces(typeOid, oldNspOid, nspOid, true);
+			AlterConstraintNamespaces(typeOid, oldNspOid, nspOid, true,
+									  objsMoved);
 	}
 
 	/*
@@ -3480,9 +3534,11 @@ AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 
 	heap_close(rel, RowExclusiveLock);
 
+	add_exact_object_address(&thisobj, objsMoved);
+
 	/* Recursively alter the associated array type, if any */
 	if (OidIsValid(arrayOid))
-		AlterTypeNamespaceInternal(arrayOid, nspOid, true, true);
+		AlterTypeNamespaceInternal(arrayOid, nspOid, true, true, objsMoved);
 
 	return oldNspOid;
 }

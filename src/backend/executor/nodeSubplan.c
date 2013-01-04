@@ -3,7 +3,7 @@
  * nodeSubplan.c
  *	  routines to support subselects
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -18,8 +18,10 @@
  */
 #include "postgres.h"
 
+#include <limits.h>
 #include <math.h>
 
+#include "access/htup_details.h"
 #include "executor/executor.h"
 #include "executor/nodeSubplan.h"
 #include "nodes/makefuncs.h"
@@ -44,7 +46,8 @@ static Datum ExecScanSubPlan(SubPlanState *node,
 				ExprContext *econtext,
 				bool *isNull);
 static void buildSubPlanHash(SubPlanState *node, ExprContext *econtext);
-static bool findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot);
+static bool findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot,
+				 FmgrInfo *eqfunctions);
 static bool slotAllNulls(TupleTableSlot *slot);
 static bool slotNoNulls(TupleTableSlot *slot);
 
@@ -151,7 +154,7 @@ ExecHashSubPlan(SubPlanState *node,
 			return BoolGetDatum(true);
 		}
 		if (node->havenullrows &&
-			findPartialMatch(node->hashnulls, slot))
+			findPartialMatch(node->hashnulls, slot, node->cur_eq_funcs))
 		{
 			ExecClearTuple(slot);
 			*isNull = true;
@@ -184,14 +187,14 @@ ExecHashSubPlan(SubPlanState *node,
 	}
 	/* Scan partly-null table first, since more likely to get a match */
 	if (node->havenullrows &&
-		findPartialMatch(node->hashnulls, slot))
+		findPartialMatch(node->hashnulls, slot, node->cur_eq_funcs))
 	{
 		ExecClearTuple(slot);
 		*isNull = true;
 		return BoolGetDatum(false);
 	}
 	if (node->havehashrows &&
-		findPartialMatch(node->hashtable, slot))
+		findPartialMatch(node->hashtable, slot, node->cur_eq_funcs))
 	{
 		ExecClearTuple(slot);
 		*isNull = true;
@@ -571,9 +574,13 @@ buildSubPlanHash(SubPlanState *node, ExprContext *econtext)
  * We have to scan the whole hashtable; we can't usefully use hashkeys
  * to guide probing, since we might get partial matches on tuples with
  * hashkeys quite unrelated to what we'd get from the given tuple.
+ *
+ * Caller must provide the equality functions to use, since in cross-type
+ * cases these are different from the hashtable's internal functions.
  */
 static bool
-findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot)
+findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot,
+				 FmgrInfo *eqfunctions)
 {
 	int			numCols = hashtable->numCols;
 	AttrNumber *keyColIdx = hashtable->keyColIdx;
@@ -586,7 +593,7 @@ findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot)
 		ExecStoreMinimalTuple(entry->firstTuple, hashtable->tableslot, false);
 		if (!execTuplesUnequal(slot, hashtable->tableslot,
 							   numCols, keyColIdx,
-							   hashtable->cur_eq_funcs,
+							   eqfunctions,
 							   hashtable->tempcxt))
 		{
 			TermTupleHashIterator(&hashiter);

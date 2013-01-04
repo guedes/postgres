@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -182,9 +183,7 @@ PerformAuthentication(Port *port)
 
 	/*
 	 * In EXEC_BACKEND case, we didn't inherit the contents of pg_hba.conf
-	 * etcetera from the postmaster, and have to load them ourselves.  Note we
-	 * are loading them into the startup transaction's memory context, not
-	 * PostmasterContext, but that shouldn't matter.
+	 * etcetera from the postmaster, and have to load them ourselves.
 	 *
 	 * FIXME: [fork/exec] Ugh.	Is there a way around this overhead?
 	 */
@@ -198,7 +197,16 @@ PerformAuthentication(Port *port)
 		ereport(FATAL,
 				(errmsg("could not load pg_hba.conf")));
 	}
-	load_ident();
+
+	if (!load_ident())
+	{
+		/*
+		 * It is ok to continue if we fail to load the IDENT file, although it
+		 * means that you cannot log in using any of the authentication methods
+		 * that need a user name mapping. load_ident() already logged the
+		 * details of error to the log.
+		 */
+	}
 #endif
 
 	/*
@@ -413,6 +421,31 @@ pg_split_opts(char **argv, int *argcp, char *optstr)
 	}
 }
 
+/*
+ * Initialize MaxBackends value from config options.
+ *
+ * This must be called after modules have had the chance to register background
+ * workers in shared_preload_libraries, and before shared memory size is
+ * determined.
+ *
+ * Note that in EXEC_BACKEND environment, the value is passed down from
+ * postmaster to subprocesses via BackendParameters in SubPostmasterMain; only
+ * postmaster itself and processes not under postmaster control should call
+ * this.
+ */
+void
+InitializeMaxBackends(void)
+{
+	Assert(MaxBackends == 0);
+
+	/* the extra unit accounts for the autovacuum launcher */
+	MaxBackends = MaxConnections + autovacuum_max_workers + 1 +
+		GetNumShmemAttachedBgworkers();
+
+	/* internal error because the values were all checked previously */
+	if (MaxBackends > MAX_BACKENDS)
+		elog(ERROR, "too many backends configured");
+}
 
 /*
  * Early initialization of a backend (either standalone or under postmaster).
@@ -618,6 +651,19 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 					 errmsg("no roles are defined in this database system"),
 					 errhint("You should immediately run CREATE USER \"%s\" SUPERUSER;.",
 							 username)));
+	}
+	else if (IsBackgroundWorker)
+	{
+		if (username == NULL)
+		{
+			InitializeSessionUserIdStandalone();
+			am_superuser = true;
+		}
+		else
+		{
+			InitializeSessionUserId(username);
+			am_superuser = superuser();
+		}
 	}
 	else
 	{

@@ -3,7 +3,7 @@
  * rewriteDefine.c
  *	  routines for defining a rewrite rule
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,8 +15,10 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
+#include "catalog/heap.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
@@ -189,7 +191,7 @@ InsertRule(char *rulname,
  * DefineRule
  *		Execute a CREATE RULE command.
  */
-void
+Oid
 DefineRule(RuleStmt *stmt, const char *queryString)
 {
 	List	   *actions;
@@ -206,13 +208,13 @@ DefineRule(RuleStmt *stmt, const char *queryString)
 	relId = RangeVarGetRelid(stmt->relation, AccessExclusiveLock, false);
 
 	/* ... and execute */
-	DefineQueryRewrite(stmt->rulename,
-					   relId,
-					   whereClause,
-					   stmt->event,
-					   stmt->instead,
-					   stmt->replace,
-					   actions);
+	return DefineQueryRewrite(stmt->rulename,
+							  relId,
+							  whereClause,
+							  stmt->event,
+							  stmt->instead,
+							  stmt->replace,
+							  actions);
 }
 
 
@@ -223,7 +225,7 @@ DefineRule(RuleStmt *stmt, const char *queryString)
  * This is essentially the same as DefineRule() except that the rule's
  * action and qual have already been passed through parse analysis.
  */
-void
+Oid
 DefineQueryRewrite(char *rulename,
 				   Oid event_relid,
 				   Node *event_qual,
@@ -237,6 +239,7 @@ DefineQueryRewrite(char *rulename,
 	ListCell   *l;
 	Query	   *query;
 	bool		RelisBecomingView = false;
+	Oid         ruleId = InvalidOid;
 
 	/*
 	 * If we are installing an ON SELECT rule, we had better grab
@@ -487,14 +490,14 @@ DefineQueryRewrite(char *rulename,
 	/* discard rule if it's null action and not INSTEAD; it's a no-op */
 	if (action != NIL || is_instead)
 	{
-		InsertRule(rulename,
-				   event_type,
-				   event_relid,
-				   event_attno,
-				   is_instead,
-				   event_qual,
-				   action,
-				   replace);
+		ruleId = InsertRule(rulename,
+							event_type,
+							event_relid,
+							event_attno,
+							is_instead,
+							event_qual,
+							action,
+							replace);
 
 		/*
 		 * Set pg_class 'relhasrules' field TRUE for event relation. If
@@ -509,16 +512,24 @@ DefineQueryRewrite(char *rulename,
 	}
 
 	/*
-	 * IF the relation is becoming a view, delete the storage files associated
-	 * with it.  NB: we had better have AccessExclusiveLock to do this ...
+	 * If the relation is becoming a view, delete the storage files associated
+	 * with it.  Also, get rid of any system attribute entries in pg_attribute,
+	 * because a view shouldn't have any of those.
+	 *
+	 * NB: we had better have AccessExclusiveLock to do this ...
 	 *
 	 * XXX what about getting rid of its TOAST table?  For now, we don't.
 	 */
 	if (RelisBecomingView)
+	{
 		RelationDropStorage(event_relation);
+		DeleteSystemAttributeTuples(event_relid);
+	}
 
 	/* Close rel, but keep lock till commit... */
 	heap_close(event_relation, NoLock);
+
+	return ruleId;
 }
 
 /*

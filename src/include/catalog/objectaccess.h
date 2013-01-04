@@ -3,7 +3,7 @@
  *
  *		Object access hooks.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  */
 
@@ -29,6 +29,19 @@ typedef enum ObjectAccessType
 	OAT_POST_CREATE,
 	OAT_DROP,
 } ObjectAccessType;
+
+/*
+ * Arguments of OAT_POST_CREATE event
+ */
+typedef struct
+{
+	/*
+	 * This flag informs extensions whether the context of this creation
+	 * is invoked by user's operations, or not. E.g, it shall be dealt
+	 * as internal stuff on toast tables or indexes due to type changes.
+	 */
+	bool		is_internal;
+} ObjectAccessPostCreate;
 
 /*
  * Arguments of OAT_DROP event

@@ -87,7 +87,7 @@
  * above.  Nonetheless, with large workMem we can have many tapes.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -100,6 +100,7 @@
 
 #include <limits.h>
 
+#include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "catalog/index.h"
 #include "commands/tablespace.h"

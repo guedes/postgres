@@ -1,13 +1,12 @@
 /*
  *	pg_upgrade.h
  *
- *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/pg_upgrade.h
  */
 
 #include <unistd.h>
 #include <assert.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 
@@ -25,18 +24,16 @@
 
 #define MIGRATOR_API_VERSION	1
 
-#define MESSAGE_WIDTH		"60"
+#define MESSAGE_WIDTH		60
 
-#define OVERWRITE_MESSAGE	"  %-" MESSAGE_WIDTH "." MESSAGE_WIDTH "s\r"
 #define GET_MAJOR_VERSION(v)	((v) / 100)
 
-#define ALL_DUMP_FILE		"pg_upgrade_dump_all.sql"
 /* contains both global db information and CREATE DATABASE commands */
 #define GLOBALS_DUMP_FILE	"pg_upgrade_dump_globals.sql"
-#define DB_DUMP_FILE		"pg_upgrade_dump_db.sql"
+#define DB_DUMP_FILE_MASK	"pg_upgrade_dump_%u.custom"
 
+#define DB_DUMP_LOG_FILE_MASK	"pg_upgrade_dump_%u.log"
 #define SERVER_LOG_FILE		"pg_upgrade_server.log"
-#define RESTORE_LOG_FILE	"pg_upgrade_restore.log"
 #define UTILITY_LOG_FILE	"pg_upgrade_utility.log"
 #define INTERNAL_LOG_FILE	"pg_upgrade_internal.log"
 
@@ -63,7 +60,11 @@ extern char *output_files[];
 #define SERVER_STOP_LOG_FILE	SERVER_LOG_FILE
 #else
 #define SERVER_START_LOG_FILE	"pg_upgrade_server_start.log"
-/* pg_ctl stop doesn't keep the log file open, so reuse UTILITY_LOG_FILE */
+/*
+ *	"pg_ctl start" keeps SERVER_START_LOG_FILE and SERVER_LOG_FILE open
+ *	while the server is running, so we use UTILITY_LOG_FILE for "pg_ctl
+ *	stop".
+ */
 #define SERVER_STOP_LOG_FILE	UTILITY_LOG_FILE
 #endif
 
@@ -72,20 +73,24 @@ extern char *output_files[];
 #define pg_copy_file		copy_file
 #define pg_mv_file			rename
 #define pg_link_file		link
+#define PATH_SEPARATOR      '/'
 #define RM_CMD				"rm -f"
 #define RMDIR_CMD			"rm -rf"
 #define SCRIPT_EXT			"sh"
 #define ECHO_QUOTE	"'"
+#define ECHO_BLANK  ""
 #else
 #define pg_copy_file		CopyFile
 #define pg_mv_file			pgrename
 #define pg_link_file		win32_pghardlink
 #define sleep(x)			Sleep(x * 1000)
+#define PATH_SEPARATOR      '\\'
 #define RM_CMD				"DEL /q"
 #define RMDIR_CMD			"RMDIR /s/q"
 #define SCRIPT_EXT			"bat"
 #define EXE_EXT				".exe"
 #define ECHO_QUOTE	""
+#define ECHO_BLANK  "."
 #endif
 
 #define CLUSTER_NAME(cluster)	((cluster) == &old_cluster ? "old" : \
@@ -109,8 +114,9 @@ extern char *output_files[];
  */
 typedef struct
 {
-	char		nspname[NAMEDATALEN];	/* namespace name */
-	char		relname[NAMEDATALEN];	/* relation name */
+	/* Can't use NAMEDATALEN;  not guaranteed to fit on client */
+	char		*nspname;		/* namespace name */
+	char		*relname;		/* relation name */
 	Oid			reloid;			/* relation oid */
 	Oid			relfilenode;	/* relation relfile node */
 	/* relation tablespace path, or "" for the cluster default */
@@ -138,8 +144,8 @@ typedef struct
 	Oid			old_relfilenode;
 	Oid			new_relfilenode;
 	/* the rest are used only for logging and error reporting */
-	char		nspname[NAMEDATALEN];	/* namespaces */
-	char		relname[NAMEDATALEN];
+	char		*nspname;		/* namespaces */
+	char		*relname;
 } FileNameMap;
 
 /*
@@ -148,7 +154,7 @@ typedef struct
 typedef struct
 {
 	Oid			db_oid;			/* oid of the database */
-	char		db_name[NAMEDATALEN];	/* database name */
+	char		*db_name;		/* database name */
 	char		db_tblspace[MAXPGPATH]; /* database default tablespace path */
 	RelInfoArr	rel_arr;		/* array of all user relinfos */
 } DbInfo;
@@ -202,6 +208,7 @@ typedef enum
 typedef enum
 {
 	PG_VERBOSE,
+	PG_STATUS,
 	PG_REPORT,
 	PG_WARNING,
 	PG_FATAL
@@ -226,6 +233,7 @@ typedef struct
 	char	   *bindir;			/* pathname for cluster's executable directory */
 	char	   *pgopts;			/* options to pass to the server, like pg_ctl
 								 * -o */
+	char	   *sockdir;		/* directory for Unix Domain socket, if any */
 	unsigned short port;		/* port number where postmaster is waiting */
 	uint32		major_version;	/* PG_VERSION of cluster */
 	char		major_version_str[64];	/* string PG_VERSION of cluster */
@@ -256,6 +264,7 @@ typedef struct
 	bool		check;			/* TRUE -> ask user for permission to make
 								 * changes */
 	transferMode transfer_mode; /* copy files or link them? */
+	int			jobs;
 } UserOpts;
 
 
@@ -288,12 +297,12 @@ extern OSInfo os_info;
 /* check.c */
 
 void		output_check_banner(bool *live_check);
-void check_old_cluster(bool live_check,
+void		check_and_dump_old_cluster(bool live_check,
 				  char **sequence_script_file_name);
 void		check_new_cluster(void);
 void		report_clusters_compatible(void);
 void		issue_warnings(char *sequence_script_file_name);
-void output_completion_banner(char *analyze_script_file_name,
+void		output_completion_banner(char *analyze_script_file_name,
 						 char *deletion_script_file_name);
 void		check_cluster_versions(void);
 void		check_cluster_compatibility(bool live_check);
@@ -311,7 +320,6 @@ void		disable_old_cluster(void);
 /* dump.c */
 
 void		generate_old_dump(void);
-void		split_old_dump(void);
 
 
 /* exec.c */
@@ -351,13 +359,12 @@ typedef struct
 	pluginShutdown shutdown;	/* Pointer to plugin's shutdown function */
 } pageCnvCtx;
 
-const char *setupPageConverter(pageCnvCtx **result);
+const pageCnvCtx *setupPageConverter(void);
 #else
 /* dummy */
 typedef void *pageCnvCtx;
 #endif
 
-int			load_directory(const char *dirname, char ***namelist);
 const char *copyAndUpdateFile(pageCnvCtx *pageConverter, const char *src,
 				  const char *dst, bool force);
 const char *linkAndUpdateFile(pageCnvCtx *pageConverter, const char *src,
@@ -379,7 +386,6 @@ FileNameMap *gen_db_file_maps(DbInfo *old_db,
 				 DbInfo *new_db, int *nmaps, const char *old_pgdata,
 				 const char *new_pgdata);
 void		get_db_and_rel_infos(ClusterInfo *cluster);
-void		free_db_and_rel_infos(DbInfoArr *db_arr);
 void print_maps(FileNameMap *maps, int n,
 		   const char *db_name);
 
@@ -387,11 +393,12 @@ void print_maps(FileNameMap *maps, int n,
 
 void		parseCommandLine(int argc, char *argv[]);
 void		adjust_data_dir(ClusterInfo *cluster);
+void		get_sock_dir(ClusterInfo *cluster, bool live_check);
 
 /* relfilenode.c */
 
 void		get_pg_database_relfilenode(ClusterInfo *cluster);
-const char *transfer_all_new_dbs(DbInfoArr *olddb_arr,
+void		transfer_all_new_dbs(DbInfoArr *olddb_arr,
 				   DbInfoArr *newdb_arr, char *old_pgdata, char *new_pgdata);
 
 
@@ -406,6 +413,8 @@ PGconn	   *connectToServer(ClusterInfo *cluster, const char *db_name);
 PGresult *
 executeQueryOrDie(PGconn *conn, const char *fmt,...)
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+
+char	   *cluster_conn_opts(ClusterInfo *cluster);
 
 void		start_postmaster(ClusterInfo *cluster);
 void		stop_postmaster(bool fast);
@@ -424,6 +433,7 @@ __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 void
 pg_log(eLogType type, char *fmt,...)
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+void		end_progress_output(void);
 void
 prep_status(const char *fmt,...)
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
@@ -452,3 +462,11 @@ void		old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode)
 void old_8_3_invalidate_bpchar_pattern_ops_indexes(ClusterInfo *cluster,
 											  bool check_mode);
 char	   *old_8_3_create_sequence_script(ClusterInfo *cluster);
+
+/* parallel.c */
+void parallel_exec_prog(const char *log_file, const char *opt_log_file,
+		  const char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
+
+bool reap_child(bool wait_for_child);
+

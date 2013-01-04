@@ -3,7 +3,7 @@
  * view.c
  *	  use rewrite rules to construct views
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -420,7 +420,7 @@ UpdateRangeTableOfViewParse(Oid viewOid, Query *viewParse)
  * DefineView
  *		Execute a CREATE VIEW command.
  */
-void
+Oid
 DefineView(ViewStmt *stmt, const char *queryString)
 {
 	Query	   *viewParse;
@@ -540,4 +540,6 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	 * Now create the rules associated with the view.
 	 */
 	DefineViewRules(viewOid, viewParse, stmt->replace);
+
+	return viewOid;
 }

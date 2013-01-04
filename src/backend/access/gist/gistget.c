@@ -4,7 +4,7 @@
  *	  fetch tuples from a GiST scan.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -263,7 +263,7 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem, double *myDistances,
 	 */
 	if (!XLogRecPtrIsInvalid(pageItem->data.parentlsn) &&
 		(GistFollowRight(page) ||
-		 XLByteLT(pageItem->data.parentlsn, opaque->nsn)) &&
+		 pageItem->data.parentlsn < opaque->nsn) &&
 		opaque->rightlink != InvalidBlockNumber /* sanity check */ )
 	{
 		/* There was a page split, follow right link to add pages */

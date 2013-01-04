@@ -3,7 +3,7 @@
  * dirmod.c
  *	  directory handling functions
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	This includes replacement versions of functions that work on
@@ -70,7 +70,11 @@ fe_palloc(Size size)
 {
 	void	   *res;
 
-	if ((res = malloc(size)) == NULL)
+	/* Avoid unportable behavior of malloc(0) */
+	if (size == 0)
+		size = 1;
+	res = malloc(size);
+	if (res == NULL)
 	{
 		fprintf(stderr, _("out of memory\n"));
 		exit(1);
@@ -96,7 +100,11 @@ fe_repalloc(void *pointer, Size size)
 {
 	void	   *res;
 
-	if ((res = realloc(pointer, size)) == NULL)
+	/* Avoid unportable behavior of realloc(NULL, 0) */
+	if (pointer == NULL && size == 0)
+		size = 1;
+	res = realloc(pointer, size);
+	if (res == NULL)
 	{
 		fprintf(stderr, _("out of memory\n"));
 		exit(1);

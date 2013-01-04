@@ -4,7 +4,7 @@
  *	  Sort the items of a dump into a safe order for dumping
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -196,6 +196,9 @@ DOTypeNameCompare(const void *p1, const void *p2)
 		FuncInfo   *fobj2 = *(FuncInfo *const *) p2;
 
 		cmpval = fobj1->nargs - fobj2->nargs;
+		if (cmpval != 0)
+			return cmpval;
+		cmpval = strcmp(fobj1->proiargs, fobj2->proiargs);
 		if (cmpval != 0)
 			return cmpval;
 	}
@@ -552,7 +555,7 @@ findDependencyLoops(DumpableObject **objs, int nObjs, int totObjs)
 	bool		fixedloop;
 	int			i;
 
-	processed = (bool *) pg_calloc(getMaxDumpId() + 1, sizeof(bool));
+	processed = (bool *) pg_malloc0((getMaxDumpId() + 1) * sizeof(bool));
 	workspace = (DumpableObject **) pg_malloc(totObjs * sizeof(DumpableObject *));
 	fixedloop = false;
 

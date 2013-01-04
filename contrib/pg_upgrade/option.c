@@ -3,11 +3,13 @@
  *
  *	options functions
  *
- *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/option.c
  */
 
 #include "postgres.h"
+
+#include "miscadmin.h"
 
 #include "pg_upgrade.h"
 
@@ -50,6 +52,7 @@ parseCommandLine(int argc, char *argv[])
 		{"check", no_argument, NULL, 'c'},
 		{"link", no_argument, NULL, 'k'},
 		{"retain", no_argument, NULL, 'r'},
+		{"jobs", required_argument, NULL, 'j'},
 		{"verbose", no_argument, NULL, 'v'},
 		{NULL, 0, NULL, 0}
 	};
@@ -99,7 +102,7 @@ parseCommandLine(int argc, char *argv[])
 	if ((log_opts.internal = fopen_priv(INTERNAL_LOG_FILE, "a")) == NULL)
 		pg_log(PG_FATAL, "cannot write to log file %s\n", INTERNAL_LOG_FILE);
 
-	while ((option = getopt_long(argc, argv, "d:D:b:B:cko:O:p:P:ru:v",
+	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:ko:O:p:P:ru:v",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -124,6 +127,10 @@ parseCommandLine(int argc, char *argv[])
 			case 'D':
 				new_cluster.pgdata = pg_strdup(optarg);
 				new_cluster.pgconfig = pg_strdup(optarg);
+				break;
+
+			case 'j':
+				user_opts.jobs = atoi(optarg);
 				break;
 
 			case 'k':
@@ -227,6 +234,7 @@ Options:\n\
   -c, --check                   check clusters only, don't change any data\n\
   -d, --old-datadir=OLDDATADIR  old cluster data directory\n\
   -D, --new-datadir=NEWDATADIR  new cluster data directory\n\
+  -j, --jobs                    number of simultaneous processes or threads to use\n\
   -k, --link                    link instead of copying files to new cluster\n\
   -o, --old-options=OPTIONS     old cluster options to pass to the server\n\
   -O, --new-options=OPTIONS     new cluster options to pass to the server\n\
@@ -375,4 +383,81 @@ adjust_data_dir(ClusterInfo *cluster)
 	cluster->pgdata = pg_strdup(cmd_output);
 
 	check_ok();
+}
+
+
+/*
+ * get_sock_dir
+ *
+ * Identify the socket directory to use for this cluster.  If we're doing
+ * a live check (old cluster only), we need to find out where the postmaster
+ * is listening.  Otherwise, we're going to put the socket into the current
+ * directory.
+ */
+void
+get_sock_dir(ClusterInfo *cluster, bool live_check)
+{
+#ifdef HAVE_UNIX_SOCKETS
+	/*
+	 *	sockdir and port were added to postmaster.pid in PG 9.1.
+	 *	Pre-9.1 cannot process pg_ctl -w for sockets in non-default
+	 *	locations.
+	 */
+	if (GET_MAJOR_VERSION(cluster->major_version) >= 901)
+	{
+		if (!live_check)
+		{
+			/* Use the current directory for the socket */
+			cluster->sockdir = pg_malloc(MAXPGPATH);
+			if (!getcwd(cluster->sockdir, MAXPGPATH))
+				pg_log(PG_FATAL, "cannot find current directory\n");
+		}
+		else
+		{
+			/*
+			 *	If we are doing a live check, we will use the old cluster's Unix
+			 *	domain socket directory so we can connect to the live server.
+			 */
+			unsigned short orig_port = cluster->port;
+			char		filename[MAXPGPATH], line[MAXPGPATH];
+			FILE		*fp;
+			int			lineno;
+	
+			snprintf(filename, sizeof(filename), "%s/postmaster.pid",
+					 cluster->pgdata);
+			if ((fp = fopen(filename, "r")) == NULL)
+				pg_log(PG_FATAL, "Cannot open file %s: %m\n", filename);
+	
+			for (lineno = 1;
+				 lineno <= Max(LOCK_FILE_LINE_PORT, LOCK_FILE_LINE_SOCKET_DIR);
+				 lineno++)
+			{
+				if (fgets(line, sizeof(line), fp) == NULL)
+					pg_log(PG_FATAL, "Cannot read line %d from %s: %m\n", lineno, filename);
+	
+				/* potentially overwrite user-supplied value */
+				if (lineno == LOCK_FILE_LINE_PORT)
+					sscanf(line, "%hu", &old_cluster.port);
+				if (lineno == LOCK_FILE_LINE_SOCKET_DIR)
+				{
+					cluster->sockdir = pg_malloc(MAXPGPATH);
+					/* strip off newline */
+					sscanf(line, "%s\n", cluster->sockdir);
+				}
+			}
+			fclose(fp);
+	
+			/* warn of port number correction */
+			if (orig_port != DEF_PGUPORT && old_cluster.port != orig_port)
+				pg_log(PG_WARNING, "User-supplied old port number %hu corrected to %hu\n",
+				orig_port, cluster->port);
+		}
+	}
+	else
+		/* Can't get sockdir and pg_ctl -w can't use a non-default, use default */
+		cluster->sockdir = NULL;
+
+#else /* !HAVE_UNIX_SOCKETS */
+	cluster->sockdir = NULL;
+#endif
 }

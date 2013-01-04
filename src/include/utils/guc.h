@@ -4,7 +4,7 @@
  * External declarations pertaining to backend/utils/misc/guc.c and
  * backend/utils/misc/guc-file.l
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
  * src/include/utils/guc.h
@@ -116,6 +116,11 @@ extern bool ParseConfigFile(const char *config_file, const char *calling_file,
 extern bool ParseConfigFp(FILE *fp, const char *config_file,
 			  int depth, int elevel,
 			  ConfigVariable **head_p, ConfigVariable **tail_p);
+extern bool ParseConfigDirectory(const char *includedir,
+					 const char *calling_file,
+					 int depth, int elevel,
+					 ConfigVariable **head_p,
+					 ConfigVariable **tail_p);
 extern void FreeConfigVariables(ConfigVariable *list);
 
 /*

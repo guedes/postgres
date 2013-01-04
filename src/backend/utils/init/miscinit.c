@@ -3,7 +3,7 @@
  * miscinit.c
  *	  miscellaneous initialization support stuff
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,6 +29,7 @@
 #include <utime.h>
 #endif
 
+#include "access/htup_details.h"
 #include "catalog/pg_authid.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -497,10 +498,10 @@ void
 InitializeSessionUserIdStandalone(void)
 {
 	/*
-	 * This function should only be called in single-user mode and in
-	 * autovacuum workers.
+	 * This function should only be called in single-user mode, in
+	 * autovacuum workers, and in background workers.
 	 */
-	AssertState(!IsUnderPostmaster || IsAutoVacuumWorkerProcess());
+	AssertState(!IsUnderPostmaster || IsAutoVacuumWorkerProcess() || IsBackgroundWorker);
 
 	/* call only once */
 	AssertState(!OidIsValid(AuthenticatedUserId));
@@ -766,6 +767,14 @@ CreateLockFile(const char *filename, bool amPostmaster,
 							filename)));
 		close(fd);
 
+		if (len == 0)
+		{
+			ereport(FATAL,
+					(errcode(ERRCODE_LOCK_FILE_EXISTS),
+					 errmsg("lock file \"%s\" is empty", filename),
+					 errhint("Either another server is starting, or the lock file is the remnant of a previous server startup crash.")));
+		}
+
 		buffer[len] = '\0';
 		encoded_pid = atoi(buffer);
 
@@ -885,9 +894,9 @@ CreateLockFile(const char *filename, bool amPostmaster,
 
 	/*
 	 * Successfully created the file, now fill it.	See comment in miscadmin.h
-	 * about the contents.	Note that we write the same info into both datadir
-	 * and socket lockfiles; although more stuff may get added to the datadir
-	 * lockfile later.
+	 * about the contents.  Note that we write the same first five lines into
+	 * both datadir and socket lockfiles; although more stuff may get added to
+	 * the datadir lockfile later.
 	 */
 	snprintf(buffer, sizeof(buffer), "%d\n%s\n%ld\n%d\n%s\n",
 			 amPostmaster ? (int) my_pid : -((int) my_pid),
@@ -895,6 +904,13 @@ CreateLockFile(const char *filename, bool amPostmaster,
 			 (long) MyStartTime,
 			 PostPortNumber,
 			 socketDir);
+
+	/*
+	 * In a standalone backend, the next line (LOCK_FILE_LINE_LISTEN_ADDR)
+	 * will never receive data, so fill it in as empty now.
+	 */
+	if (isDDLock && !amPostmaster)
+		strlcat(buffer, "\n", sizeof(buffer));
 
 	errno = 0;
 	if (write(fd, buffer, strlen(buffer)) != strlen(buffer))
@@ -1069,7 +1085,8 @@ AddToDataDirLockFile(int target_line, const char *str)
 	{
 		if ((srcptr = strchr(srcptr, '\n')) == NULL)
 		{
-			elog(LOG, "bogus data in \"%s\"", DIRECTORY_LOCK_FILE);
+			elog(LOG, "incomplete data in \"%s\": found only %d newlines while trying to add line %d",
+				 DIRECTORY_LOCK_FILE, lineno - 1, target_line);
 			close(fd);
 			return;
 		}

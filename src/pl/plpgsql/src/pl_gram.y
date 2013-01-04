@@ -1,14 +1,14 @@
 %{
 /*-------------------------------------------------------------------------
  *
- * gram.y				- Parser for the PL/pgSQL procedural language
+ * pl_gram.y			- Parser for the PL/pgSQL procedural language
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  src/pl/plpgsql/src/gram.y
+ *	  src/pl/plpgsql/src/pl_gram.y
  *
  *-------------------------------------------------------------------------
  */
@@ -642,6 +642,21 @@ decl_aliasitem	: T_WORD
 									 parser_errposition(@1)));
 						$$ = nsi;
 					}
+				| unreserved_keyword
+					{
+						PLpgSQL_nsitem *nsi;
+
+						nsi = plpgsql_ns_lookup(plpgsql_ns_top(), false,
+												$1, NULL, NULL,
+												NULL);
+						if (nsi == NULL)
+							ereport(ERROR,
+									(errcode(ERRCODE_UNDEFINED_OBJECT),
+									 errmsg("variable \"%s\" does not exist",
+											$1),
+									 parser_errposition(@1)));
+						$$ = nsi;
+					}
 				| T_CWORD
 					{
 						PLpgSQL_nsitem *nsi;
@@ -720,6 +735,11 @@ decl_collate	:
 				| K_COLLATE T_WORD
 					{
 						$$ = get_collation_oid(list_make1(makeString($2.ident)),
+											   false);
+					}
+				| K_COLLATE unreserved_keyword
+					{
+						$$ = get_collation_oid(list_make1(makeString(pstrdup($2))),
 											   false);
 					}
 				| K_COLLATE T_CWORD
@@ -1720,9 +1740,12 @@ stmt_raise		: K_RAISE
 								}
 								else
 								{
-									if (tok != T_WORD)
+									if (tok == T_WORD)
+										new->condname = yylval.word.ident;
+									else if (plpgsql_token_is_unreserved_keyword(tok))
+										new->condname = pstrdup(yylval.keyword);
+									else
 										yyerror("syntax error");
-									new->condname = yylval.word.ident;
 									plpgsql_recognize_err_condition(new->condname,
 																	false);
 								}
@@ -2185,11 +2208,15 @@ opt_exitcond	: ';'
 				;
 
 /*
- * need both options because scanner will have tried to resolve as variable
+ * need to allow DATUM because scanner will have tried to resolve as variable
  */
 any_identifier	: T_WORD
 					{
 						$$ = $1.ident;
+					}
+				| unreserved_keyword
+					{
+						$$ = pstrdup($1);
 					}
 				| T_DATUM
 					{
@@ -2492,6 +2519,30 @@ read_datatype(int tok)
 	if (tok == T_WORD)
 	{
 		char   *dtname = yylval.word.ident;
+
+		tok = yylex();
+		if (tok == '%')
+		{
+			tok = yylex();
+			if (tok_is_keyword(tok, &yylval,
+							   K_TYPE, "type"))
+			{
+				result = plpgsql_parse_wordtype(dtname);
+				if (result)
+					return result;
+			}
+			else if (tok_is_keyword(tok, &yylval,
+									K_ROWTYPE, "rowtype"))
+			{
+				result = plpgsql_parse_wordrowtype(dtname);
+				if (result)
+					return result;
+			}
+		}
+	}
+	else if (plpgsql_token_is_unreserved_keyword(tok))
+	{
+		char   *dtname = pstrdup(yylval.keyword);
 
 		tok = yylex();
 		if (tok == '%')
@@ -2875,32 +2926,27 @@ make_return_stmt(int location)
 	}
 	else if (plpgsql_curr_compile->fn_retistuple)
 	{
-		switch (yylex())
+		/*
+		 * We want to special-case simple row or record references for
+		 * efficiency.  So peek ahead to see if that's what we have.
+		 */
+		int		tok = yylex();
+
+		if (tok == T_DATUM && plpgsql_peek() == ';' &&
+			(yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_ROW ||
+			 yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_REC))
 		{
-			case K_NULL:
-				/* we allow this to support RETURN NULL in triggers */
-				break;
-
-			case T_DATUM:
-				if (yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_ROW ||
-					yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_REC)
-					new->retvarno = yylval.wdatum.datum->dno;
-				else
-					ereport(ERROR,
-							(errcode(ERRCODE_DATATYPE_MISMATCH),
-							 errmsg("RETURN must specify a record or row variable in function returning row"),
-							 parser_errposition(yylloc)));
-				break;
-
-			default:
-				ereport(ERROR,
-						(errcode(ERRCODE_DATATYPE_MISMATCH),
-						 errmsg("RETURN must specify a record or row variable in function returning row"),
-						 parser_errposition(yylloc)));
-				break;
+			new->retvarno = yylval.wdatum.datum->dno;
+			/* eat the semicolon token that we only peeked at above */
+			tok = yylex();
+			Assert(tok == ';');
 		}
-		if (yylex() != ';')
-			yyerror("syntax error");
+		else
+		{
+			/* Not (just) a row/record name, so treat as expression */
+			plpgsql_push_back_token(tok);
+			new->expr = read_sql_expression(';', ";");
+		}
 	}
 	else
 	{
@@ -2943,28 +2989,27 @@ make_return_next_stmt(int location)
 	}
 	else if (plpgsql_curr_compile->fn_retistuple)
 	{
-		switch (yylex())
-		{
-			case T_DATUM:
-				if (yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_ROW ||
-					yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_REC)
-					new->retvarno = yylval.wdatum.datum->dno;
-				else
-					ereport(ERROR,
-							(errcode(ERRCODE_DATATYPE_MISMATCH),
-							 errmsg("RETURN NEXT must specify a record or row variable in function returning row"),
-							 parser_errposition(yylloc)));
-				break;
+		/*
+		 * We want to special-case simple row or record references for
+		 * efficiency.  So peek ahead to see if that's what we have.
+		 */
+		int		tok = yylex();
 
-			default:
-				ereport(ERROR,
-						(errcode(ERRCODE_DATATYPE_MISMATCH),
-						 errmsg("RETURN NEXT must specify a record or row variable in function returning row"),
-						 parser_errposition(yylloc)));
-				break;
+		if (tok == T_DATUM && plpgsql_peek() == ';' &&
+			(yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_ROW ||
+			 yylval.wdatum.datum->dtype == PLPGSQL_DTYPE_REC))
+		{
+			new->retvarno = yylval.wdatum.datum->dno;
+			/* eat the semicolon token that we only peeked at above */
+			tok = yylex();
+			Assert(tok == ';');
 		}
-		if (yylex() != ';')
-			yyerror("syntax error");
+		else
+		{
+			/* Not (just) a row/record name, so treat as expression */
+			plpgsql_push_back_token(tok);
+			new->expr = read_sql_expression(';', ";");
+		}
 	}
 	else
 		new->expr = read_sql_expression(';', ";");

@@ -9,7 +9,7 @@
  * context's MemoryContextMethods struct.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -18,6 +18,9 @@
  *
  *-------------------------------------------------------------------------
  */
+
+/* see palloc.h.  Must be before postgres.h */
+#define MCXT_INCLUDE_DEFINITIONS
 
 #include "postgres.h"
 
@@ -694,28 +697,6 @@ repalloc(void *pointer, Size size)
 	return (*header->context->methods->realloc) (header->context,
 												 pointer, size);
 }
-
-/*
- * MemoryContextSwitchTo
- *		Returns the current context; installs the given context.
- *
- * palloc.h defines an inline version of this function if allowed by the
- * compiler; in which case the definition below is skipped.
- */
-#ifndef USE_INLINE
-
-MemoryContext
-MemoryContextSwitchTo(MemoryContext context)
-{
-	MemoryContext old;
-
-	AssertArg(MemoryContextIsValid(context));
-
-	old = CurrentMemoryContext;
-	CurrentMemoryContext = context;
-	return old;
-}
-#endif   /* ! USE_INLINE */
 
 /*
  * MemoryContextStrdup

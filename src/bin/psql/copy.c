@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/copy.c
  */
@@ -97,7 +97,7 @@ parse_slash_copy(const char *args)
 		return NULL;
 	}
 
-	result = pg_calloc(1, sizeof(struct copy_options));
+	result = pg_malloc0(sizeof(struct copy_options));
 
 	result->before_tofrom = pg_strdup("");		/* initialize for appending */
 

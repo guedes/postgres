@@ -3,7 +3,7 @@
  * event_trigger.c
  *	  PostgreSQL EVENT TRIGGER support code.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -93,15 +94,15 @@ static void AlterEventTriggerOwner_internal(Relation rel,
 static event_trigger_command_tag_check_result check_ddl_tag(const char *tag);
 static void error_duplicate_filter_variable(const char *defname);
 static Datum filter_list_to_array(List *filterlist);
-static void insert_event_trigger_tuple(char *trigname, char *eventname,
-						Oid evtOwner, Oid funcoid, List *tags);
+static Oid insert_event_trigger_tuple(char *trigname, char *eventname,
+									  Oid evtOwner, Oid funcoid, List *tags);
 static void validate_ddl_tags(const char *filtervar, List *taglist);
 static void EventTriggerInvoke(List *fn_oid_list, EventTriggerData *trigdata);
 
 /*
  * Create an event trigger.
  */
-void
+Oid
 CreateEventTrigger(CreateEventTrigStmt *stmt)
 {
 	HeapTuple	tuple;
@@ -172,8 +173,8 @@ CreateEventTrigger(CreateEventTrigStmt *stmt)
 						NameListToString(stmt->funcname))));
 
 	/* Insert catalog entries. */
-	insert_event_trigger_tuple(stmt->trigname, stmt->eventname,
-							   evtowner, funcoid, tags);
+	return insert_event_trigger_tuple(stmt->trigname, stmt->eventname,
+									  evtowner, funcoid, tags);
 }
 
 /*
@@ -259,7 +260,7 @@ error_duplicate_filter_variable(const char *defname)
 /*
  * Insert the new pg_event_trigger row and record dependencies.
  */
-static void
+static Oid
 insert_event_trigger_tuple(char *trigname, char *eventname, Oid evtOwner,
 						   Oid funcoid, List *taglist)
 {
@@ -311,6 +312,8 @@ insert_event_trigger_tuple(char *trigname, char *eventname, Oid evtOwner,
 
 	/* Close pg_event_trigger. */
 	heap_close(tgrel, RowExclusiveLock);
+
+	return trigoid;
 }
 
 /*
@@ -375,11 +378,12 @@ RemoveEventTriggerById(Oid trigOid)
 /*
  * ALTER EVENT TRIGGER foo ENABLE|DISABLE|ENABLE ALWAYS|REPLICA
  */
-void
+Oid
 AlterEventTrigger(AlterEventTrigStmt *stmt)
 {
 	Relation	tgrel;
 	HeapTuple	tup;
+	Oid         trigoid;
 	Form_pg_event_trigger evtForm;
 	char        tgenabled = stmt->tgenabled;
 
@@ -392,7 +396,10 @@ AlterEventTrigger(AlterEventTrigStmt *stmt)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("event trigger \"%s\" does not exist",
 					stmt->trigname)));
-	if (!pg_event_trigger_ownercheck(HeapTupleGetOid(tup), GetUserId()))
+
+	trigoid = HeapTupleGetOid(tup);
+
+	if (!pg_event_trigger_ownercheck(trigoid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_EVENT_TRIGGER,
 					   stmt->trigname);
 
@@ -406,15 +413,18 @@ AlterEventTrigger(AlterEventTrigStmt *stmt)
 	/* clean up */
 	heap_freetuple(tup);
 	heap_close(tgrel, RowExclusiveLock);
+
+	return trigoid;
 }
 
 
 /*
  * Rename event trigger
  */
-void
+Oid
 RenameEventTrigger(const char *trigname, const char *newname)
 {
+	Oid			evtId;
 	HeapTuple	tup;
 	Relation	rel;
 	Form_pg_event_trigger evtForm;
@@ -437,6 +447,8 @@ RenameEventTrigger(const char *trigname, const char *newname)
 		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_EVENT_TRIGGER,
 					   trigname);
 
+	evtId = HeapTupleGetOid(tup);
+
 	evtForm = (Form_pg_event_trigger) GETSTRUCT(tup);
 
 	/* tuple is a copy, so we can rename it now */
@@ -446,15 +458,18 @@ RenameEventTrigger(const char *trigname, const char *newname)
 
 	heap_freetuple(tup);
 	heap_close(rel, RowExclusiveLock);
+
+	return evtId;
 }
 
 
 /*
  * Change event trigger's owner -- by name
  */
-void
+Oid
 AlterEventTriggerOwner(const char *name, Oid newOwnerId)
 {
+	Oid			evtOid;
 	HeapTuple	tup;
 	Relation	rel;
 
@@ -467,11 +482,15 @@ AlterEventTriggerOwner(const char *name, Oid newOwnerId)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("event trigger \"%s\" does not exist", name)));
 
+	evtOid = HeapTupleGetOid(tup);
+
 	AlterEventTriggerOwner_internal(rel, tup, newOwnerId);
 
 	heap_freetuple(tup);
 
 	heap_close(rel, RowExclusiveLock);
+
+	return evtOid;
 }
 
 /*
@@ -564,6 +583,25 @@ EventTriggerDDLCommandStart(Node *parsetree)
 	ListCell   *lc;
 	const char *tag;
 	EventTriggerData	trigdata;
+
+	/*
+	 * Event Triggers are completely disabled in standalone mode.  There are
+	 * (at least) two reasons for this:
+	 *
+	 * 1. A sufficiently broken event trigger might not only render the
+	 * database unusable, but prevent disabling itself to fix the situation.
+	 * In this scenario, restarting in standalone mode provides an escape
+	 * hatch.
+	 *
+	 * 2. BuildEventTriggerCache relies on systable_beginscan_ordered, and
+	 * therefore will malfunction if pg_event_trigger's indexes are damaged.
+	 * To allow recovery from a damaged index, we need some operating mode
+	 * wherein event triggers are disabled.  (Or we could implement
+	 * heapscan-and-sort logic for that case, but having disaster recovery
+	 * scenarios depend on code that's otherwise untested isn't appetizing.)
+	 */
+	if (!IsUnderPostmaster)
+		return;
 
 	/*
 	 * We want the list of command tags for which this procedure is actually

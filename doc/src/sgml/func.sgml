@@ -7872,7 +7872,7 @@ CREATE TYPE rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple
          </indexterm>
          <literal><function>path(<type>polygon</type>)</function></literal>
         </entry>
-        <entry><type>point</type></entry>
+        <entry><type>path</type></entry>
         <entry>polygon to path</entry>
         <entry><literal>path(polygon '((0,0),(1,1),(2,0))')</literal></entry>
        </row>
@@ -12548,9 +12548,10 @@ AND
 
   <para>
    This section describes functions that possibly return more than one row.
-   Currently the only functions in this class are series generating functions,
-   as detailed in <xref linkend="functions-srf-series"> and
-   <xref linkend="functions-srf-subscripts">.
+   The most widely used functions in this class are series generating
+   functions, as detailed in <xref linkend="functions-srf-series"> and
+   <xref linkend="functions-srf-subscripts">.  Other, more specialized
+   set-returning functions are described elsewhere in this manual.
   </para>
 
   <table id="functions-srf-series">
@@ -13506,6 +13507,11 @@ SELECT relname FROM pg_class WHERE pg_table_is_visible(oid);
 </programlisting>
   </para>
 
+   <indexterm>
+    <primary>search path</primary>
+    <secondary>object visibility</secondary>
+   </indexterm>
+
    <table id="functions-info-schema-table">
     <title>Schema Visibility Inquiry Functions</title>
     <tgroup cols="3">
@@ -13852,7 +13858,7 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
       <row>
        <entry><literal><function>pg_get_viewdef(<parameter>view_name</parameter>, <parameter>pretty_bool</>)</function></literal></entry>
        <entry><type>text</type></entry>
-       <entry>get underlying <command>SELECT</command> command for view,
+       <entry>get underlying <command>SELECT</command> command for view;
               lines with fields are wrapped to 80 columns if <parameter>pretty_bool</parameter> is true (<emphasis>deprecated</emphasis>)</entry>
       </row>
       <row>
@@ -13863,14 +13869,15 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
       <row>
        <entry><literal><function>pg_get_viewdef(<parameter>view_oid</parameter>, <parameter>pretty_bool</>)</function></literal></entry>
        <entry><type>text</type></entry>
-       <entry>get underlying <command>SELECT</command> command for view,
+       <entry>get underlying <command>SELECT</command> command for view;
               lines with fields are wrapped to 80 columns if <parameter>pretty_bool</parameter> is true</entry>
       </row>
       <row>
-       <entry><literal><function>pg_get_viewdef(<parameter>view_oid</parameter>, <parameter>wrap_int</>)</function></literal></entry>
+       <entry><literal><function>pg_get_viewdef(<parameter>view_oid</parameter>, <parameter>wrap_column_int</>)</function></literal></entry>
        <entry><type>text</type></entry>
-       <entry>get underlying <command>SELECT</command> command for view,
-              wrapping lines with fields as specified, pretty printing is implied</entry>
+       <entry>get underlying <command>SELECT</command> command for view;
+              lines with fields are wrapped to specified number of columns,
+              pretty printing is implied</entry>
       </row>
       <row>
        <entry><literal><function>pg_options_to_table(<parameter>reloptions</parameter>)</function></literal></entry>

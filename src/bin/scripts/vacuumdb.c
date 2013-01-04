@@ -2,7 +2,7 @@
  *
  * vacuumdb
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/scripts/vacuumdb.c
@@ -82,13 +82,13 @@ main(int argc, char *argv[])
 		switch (c)
 		{
 			case 'h':
-				host = optarg;
+				host = pg_strdup(optarg);
 				break;
 			case 'p':
-				port = optarg;
+				port = pg_strdup(optarg);
 				break;
 			case 'U':
-				username = optarg;
+				username = pg_strdup(optarg);
 				break;
 			case 'w':
 				prompt_password = TRI_NO;
@@ -103,7 +103,7 @@ main(int argc, char *argv[])
 				quiet = true;
 				break;
 			case 'd':
-				dbname = optarg;
+				dbname = pg_strdup(optarg);
 				break;
 			case 'z':
 				and_analyze = true;
@@ -118,7 +118,7 @@ main(int argc, char *argv[])
 				alldb = true;
 				break;
 			case 't':
-				table = optarg;
+				table = pg_strdup(optarg);
 				break;
 			case 'f':
 				full = true;
@@ -127,7 +127,7 @@ main(int argc, char *argv[])
 				verbose = true;
 				break;
 			case 2:
-				maintenance_db = optarg;
+				maintenance_db = pg_strdup(optarg);
 				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
@@ -149,7 +149,7 @@ main(int argc, char *argv[])
 	if (optind < argc)
 	{
 		fprintf(stderr, _("%s: too many command-line arguments (first is \"%s\")\n"),
-				progname, argv[optind + 1]);
+				progname, argv[optind]);
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 		exit(1);
 	}

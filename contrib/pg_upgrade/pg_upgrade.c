@@ -3,7 +3,7 @@
  *
  *	main source file
  *
- *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/pg_upgrade.c
  */
 
@@ -61,7 +61,6 @@ char	   *output_files[] = {
 	/* unique file for pg_ctl start */
 	SERVER_START_LOG_FILE,
 #endif
-	RESTORE_LOG_FILE,
 	UTILITY_LOG_FILE,
 	INTERNAL_LOG_FILE,
 	NULL
@@ -86,9 +85,13 @@ main(int argc, char **argv)
 	setup(argv[0], live_check);
 
 	check_cluster_versions();
+
+	get_sock_dir(&old_cluster, live_check);
+	get_sock_dir(&new_cluster, false);
+
 	check_cluster_compatibility(live_check);
 
-	check_old_cluster(live_check, &sequence_script_file_name);
+	check_and_dump_old_cluster(live_check, &sequence_script_file_name);
 
 
 	/* -- NEW -- */
@@ -143,6 +146,12 @@ main(int argc, char **argv)
 	exec_prog(UTILITY_LOG_FILE, NULL, true,
 			  "\"%s/pg_resetxlog\" -o %u \"%s\"",
 			  new_cluster.bindir, old_cluster.controldata.chkpnt_nxtoid,
+			  new_cluster.pgdata);
+	check_ok();
+
+	prep_status("Sync data directory to disk");
+	exec_prog(UTILITY_LOG_FILE, NULL, true,
+			  "\"%s/initdb\" --sync-only \"%s\"", new_cluster.bindir,
 			  new_cluster.pgdata);
 	check_ok();
 
@@ -211,8 +220,8 @@ prepare_new_cluster(void)
 	 */
 	prep_status("Analyzing all rows in the new cluster");
 	exec_prog(UTILITY_LOG_FILE, NULL, true,
-			  "\"%s/vacuumdb\" --port %d --username \"%s\" --all --analyze %s",
-			  new_cluster.bindir, new_cluster.port, os_info.user,
+			  "\"%s/vacuumdb\" %s --all --analyze %s",
+			  new_cluster.bindir, cluster_conn_opts(&new_cluster),
 			  log_opts.verbose ? "--verbose" : "");
 	check_ok();
 
@@ -224,8 +233,8 @@ prepare_new_cluster(void)
 	 */
 	prep_status("Freezing all rows on the new cluster");
 	exec_prog(UTILITY_LOG_FILE, NULL, true,
-			  "\"%s/vacuumdb\" --port %d --username \"%s\" --all --freeze %s",
-			  new_cluster.bindir, new_cluster.port, os_info.user,
+			  "\"%s/vacuumdb\" %s --all --freeze %s",
+			  new_cluster.bindir, cluster_conn_opts(&new_cluster),
 			  log_opts.verbose ? "--verbose" : "");
 	check_ok();
 
@@ -244,7 +253,7 @@ prepare_new_databases(void)
 
 	set_frozenxids();
 
-	prep_status("Creating databases in the new cluster");
+	prep_status("Restoring global objects in the new cluster");
 
 	/*
 	 * Install support functions in the global-object restore database to
@@ -260,9 +269,9 @@ prepare_new_databases(void)
 	 * support functions in template1 but pg_dumpall creates database using
 	 * the template0 template.
 	 */
-	exec_prog(RESTORE_LOG_FILE, NULL, true,
-			  "\"%s/psql\" " EXEC_PSQL_ARGS " --port %d --username \"%s\" -f \"%s\"",
-			  new_cluster.bindir, new_cluster.port, os_info.user,
+	exec_prog(UTILITY_LOG_FILE, NULL, true,
+			  "\"%s/psql\" " EXEC_PSQL_ARGS " %s -f \"%s\"",
+			  new_cluster.bindir, cluster_conn_opts(&new_cluster),
 			  GLOBALS_DUMP_FILE);
 	check_ok();
 
@@ -278,6 +287,11 @@ create_new_objects(void)
 
 	prep_status("Adding support functions to new cluster");
 
+	/*
+	 *	Technically, we only need to install these support functions in new
+	 *	databases that also exist in the old cluster, but for completeness
+	 *	we process all new databases.
+	 */
 	for (dbnum = 0; dbnum < new_cluster.dbarr.ndbs; dbnum++)
 	{
 		DbInfo	   *new_db = &new_cluster.dbarr.dbs[dbnum];
@@ -288,11 +302,33 @@ create_new_objects(void)
 	}
 	check_ok();
 
-	prep_status("Restoring database schema to new cluster");
-	exec_prog(RESTORE_LOG_FILE, NULL, true,
-			  "\"%s/psql\" " EXEC_PSQL_ARGS " --port %d --username \"%s\" -f \"%s\"",
-			  new_cluster.bindir, new_cluster.port, os_info.user,
-			  DB_DUMP_FILE);
+	prep_status("Restoring database schemas in the new cluster\n");
+
+	for (dbnum = 0; dbnum < old_cluster.dbarr.ndbs; dbnum++)
+	{
+		char sql_file_name[MAXPGPATH], log_file_name[MAXPGPATH];
+		DbInfo     *old_db = &old_cluster.dbarr.dbs[dbnum];
+
+		pg_log(PG_STATUS, "%s", old_db->db_name);
+		snprintf(sql_file_name, sizeof(sql_file_name), DB_DUMP_FILE_MASK, old_db->db_oid);
+		snprintf(log_file_name, sizeof(log_file_name), DB_DUMP_LOG_FILE_MASK, old_db->db_oid);
+
+		/*
+		 *	Using pg_restore --single-transaction is faster than other
+		 *	methods, like --jobs.  pg_dump only produces its output at the
+		 *	end, so there is little parallelism using the pipe.
+		 */
+		parallel_exec_prog(log_file_name, NULL,
+				  "\"%s/pg_restore\" %s --exit-on-error --single-transaction --verbose --dbname \"%s\" \"%s\"",
+				  new_cluster.bindir, cluster_conn_opts(&new_cluster),
+				  old_db->db_name, sql_file_name);
+	}
+
+	/* reap all children */
+	while (reap_child(true) == true)
+		;
+
+	end_progress_output();
 	check_ok();
 
 	/* regenerate now that we have objects in the databases */
@@ -451,14 +487,26 @@ cleanup(void)
 	/* Remove dump and log files? */
 	if (!log_opts.retain)
 	{
+		int			dbnum;
 		char	  **filename;
 
 		for (filename = output_files; *filename != NULL; filename++)
 			unlink(*filename);
 
-		/* remove SQL files */
-		unlink(ALL_DUMP_FILE);
+		/* remove dump files */
 		unlink(GLOBALS_DUMP_FILE);
-		unlink(DB_DUMP_FILE);
+
+		if (old_cluster.dbarr.dbs)
+			for (dbnum = 0; dbnum < old_cluster.dbarr.ndbs; dbnum++)
+			{
+				char sql_file_name[MAXPGPATH], log_file_name[MAXPGPATH];
+				DbInfo     *old_db = &old_cluster.dbarr.dbs[dbnum];
+
+				snprintf(sql_file_name, sizeof(sql_file_name), DB_DUMP_FILE_MASK, old_db->db_oid);
+				unlink(sql_file_name);
+
+				snprintf(log_file_name, sizeof(log_file_name), DB_DUMP_FILE_MASK, old_db->db_oid);
+				unlink(log_file_name);
+			}
 	}
 }

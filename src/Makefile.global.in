@@ -31,6 +31,9 @@ all:
 # started to update the file.
 .DELETE_ON_ERROR:
 
+# Never delete any intermediate files automatically.
+.SECONDARY:
+
 # PostgreSQL version number
 VERSION = @PACKAGE_VERSION@
 MAJORVERSION = @PG_MAJORVERSION@
@@ -165,7 +168,6 @@ with_libxml	= @with_libxml@
 with_libxslt	= @with_libxslt@
 with_system_tzdata = @with_system_tzdata@
 with_zlib	= @with_zlib@
-enable_shared	= @enable_shared@
 enable_rpath	= @enable_rpath@
 enable_nls	= @enable_nls@
 enable_debug	= @enable_debug@
@@ -397,13 +399,6 @@ endif
 # isn't created with the same link flags as libpq, it can't be used.)
 libpq = -L$(libpq_builddir) -lpq
 
-# If doing static linking, shared library dependency info isn't available,
-# so add in the libraries that libpq depends on.
-ifeq ($(enable_shared), no)
-libpq += $(filter -lintl -lssl -lcrypto -lkrb5 -lcrypt, $(LIBS)) \
-	$(LDAP_LIBS_FE) $(PTHREAD_LIBS)
-endif
-
 # This macro is for use by client executables (not libraries) that use libpq.
 # We force clients to pull symbols from the non-shared library libpgport
 # rather than pulling some libpgport symbols from libpq just because
@@ -433,6 +428,15 @@ submake-libpgport:
 
 PL_TESTDB = pl_regression
 CONTRIB_TESTDB = contrib_regression
+ifneq ($(MODULE_big),)
+  CONTRIB_TESTDB_MODULE = contrib_regression_$(MODULE_big)
+else 
+  ifneq ($(MODULES),)
+    CONTRIB_TESTDB_MODULE = contrib_regression_$(MODULES)
+  else
+    CONTRIB_TESTDB_MODULE = contrib_regression
+  endif
+endif
 
 ifdef NO_LOCALE
 NOLOCALE += --no-locale
@@ -508,6 +512,22 @@ TAS         = @TAS@
 #
 # Global targets and rules
 
+%.c: %.l
+ifdef FLEX
+	$(FLEX) $(if $(FLEX_NO_BACKUP),-b) $(FLEXFLAGS) -o'$@' $<
+	@$(if $(FLEX_NO_BACKUP),if [ `wc -l <lex.backup` -eq 1 ]; then rm lex.backup; else echo "Scanner requires backup; see lex.backup." 1>&2; exit 1; fi)
+else
+	@$(missing) flex $< '$@'
+endif
+
+%.c: %.y
+	$(if $(BISON_CHECK_CMD),$(BISON_CHECK_CMD))
+ifdef BISON
+	$(BISON) $(BISONFLAGS) -o $@ $<
+else
+	@$(missing) bison $< $@
+endif
+
 %.i: %.c
 	$(CPP) $(CPPFLAGS) -o $@ $<
 
@@ -546,6 +566,12 @@ $(top_builddir)/src/include/pg_config.h: $(top_builddir)/src/include/stamp-h ;
 
 $(top_builddir)/src/include/stamp-h: $(top_srcdir)/src/include/pg_config.h.in $(top_builddir)/config.status
 	cd $(top_builddir) && ./config.status src/include/pg_config.h
+
+# Also remake pg_config_ext.h from pg_config_ext.h.in, same logic as above.
+$(top_builddir)/src/include/pg_config_ext.h: $(top_builddir)/src/include/stamp-ext-h ;
+
+$(top_builddir)/src/include/stamp-ext-h: $(top_srcdir)/src/include/pg_config_ext.h.in $(top_builddir)/config.status
+	cd $(top_builddir) && ./config.status src/include/pg_config_ext.h
 
 # Also remake ecpg_config.h from ecpg_config.h.in if the latter changed, same
 # logic as above.
@@ -668,17 +694,6 @@ clean distclean maintainer-clean: clean-deps
 .PHONY: clean-deps
 clean-deps:
 	@rm -rf $(DEPDIR)
-
-# When in automatic dependency mode, never delete any intermediate
-# files automatically.  Otherwise, the following could happen: When
-# starting from a clean source tree, the first build would delete the
-# intermediate file, but also create the dependency file, which
-# mentions the intermediate file, thus making it non-intermediate.
-# The second build will then need to rebuild the now non-intermediate
-# missing file.  So the second build will do work even though nothing
-# had changed.  One place where this happens is the .c -> .o -> .so
-# chain for some contrib modules.
-.SECONDARY:
 
 endif # autodepend
 

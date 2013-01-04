@@ -19,7 +19,7 @@
  * routines.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -780,11 +780,8 @@ retry4:
 	 * has been set already.
 	 */
 definitelyFailed:
+	pqDropConnection(conn);
 	conn->status = CONNECTION_BAD;		/* No more connection to backend */
-	pqsecure_close(conn);
-	closesocket(conn->sock);
-	conn->sock = -1;
-
 	return -1;
 }
 

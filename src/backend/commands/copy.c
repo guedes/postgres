@@ -3,7 +3,7 @@
  * copy.c
  *		Implements the COPY utility command
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
@@ -43,6 +44,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/portal.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -108,6 +110,7 @@ typedef struct CopyStateData
 	char	   *filename;		/* filename, or NULL for STDIN/STDOUT */
 	bool		binary;			/* binary format? */
 	bool		oids;			/* include OIDs? */
+	bool		freeze;			/* freeze rows on loading? */
 	bool		csv_mode;		/* Comma Separated Value format? */
 	bool		header_line;	/* CSV header line? */
 	char	   *null_print;		/* NULL marker string (server encoding!) */
@@ -740,14 +743,14 @@ CopyLoadRawBuf(CopyState cstate)
  * Do not allow the copy if user doesn't have proper permission to access
  * the table or the specifically requested columns.
  */
-uint64
-DoCopy(const CopyStmt *stmt, const char *queryString)
+Oid
+DoCopy(const CopyStmt *stmt, const char *queryString, uint64 *processed)
 {
 	CopyState	cstate;
 	bool		is_from = stmt->is_from;
 	bool		pipe = (stmt->filename == NULL);
 	Relation	rel;
-	uint64		processed;
+	Oid         relid;
 
 	/* Disallow file COPY except to superusers. */
 	if (!pipe && !superuser())
@@ -770,6 +773,8 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 		/* Open and lock the relation, using the appropriate lock type. */
 		rel = heap_openrv(stmt->relation,
 						  (is_from ? RowExclusiveLock : AccessShareLock));
+
+		relid = RelationGetRelid(rel);
 
 		rte = makeNode(RangeTblEntry);
 		rte->rtekind = RTE_RELATION;
@@ -795,6 +800,7 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 	{
 		Assert(stmt->query);
 
+		relid = InvalidOid;
 		rel = NULL;
 	}
 
@@ -803,19 +809,19 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 		Assert(rel);
 
 		/* check read-only transaction */
-		if (XactReadOnly && rel->rd_backend != MyBackendId)
+		if (XactReadOnly && !rel->rd_islocaltemp)
 			PreventCommandIfReadOnly("COPY FROM");
 
 		cstate = BeginCopyFrom(rel, stmt->filename,
 							   stmt->attlist, stmt->options);
-		processed = CopyFrom(cstate);	/* copy from file to database */
+		*processed = CopyFrom(cstate);	/* copy from file to database */
 		EndCopyFrom(cstate);
 	}
 	else
 	{
 		cstate = BeginCopyTo(rel, stmt->query, queryString, stmt->filename,
 							 stmt->attlist, stmt->options);
-		processed = DoCopyTo(cstate);	/* copy from database to file */
+		*processed = DoCopyTo(cstate);	/* copy from database to file */
 		EndCopyTo(cstate);
 	}
 
@@ -827,7 +833,7 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 	if (rel != NULL)
 		heap_close(rel, (is_from ? NoLock : AccessShareLock));
 
-	return processed;
+	return relid;
 }
 
 /*
@@ -893,6 +899,14 @@ ProcessCopyOptions(CopyState cstate,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("conflicting or redundant options")));
 			cstate->oids = defGetBoolean(defel);
+		}
+		else if (strcmp(defel->defname, "freeze") == 0)
+		{
+			if (cstate->freeze)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options")));
+			cstate->freeze = defGetBoolean(defel);
 		}
 		else if (strcmp(defel->defname, "delimiter") == 0)
 		{
@@ -1900,7 +1914,7 @@ CopyFrom(CopyState cstate)
 	TupleTableSlot *myslot;
 	MemoryContext oldcontext = CurrentMemoryContext;
 
-	ErrorContextCallback errcontext;
+	ErrorContextCallback errcallback;
 	CommandId	mycid = GetCurrentCommandId(true);
 	int			hi_options = 0; /* start with default heap_insert options */
 	BulkInsertState bistate;
@@ -1952,8 +1966,18 @@ CopyFrom(CopyState cstate)
 	 * routine first.
 	 *
 	 * As mentioned in comments in utils/rel.h, the in-same-transaction test
-	 * is not completely reliable, since in rare cases rd_createSubid or
-	 * rd_newRelfilenodeSubid can be cleared before the end of the transaction.
+	 * is not always set correctly, since in rare cases rd_newRelfilenodeSubid
+	 * can be cleared before the end of the transaction. The exact case is
+	 * when a relation sets a new relfilenode twice in same transaction, yet
+	 * the second one fails in an aborted subtransaction, e.g.
+	 *
+	 * BEGIN;
+	 * TRUNCATE t;
+	 * SAVEPOINT save;
+	 * TRUNCATE t;
+	 * ROLLBACK TO save;
+	 * COPY ...
+	 *
 	 * However this is OK since at worst we will fail to make the optimization.
 	 *
 	 * Also, if the target file is new-in-transaction, we assume that checking
@@ -1973,6 +1997,26 @@ CopyFrom(CopyState cstate)
 		hi_options |= HEAP_INSERT_SKIP_FSM;
 		if (!XLogIsNeeded())
 			hi_options |= HEAP_INSERT_SKIP_WAL;
+
+		/*
+		 * Optimize if new relfilenode was created in this subxact or
+		 * one of its committed children and we won't see those rows later
+		 * as part of an earlier scan or command. This ensures that if this
+		 * subtransaction aborts then the frozen rows won't be visible
+		 * after xact cleanup. Note that the stronger test of exactly
+		 * which subtransaction created it is crucial for correctness
+		 * of this optimisation.
+		 *
+		 * As noted above rd_newRelfilenodeSubid is not set in all cases
+		 * where we can apply the optimization, so in those rare cases
+		 * where we cannot honour the request we do so silently.
+		 */
+		if (cstate->freeze &&
+			ThereAreNoPriorRegisteredSnapshots() &&
+			ThereAreNoReadyPortals() &&
+			(cstate->rel->rd_newRelfilenodeSubid == GetCurrentSubTransactionId() ||
+			 cstate->rel->rd_createSubid == GetCurrentSubTransactionId()))
+			hi_options |= HEAP_INSERT_FROZEN;
 	}
 
 	/*
@@ -2045,10 +2089,10 @@ CopyFrom(CopyState cstate)
 	econtext = GetPerTupleExprContext(estate);
 
 	/* Set up callback to identify error line number */
-	errcontext.callback = CopyFromErrorCallback;
-	errcontext.arg = (void *) cstate;
-	errcontext.previous = error_context_stack;
-	error_context_stack = &errcontext;
+	errcallback.callback = CopyFromErrorCallback;
+	errcallback.arg = (void *) cstate;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	for (;;)
 	{
@@ -2163,7 +2207,7 @@ CopyFrom(CopyState cstate)
 							nBufferedTuples, bufferedTuples);
 
 	/* Done, clean up */
-	error_context_stack = errcontext.previous;
+	error_context_stack = errcallback.previous;
 
 	FreeBulkInsertState(bistate);
 

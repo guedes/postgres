@@ -5,20 +5,14 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_receivexlog.c
  *-------------------------------------------------------------------------
  */
 
-/*
- * We have to use postgres.h not postgres_fe.h here, because there's so much
- * backend-only stuff in the XLOG include files we need.  But we need a
- * frontend-ish environment otherwise.	Hence this ugly hack.
- */
-#define FRONTEND 1
-#include "postgres.h"
+#include "postgres_fe.h"
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
 #include "access/xlog_internal.h"
@@ -86,7 +80,7 @@ stop_streaming(XLogRecPtr segendpos, uint32 timeline, bool segment_finished)
 
 	if (time_to_abort)
 	{
-		fprintf(stderr, _("%s: received interrupt signal, exiting.\n"),
+		fprintf(stderr, _("%s: received interrupt signal, exiting\n"),
 				progname);
 		return true;
 	}
@@ -315,6 +309,7 @@ main(int argc, char **argv)
 		{"verbose", no_argument, NULL, 'v'},
 		{NULL, 0, NULL, 0}
 	};
+
 	int			c;
 	int			option_index;
 
@@ -342,10 +337,10 @@ main(int argc, char **argv)
 		switch (c)
 		{
 			case 'D':
-				basedir = xstrdup(optarg);
+				basedir = pg_strdup(optarg);
 				break;
 			case 'h':
-				dbhost = xstrdup(optarg);
+				dbhost = pg_strdup(optarg);
 				break;
 			case 'p':
 				if (atoi(optarg) <= 0)
@@ -354,10 +349,10 @@ main(int argc, char **argv)
 							progname, optarg);
 					exit(1);
 				}
-				dbport = xstrdup(optarg);
+				dbport = pg_strdup(optarg);
 				break;
 			case 'U':
-				dbuser = xstrdup(optarg);
+				dbuser = pg_strdup(optarg);
 				break;
 			case 'w':
 				dbgetpassword = -1;
@@ -432,13 +427,14 @@ main(int argc, char **argv)
 		}
 		else if (noloop)
 		{
-			fprintf(stderr, _("%s: disconnected.\n"), progname);
+			fprintf(stderr, _("%s: disconnected\n"), progname);
 			exit(1);
 		}
 		else
 		{
 			fprintf(stderr,
-					_("%s: disconnected. Waiting %d seconds to try again\n"),
+					/* translator: check source for value for %d */
+					_("%s: disconnected; waiting %d seconds to try again\n"),
 					progname, RECONNECT_SLEEP_TIME);
 			pg_usleep(RECONNECT_SLEEP_TIME * 1000000);
 		}

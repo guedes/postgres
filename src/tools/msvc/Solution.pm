@@ -242,6 +242,14 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 		close(I);
 	}
 
+	if (IsNewer(
+			"src\\include\\pg_config_ext.h", "src\\include\\pg_config_ext.h.win32"))
+	{
+		print "Copying pg_config_ext.h...\n";
+		copyFile("src\\include\\pg_config_ext.h.win32",
+			"src\\include\\pg_config_ext.h");
+	}
+
 	$self->GenerateDefFile(
 		"src\\interfaces\\libpq\\libpqdll.def",
 		"src\\interfaces\\libpq\\exports.txt",
@@ -267,6 +275,9 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 		system(
 "perl -I ../catalog Gen_fmgrtab.pl ../../../src/include/catalog/pg_proc.h");
 		chdir('..\..\..');
+	}
+	if (IsNewer('src\include\utils\fmgroids.h', 'src\backend\utils\fmgroids.h'))
+	{
 		copyFile('src\backend\utils\fmgroids.h',
 			'src\include\utils\fmgroids.h');
 	}

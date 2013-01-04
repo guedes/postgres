@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/common.c
  */
@@ -60,6 +60,9 @@ pg_malloc(size_t size)
 {
 	void	   *tmp;
 
+	/* Avoid unportable behavior of malloc(0) */
+	if (size == 0)
+		size = 1;
 	tmp = malloc(size);
 	if (!tmp)
 	{
@@ -70,26 +73,12 @@ pg_malloc(size_t size)
 }
 
 void *
-pg_malloc_zero(size_t size)
+pg_malloc0(size_t size)
 {
 	void	   *tmp;
 
 	tmp = pg_malloc(size);
-	memset(tmp, 0, size);
-	return tmp;
-}
-
-void *
-pg_calloc(size_t nmemb, size_t size)
-{
-	void	   *tmp;
-
-	tmp = calloc(nmemb, size);
-	if (!tmp)
-	{
-		psql_error("out of memory\n");
-		exit(EXIT_FAILURE);
-	}
+	MemSet(tmp, 0, size);
 	return tmp;
 }
 
@@ -1171,7 +1160,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 			}
 
 			OK = AcceptResult(results);
-			psql_assert(!OK);
+			Assert(!OK);
 			PQclear(results);
 			break;
 		}

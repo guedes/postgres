@@ -12,7 +12,7 @@
  *		reduce_outer_joins
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -799,6 +799,7 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	subroot->glob = root->glob;
 	subroot->query_level = root->query_level;
 	subroot->parent_root = root->parent_root;
+	subroot->plan_params = NIL;
 	subroot->planner_cxt = CurrentMemoryContext;
 	subroot->init_plans = NIL;
 	subroot->cte_plan_ids = NIL;

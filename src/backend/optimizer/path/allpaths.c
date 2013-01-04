@@ -3,7 +3,7 @@
  * allpaths.c
  *	  Routines to find possible search paths for processing a query
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -722,7 +722,7 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		 * the unparameterized Append path we are constructing for the parent.
 		 * If not, there's no workable unparameterized path.
 		 */
-		if (childrel->cheapest_total_path)
+		if (childrel->cheapest_total_path->param_info == NULL)
 			subpaths = accumulate_append_subpath(subpaths,
 											 childrel->cheapest_total_path);
 		else
@@ -932,7 +932,6 @@ generate_mergeappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				cheapest_startup = cheapest_total =
 					childrel->cheapest_total_path;
 				/* Assert we do have an unparameterized path for this child */
-				Assert(cheapest_total != NULL);
 				Assert(cheapest_total->param_info == NULL);
 			}
 
@@ -1146,12 +1145,19 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	else
 		tuple_fraction = root->tuple_fraction;
 
+	/* plan_params should not be in use in current query level */
+	Assert(root->plan_params == NIL);
+
 	/* Generate the plan for the subquery */
 	rel->subplan = subquery_planner(root->glob, subquery,
 									root,
 									false, tuple_fraction,
 									&subroot);
 	rel->subroot = subroot;
+
+	/* Isolate the params needed by this specific subplan */
+	rel->subplan_params = root->plan_params;
+	root->plan_params = NIL;
 
 	/*
 	 * It's possible that constraint exclusion proved the subquery empty. If
@@ -1829,10 +1835,10 @@ subquery_push_qual(Query *subquery, RangeTblEntry *rte, Index rti, Node *qual)
 		 * This step also ensures that when we are pushing into a setop tree,
 		 * each component query gets its own copy of the qual.
 		 */
-		qual = ResolveNew(qual, rti, 0, rte,
-						  subquery->targetList,
-						  CMD_SELECT, 0,
-						  &subquery->hasSubLinks);
+		qual = ReplaceVarsFromTargetList(qual, rti, 0, rte,
+										 subquery->targetList,
+										 REPLACEVARS_REPORT_ERROR, 0,
+										 &subquery->hasSubLinks);
 
 		/*
 		 * Now attach the qual to the proper place: normally WHERE, but if the

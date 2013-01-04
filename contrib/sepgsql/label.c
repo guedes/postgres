@@ -4,13 +4,14 @@
  *
  * Routines to support SELinux labels (security context)
  *
- * Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/genam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"

@@ -3,7 +3,7 @@
  * misc.c
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -28,6 +28,7 @@
 #include "miscadmin.h"
 #include "parser/keywords.h"
 #include "postmaster/syslogger.h"
+#include "rewrite/rewriteHandler.h"
 #include "storage/fd.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
@@ -73,12 +74,13 @@ current_query(PG_FUNCTION_ARGS)
 
 /*
  * Send a signal to another backend.
+ *
  * The signal is delivered if the user is either a superuser or the same
  * role as the backend being signaled. For "dangerous" signals, an explicit
  * check for superuser needs to be done prior to calling this function.
  *
  * Returns 0 on success, 1 on general failure, and 2 on permission error.
- * In the event of a general failure (returncode 1), a warning message will
+ * In the event of a general failure (return code 1), a warning message will
  * be emitted. For permission errors, doing that is the responsibility of
  * the caller.
  */
@@ -88,37 +90,29 @@ current_query(PG_FUNCTION_ARGS)
 static int
 pg_signal_backend(int pid, int sig)
 {
-	PGPROC	   *proc;
+	PGPROC	   *proc = BackendPidGetProc(pid);
 
-	if (!superuser())
-	{
-		/*
-		 * Since the user is not superuser, check for matching roles. Trust
-		 * that BackendPidGetProc will return NULL if the pid isn't valid,
-		 * even though the check for whether it's a backend process is below.
-		 * The IsBackendPid check can't be relied on as definitive even if it
-		 * was first. The process might end between successive checks
-		 * regardless of their order. There's no way to acquire a lock on an
-		 * arbitrary process to prevent that. But since so far all the callers
-		 * of this mechanism involve some request for ending the process
-		 * anyway, that it might end on its own first is not a problem.
-		 */
-		proc = BackendPidGetProc(pid);
-
-		if (proc == NULL || proc->roleId != GetUserId())
-			return SIGNAL_BACKEND_NOPERMISSION;
-	}
-
-	if (!IsBackendPid(pid))
+	/*
+	 * BackendPidGetProc returns NULL if the pid isn't valid; but by the time
+	 * we reach kill(), a process for which we get a valid proc here might have
+	 * terminated on its own.  There's no way to acquire a lock on an arbitrary
+	 * process to prevent that. But since so far all the callers of this
+	 * mechanism involve some request for ending the process anyway, that it
+	 * might end on its own first is not a problem.
+	 */
+	if (proc == NULL)
 	{
 		/*
 		 * This is just a warning so a loop-through-resultset will not abort
-		 * if one backend terminated on it's own during the run
+		 * if one backend terminated on its own during the run.
 		 */
 		ereport(WARNING,
 				(errmsg("PID %d is not a PostgreSQL server process", pid)));
 		return SIGNAL_BACKEND_ERROR;
 	}
+
+	if (!(superuser() || proc->roleId == GetUserId()))
+		return SIGNAL_BACKEND_NOPERMISSION;
 
 	/*
 	 * Can the process we just validated above end, followed by the pid being
@@ -529,4 +523,34 @@ pg_collation_for(PG_FUNCTION_ARGS)
 	if (!collid)
 		PG_RETURN_NULL();
 	PG_RETURN_TEXT_P(cstring_to_text(generate_collation_name(collid)));
+}
+
+
+/*
+ * information_schema support functions
+ *
+ * Test whether a view (identified by pg_class OID) is insertable-into or
+ * updatable.  The latter requires delete capability too.  This is an
+ * artifact of the way the SQL standard defines the information_schema views:
+ * if we defined separate functions for update and delete, we'd double the
+ * work required to compute the view columns.
+ *
+ * These rely on relation_is_updatable(), which is in rewriteHandler.c.
+ */
+Datum
+pg_view_is_insertable(PG_FUNCTION_ARGS)
+{
+	Oid			viewoid = PG_GETARG_OID(0);
+	int			req_events = (1 << CMD_INSERT);
+
+	PG_RETURN_BOOL(relation_is_updatable(viewoid, req_events));
+}
+
+Datum
+pg_view_is_updatable(PG_FUNCTION_ARGS)
+{
+	Oid			viewoid = PG_GETARG_OID(0);
+	int			req_events = (1 << CMD_UPDATE) | (1 << CMD_DELETE);
+
+	PG_RETURN_BOOL(relation_is_updatable(viewoid, req_events));
 }
