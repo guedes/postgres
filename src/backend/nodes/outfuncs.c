@@ -1000,6 +1000,7 @@ _outFuncExpr(StringInfo str, const FuncExpr *node)
 	WRITE_OID_FIELD(funcid);
 	WRITE_OID_FIELD(funcresulttype);
 	WRITE_BOOL_FIELD(funcretset);
+	WRITE_BOOL_FIELD(funcvariadic);
 	WRITE_ENUM_FIELD(funcformat, CoercionForm);
 	WRITE_OID_FIELD(funccollid);
 	WRITE_OID_FIELD(inputcollid);
@@ -2110,7 +2111,7 @@ _outLockingClause(StringInfo str, const LockingClause *node)
 	WRITE_NODE_TYPE("LOCKINGCLAUSE");
 
 	WRITE_NODE_FIELD(lockedRels);
-	WRITE_BOOL_FIELD(forUpdate);
+	WRITE_ENUM_FIELD(strength, LockClauseStrength);
 	WRITE_BOOL_FIELD(noWait);
 }
 
@@ -2288,7 +2289,7 @@ _outRowMarkClause(StringInfo str, const RowMarkClause *node)
 	WRITE_NODE_TYPE("ROWMARKCLAUSE");
 
 	WRITE_UINT_FIELD(rti);
-	WRITE_BOOL_FIELD(forUpdate);
+	WRITE_ENUM_FIELD(strength, LockClauseStrength);
 	WRITE_BOOL_FIELD(noWait);
 	WRITE_BOOL_FIELD(pushedDown);
 }

@@ -18,6 +18,10 @@ create event trigger regress_event_trigger on elephant_bootstrap
 create event trigger regress_event_trigger on ddl_command_start
    execute procedure test_event_trigger();
 
+-- OK
+create event trigger regress_event_trigger_end on ddl_command_end
+   execute procedure test_event_trigger();
+
 -- should fail, food is not a valid filter variable
 create event trigger regress_event_trigger2 on ddl_command_start
    when food in ('sandwhich')
@@ -67,10 +71,11 @@ alter event trigger regress_event_trigger enable always;
 alter event trigger regress_event_trigger enable;
 alter event trigger regress_event_trigger disable;
 
--- regress_event_trigger2 should fire, but not regress_event_trigger
+-- regress_event_trigger2 and regress_event_trigger_end should fire, but not
+-- regress_event_trigger
 create table event_trigger_fire1 (a int);
 
--- but nothing should fire here
+-- regress_event_trigger_end should fire here
 drop table event_trigger_fire1;
 
 -- alter owner to non-superuser should fail
@@ -96,5 +101,6 @@ drop role regression_bob;
 drop event trigger if exists regress_event_trigger2;
 drop event trigger if exists regress_event_trigger2;
 drop event trigger regress_event_trigger3;
+drop event trigger regress_event_trigger_end;
 drop function test_event_trigger();
 drop role regression_bob;
