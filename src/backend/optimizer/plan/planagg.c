@@ -17,7 +17,7 @@
  * scan all the rows anyway.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -28,6 +28,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
@@ -36,6 +37,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
+#include "optimizer/planner.h"
 #include "optimizer/subselect.h"
 #include "parser/parsetree.h"
 #include "parser/parse_clause.h"
@@ -116,9 +118,9 @@ preprocess_minmax_aggregates(PlannerInfo *root, List *tlist)
 	rtr = (RangeTblRef *) jtnode;
 	rte = planner_rt_fetch(rtr->rtindex, root);
 	if (rte->rtekind == RTE_RELATION)
-		/* ordinary relation, ok */ ;
+		 /* ordinary relation, ok */ ;
 	else if (rte->rtekind == RTE_SUBQUERY && rte->inh)
-		/* flattened UNION ALL subquery, ok */ ;
+		 /* flattened UNION ALL subquery, ok */ ;
 	else
 		return;
 
@@ -205,7 +207,6 @@ optimize_minmax_aggregates(PlannerInfo *root, List *tlist,
 	Path		agg_p;
 	Plan	   *plan;
 	Node	   *hqual;
-	QualCost	tlist_cost;
 	ListCell   *lc;
 
 	/* Nothing to do if preprocess_minmax_aggs rejected the query */
@@ -256,7 +257,10 @@ optimize_minmax_aggregates(PlannerInfo *root, List *tlist,
 
 	/*
 	 * We have to replace Aggrefs with Params in equivalence classes too, else
-	 * ORDER BY or DISTINCT on an optimized aggregate will fail.
+	 * ORDER BY or DISTINCT on an optimized aggregate will fail.  We don't
+	 * need to process child eclass members though, since they aren't of
+	 * interest anymore --- and replace_aggs_with_params_mutator isn't able
+	 * to handle Aggrefs containing translated child Vars, anyway.
 	 *
 	 * Note: at some point it might become necessary to mutate other data
 	 * structures too, such as the query's sortClause or distinctClause. Right
@@ -264,7 +268,8 @@ optimize_minmax_aggregates(PlannerInfo *root, List *tlist,
 	 */
 	mutate_eclass_expressions(root,
 							  replace_aggs_with_params_mutator,
-							  (void *) root);
+							  (void *) root,
+							  false);
 
 	/*
 	 * Generate the output plan --- basically just a Result
@@ -272,9 +277,7 @@ optimize_minmax_aggregates(PlannerInfo *root, List *tlist,
 	plan = (Plan *) make_result(root, tlist, hqual, NULL);
 
 	/* Account for evaluation cost of the tlist (make_result did the rest) */
-	cost_qual_eval(&tlist_cost, tlist, root);
-	plan->startup_cost += tlist_cost.startup;
-	plan->total_cost += tlist_cost.startup + tlist_cost.per_tuple;
+	add_tlist_costs_to_plan(root, plan, tlist);
 
 	return plan;
 }
@@ -394,8 +397,9 @@ build_minmax_path(PlannerInfo *root, MinMaxAggInfo *mminfo,
 	subroot->parse = parse = (Query *) copyObject(root->parse);
 	/* make sure subroot planning won't change root->init_plans contents */
 	subroot->init_plans = list_copy(root->init_plans);
-	/* There shouldn't be any OJ info to translate, as yet */
+	/* There shouldn't be any OJ or LATERAL info to translate, as yet */
 	Assert(subroot->join_info_list == NIL);
+	Assert(subroot->lateral_info_list == NIL);
 	/* and we haven't created PlaceHolderInfos, either */
 	Assert(subroot->placeholder_list == NIL);
 

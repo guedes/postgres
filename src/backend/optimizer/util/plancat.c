@@ -4,7 +4,7 @@
  *	   routines for accessing the system catalogs
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,8 +19,11 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
+#include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "catalog/heap.h"
 #include "miscadmin.h"
@@ -168,9 +171,10 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			 * Ignore invalid indexes, since they can't safely be used for
 			 * queries.  Note that this is OK because the data structure we
 			 * are constructing is only used by the planner --- the executor
-			 * still needs to insert into "invalid" indexes!
+			 * still needs to insert into "invalid" indexes, if they're marked
+			 * IndexIsReady.
 			 */
-			if (!index->indisvalid)
+			if (!IndexIsValid(index))
 			{
 				index_close(indexRelation, NoLock);
 				continue;
@@ -341,12 +345,23 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			}
 			else
 			{
-				double		allvisfrac;				/* dummy */
+				double		allvisfrac; /* dummy */
 
 				estimate_rel_size(indexRelation, NULL,
 								  &info->pages, &info->tuples, &allvisfrac);
 				if (info->tuples > rel->tuples)
 					info->tuples = rel->tuples;
+			}
+
+			if (info->relam == BTREE_AM_OID)
+			{
+				/* For btrees, get tree height while we have the index open */
+				info->tree_height = _bt_getrootheight(indexRelation);
+			}
+			else
+			{
+				/* For other index types, just set it to "unknown" for now */
+				info->tree_height = -1;
 			}
 
 			index_close(indexRelation, NoLock);
@@ -403,12 +418,12 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 			 * minimum size estimate of 10 pages.  The idea here is to avoid
 			 * assuming a newly-created table is really small, even if it
 			 * currently is, because that may not be true once some data gets
-			 * loaded into it.  Once a vacuum or analyze cycle has been done
+			 * loaded into it.	Once a vacuum or analyze cycle has been done
 			 * on it, it's more reasonable to believe the size is somewhat
 			 * stable.
 			 *
 			 * (Note that this is only an issue if the plan gets cached and
-			 * used again after the table has been filled.  What we're trying
+			 * used again after the table has been filled.	What we're trying
 			 * to avoid is using a nestloop-type plan on a table that has
 			 * grown substantially since the plan was made.  Normally,
 			 * autovacuum/autoanalyze will occur once enough inserts have
@@ -662,12 +677,6 @@ get_relation_constraints(PlannerInfo *root,
 			cexpr = eval_const_expressions(root, cexpr);
 
 			cexpr = (Node *) canonicalize_qual((Expr *) cexpr);
-
-			/*
-			 * Also mark any coercion format fields as "don't care", so that
-			 * we can match to both explicit and implicit coercions.
-			 */
-			set_coercionform_dontcare(cexpr);
 
 			/* Fix Vars to have the desired varno */
 			if (varno != 1)
@@ -965,7 +974,7 @@ build_index_tlist(PlannerInfo *root, IndexOptInfo *index,
 
 			if (indexkey < 0)
 				att_tup = SystemAttributeDefinition(indexkey,
-											heapRelation->rd_rel->relhasoids);
+										   heapRelation->rd_rel->relhasoids);
 			else
 				att_tup = heapRelation->rd_att->attrs[indexkey - 1];
 
@@ -1010,6 +1019,7 @@ Selectivity
 restriction_selectivity(PlannerInfo *root,
 						Oid operatorid,
 						List *args,
+						Oid inputcollid,
 						int varRelid)
 {
 	RegProcedure oprrest = get_oprrest(operatorid);
@@ -1022,11 +1032,12 @@ restriction_selectivity(PlannerInfo *root,
 	if (!oprrest)
 		return (Selectivity) 0.5;
 
-	result = DatumGetFloat8(OidFunctionCall4(oprrest,
-											 PointerGetDatum(root),
-											 ObjectIdGetDatum(operatorid),
-											 PointerGetDatum(args),
-											 Int32GetDatum(varRelid)));
+	result = DatumGetFloat8(OidFunctionCall4Coll(oprrest,
+												 inputcollid,
+												 PointerGetDatum(root),
+												 ObjectIdGetDatum(operatorid),
+												 PointerGetDatum(args),
+												 Int32GetDatum(varRelid)));
 
 	if (result < 0.0 || result > 1.0)
 		elog(ERROR, "invalid restriction selectivity: %f", result);
@@ -1045,6 +1056,7 @@ Selectivity
 join_selectivity(PlannerInfo *root,
 				 Oid operatorid,
 				 List *args,
+				 Oid inputcollid,
 				 JoinType jointype,
 				 SpecialJoinInfo *sjinfo)
 {
@@ -1058,12 +1070,13 @@ join_selectivity(PlannerInfo *root,
 	if (!oprjoin)
 		return (Selectivity) 0.5;
 
-	result = DatumGetFloat8(OidFunctionCall5(oprjoin,
-											 PointerGetDatum(root),
-											 ObjectIdGetDatum(operatorid),
-											 PointerGetDatum(args),
-											 Int16GetDatum(jointype),
-											 PointerGetDatum(sjinfo)));
+	result = DatumGetFloat8(OidFunctionCall5Coll(oprjoin,
+												 inputcollid,
+												 PointerGetDatum(root),
+												 ObjectIdGetDatum(operatorid),
+												 PointerGetDatum(args),
+												 Int16GetDatum(jointype),
+												 PointerGetDatum(sjinfo)));
 
 	if (result < 0.0 || result > 1.0)
 		elog(ERROR, "invalid join selectivity: %f", result);

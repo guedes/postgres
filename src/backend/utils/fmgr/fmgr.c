@@ -3,7 +3,7 @@
  * fmgr.c
  *	  The Postgres function manager.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -158,7 +158,7 @@ fmgr_lookupByName(const char *name)
 void
 fmgr_info(Oid functionId, FmgrInfo *finfo)
 {
-	fmgr_info_cxt(functionId, finfo, CurrentMemoryContext);
+	fmgr_info_cxt_security(functionId, finfo, CurrentMemoryContext, false);
 }
 
 /*
@@ -173,7 +173,7 @@ fmgr_info_cxt(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt)
 
 /*
  * This one does the actual work.  ignore_security is ordinarily false
- * but is set to true by fmgr_security_definer to avoid recursion.
+ * but is set to true when we need to avoid recursion.
  */
 static void
 fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
@@ -223,7 +223,8 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 	/*
 	 * If it has prosecdef set, non-null proconfig, or if a plugin wants to
 	 * hook function entry/exit, use fmgr_security_definer call handler ---
-	 * unless we are being called again by fmgr_security_definer.
+	 * unless we are being called again by fmgr_security_definer or
+	 * fmgr_info_other_lang.
 	 *
 	 * When using fmgr_security_definer, function stats tracking is always
 	 * disabled at the outer level, and instead we set the flag properly in
@@ -405,7 +406,13 @@ fmgr_info_other_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple)
 		elog(ERROR, "cache lookup failed for language %u", language);
 	languageStruct = (Form_pg_language) GETSTRUCT(languageTuple);
 
-	fmgr_info(languageStruct->lanplcallfoid, &plfinfo);
+	/*
+	 * Look up the language's call handler function, ignoring any attributes
+	 * that would normally cause insertion of fmgr_security_definer.  We need
+	 * to get back a bare pointer to the actual C-language function.
+	 */
+	fmgr_info_cxt_security(languageStruct->lanplcallfoid, &plfinfo,
+						   CurrentMemoryContext, true);
 	finfo->fn_addr = plfinfo.fn_addr;
 
 	/*
@@ -2274,6 +2281,7 @@ pg_detoast_datum_packed(struct varlena * datum)
  * These are needed by polymorphic functions, which accept multiple possible
  * input types and need help from the parser to know what they've got.
  * Also, some functions might be interested in whether a parameter is constant.
+ * Functions taking VARIADIC ANY also need to know about the VARIADIC keyword.
  *-------------------------------------------------------------------------
  */
 
@@ -2437,4 +2445,29 @@ get_call_expr_arg_stable(Node *expr, int argnum)
 		return true;
 
 	return false;
+}
+
+/*
+ * Get the VARIADIC flag from the function invocation
+ *
+ * Returns false (the default assumption) if information is not available
+ */
+bool
+get_fn_expr_variadic(FmgrInfo *flinfo)
+{
+	Node	   *expr;
+
+	/*
+	 * can't return anything useful if we have no FmgrInfo or if its fn_expr
+	 * node has not been initialized
+	 */
+	if (!flinfo || !flinfo->fn_expr)
+		return false;
+
+	expr = flinfo->fn_expr;
+
+	if (IsA(expr, FuncExpr))
+		return ((FuncExpr *) expr)->funcvariadic;
+	else
+		return false;
 }

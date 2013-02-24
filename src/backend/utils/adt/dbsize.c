@@ -2,7 +2,7 @@
  * dbsize.c
  *		Database object size functions, and related inquiries
  *
- * Copyright (c) 2002-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/dbsize.c
@@ -15,15 +15,18 @@
 #include <sys/stat.h>
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/dbcommands.h"
 #include "commands/tablespace.h"
+#include "common/relpath.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/relmapper.h"
 #include "utils/syscache.h"
@@ -258,6 +261,9 @@ pg_tablespace_size_name(PG_FUNCTION_ARGS)
 
 /*
  * calculate size of (one fork of) a relation
+ *
+ * Note: we can safely apply this to temp tables of other sessions, so there
+ * is no check here or at the call sites for that.
  */
 static int64
 calculate_relation_size(RelFileNode *rfn, BackendId backend, ForkNumber forknum)
@@ -312,7 +318,7 @@ pg_relation_size(PG_FUNCTION_ARGS)
 	 * that makes queries like "SELECT pg_relation_size(oid) FROM pg_class"
 	 * less robust, because while we scan pg_class with an MVCC snapshot,
 	 * someone else might drop the table. It's better to return NULL for
-	 * alread-dropped tables than throw an error and abort the whole query.
+	 * already-dropped tables than throw an error and abort the whole query.
 	 */
 	if (rel == NULL)
 		PG_RETURN_NULL();
@@ -548,6 +554,139 @@ pg_size_pretty(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf));
+}
+
+static char *
+numeric_to_cstring(Numeric n)
+{
+	Datum		d = NumericGetDatum(n);
+
+	return DatumGetCString(DirectFunctionCall1(numeric_out, d));
+}
+
+static Numeric
+int64_to_numeric(int64 v)
+{
+	Datum		d = Int64GetDatum(v);
+
+	return DatumGetNumeric(DirectFunctionCall1(int8_numeric, d));
+}
+
+static bool
+numeric_is_less(Numeric a, Numeric b)
+{
+	Datum		da = NumericGetDatum(a);
+	Datum		db = NumericGetDatum(b);
+
+	return DatumGetBool(DirectFunctionCall2(numeric_lt, da, db));
+}
+
+static Numeric
+numeric_plus_one_over_two(Numeric n)
+{
+	Datum		d = NumericGetDatum(n);
+	Datum		one;
+	Datum		two;
+	Datum		result;
+
+	one = DirectFunctionCall1(int8_numeric, Int64GetDatum(1));
+	two = DirectFunctionCall1(int8_numeric, Int64GetDatum(2));
+	result = DirectFunctionCall2(numeric_add, d, one);
+	result = DirectFunctionCall2(numeric_div_trunc, result, two);
+	return DatumGetNumeric(result);
+}
+
+static Numeric
+numeric_shift_right(Numeric n, unsigned count)
+{
+	Datum		d = NumericGetDatum(n);
+	Datum		divisor_int64;
+	Datum		divisor_numeric;
+	Datum		result;
+
+	divisor_int64 = Int64GetDatum((int64) (1 << count));
+	divisor_numeric = DirectFunctionCall1(int8_numeric, divisor_int64);
+	result = DirectFunctionCall2(numeric_div_trunc, d, divisor_numeric);
+	return DatumGetNumeric(result);
+}
+
+Datum
+pg_size_pretty_numeric(PG_FUNCTION_ARGS)
+{
+	Numeric		size = PG_GETARG_NUMERIC(0);
+	Numeric		limit,
+				limit2;
+	char	   *buf,
+			   *result;
+
+	limit = int64_to_numeric(10 * 1024);
+	limit2 = int64_to_numeric(10 * 1024 * 2 - 1);
+
+	if (numeric_is_less(size, limit))
+	{
+		buf = numeric_to_cstring(size);
+		result = palloc(strlen(buf) + 7);
+		strcpy(result, buf);
+		strcat(result, " bytes");
+	}
+	else
+	{
+		/* keep one extra bit for rounding */
+		/* size >>= 9 */
+		size = numeric_shift_right(size, 9);
+
+		if (numeric_is_less(size, limit2))
+		{
+			/* size = (size + 1) / 2 */
+			size = numeric_plus_one_over_two(size);
+			buf = numeric_to_cstring(size);
+			result = palloc(strlen(buf) + 4);
+			strcpy(result, buf);
+			strcat(result, " kB");
+		}
+		else
+		{
+			/* size >>= 10 */
+			size = numeric_shift_right(size, 10);
+			if (numeric_is_less(size, limit2))
+			{
+				/* size = (size + 1) / 2 */
+				size = numeric_plus_one_over_two(size);
+				buf = numeric_to_cstring(size);
+				result = palloc(strlen(buf) + 4);
+				strcpy(result, buf);
+				strcat(result, " MB");
+			}
+			else
+			{
+				/* size >>= 10 */
+				size = numeric_shift_right(size, 10);
+
+				if (numeric_is_less(size, limit2))
+				{
+					/* size = (size + 1) / 2 */
+					size = numeric_plus_one_over_two(size);
+					buf = numeric_to_cstring(size);
+					result = palloc(strlen(buf) + 4);
+					strcpy(result, buf);
+					strcat(result, " GB");
+				}
+				else
+				{
+					/* size >>= 10 */
+					size = numeric_shift_right(size, 10);
+					/* size = (size + 1) / 2 */
+					size = numeric_plus_one_over_two(size);
+					buf = numeric_to_cstring(size);
+					result = palloc(strlen(buf) + 4);
+					strcpy(result, buf);
+					strcat(result, " TB");
+				}
+			}
+		}
+	}
+
+	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 
 /*

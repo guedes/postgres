@@ -4,7 +4,7 @@
  *	  prototypes for functions in backend/catalog/heap.c
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/heap.h
@@ -33,7 +33,8 @@ typedef struct CookedConstraint
 	bool		skip_validation;	/* skip validation? (only for CHECK) */
 	bool		is_local;		/* constraint has local (non-inherited) def */
 	int			inhcount;		/* number of times constraint is inherited */
-	bool		is_only;		/* constraint has local def and cannot be inherited */
+	bool		is_no_inherit;	/* constraint has local def and cannot be
+								 * inherited */
 } CookedConstraint;
 
 extern Relation heap_create(const char *relname,
@@ -45,8 +46,7 @@ extern Relation heap_create(const char *relname,
 			char relkind,
 			char relpersistence,
 			bool shared_relation,
-			bool mapped_relation,
-			bool allow_system_table_mods);
+			bool mapped_relation);
 
 extern Oid heap_create_with_catalog(const char *relname,
 						 Oid relnamespace,
@@ -66,7 +66,10 @@ extern Oid heap_create_with_catalog(const char *relname,
 						 OnCommitAction oncommit,
 						 Datum reloptions,
 						 bool use_user_acl,
-						 bool allow_system_table_mods);
+						 bool allow_system_table_mods,
+						 bool is_internal);
+
+extern void heap_create_init_fork(Relation rel);
 
 extern void heap_drop_with_catalog(Oid relid);
 
@@ -92,8 +95,7 @@ extern List *AddRelationNewConstraints(Relation rel,
 						  List *newColDefaults,
 						  List *newConstraints,
 						  bool allow_merge,
-						  bool is_local,
-						  bool is_only);
+						  bool is_local);
 
 extern void StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr);
 
@@ -105,6 +107,7 @@ extern Node *cookDefault(ParseState *pstate,
 
 extern void DeleteRelationTuple(Oid relid);
 extern void DeleteAttributeTuples(Oid relid);
+extern void DeleteSystemAttributeTuples(Oid relid);
 extern void RemoveAttributeById(Oid relid, AttrNumber attnum);
 extern void RemoveAttrDefault(Oid relid, AttrNumber attnum,
 				  DropBehavior behavior, bool complain, bool internal);

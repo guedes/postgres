@@ -16,7 +16,7 @@
  * index qual conditions.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -66,6 +66,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	TIDBitmap  *tbm;
 	TBMIterator *tbmiterator;
 	TBMIterateResult *tbmres;
+
 #ifdef USE_PREFETCH
 	TBMIterator *prefetch_iterator;
 #endif
@@ -355,7 +356,7 @@ bitgetpage(HeapScanDesc scan, TBMIterateResult *tbmres)
 		{
 			OffsetNumber offnum = tbmres->offsets[curslot];
 			ItemPointerData tid;
-			HeapTupleData	heapTuple;
+			HeapTupleData heapTuple;
 
 			ItemPointerSet(&tid, page, offnum);
 			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,

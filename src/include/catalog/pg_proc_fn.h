@@ -4,7 +4,7 @@
  *	 prototypes for functions in catalog/pg_proc.c
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_proc_fn.h
@@ -21,6 +21,7 @@ extern Oid ProcedureCreate(const char *procedureName,
 				bool replace,
 				bool returnsSet,
 				Oid returnType,
+				Oid proowner,
 				Oid languageObjectId,
 				Oid languageValidator,
 				const char *prosrc,

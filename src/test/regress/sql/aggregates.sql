@@ -278,7 +278,16 @@ explain (costs off)
   select min(f1), max(f1) from minmaxtest;
 select min(f1), max(f1) from minmaxtest;
 
+-- DISTINCT doesn't do anything useful here, but it shouldn't fail
+explain (costs off)
+  select distinct min(f1), max(f1) from minmaxtest;
+select distinct min(f1), max(f1) from minmaxtest;
+
 drop table minmaxtest cascade;
+
+-- check for correct detection of nested-aggregate errors
+select max(min(unique1)) from tenk1;
+select (select max(min(unique1)) from int8_tbl) from tenk1;
 
 --
 -- Test combinations of DISTINCT and/or ORDER BY
@@ -417,17 +426,19 @@ select string_agg(distinct f1::text, ',' order by f1) from varchar_tbl;  -- not 
 select string_agg(distinct f1, ',' order by f1::text) from varchar_tbl;  -- not ok
 select string_agg(distinct f1::text, ',' order by f1::text) from varchar_tbl;  -- ok
 
--- bytea_agg tests
+-- string_agg bytea tests
 create table bytea_test_table(v bytea);
 
-select bytea_agg(v) from bytea_test_table;
+select string_agg(v, '') from bytea_test_table;
 
 insert into bytea_test_table values(decode('ff','hex'));
 
-select bytea_agg(v) from bytea_test_table;
+select string_agg(v, '') from bytea_test_table;
 
 insert into bytea_test_table values(decode('aa','hex'));
 
-select bytea_agg(v) from bytea_test_table;
+select string_agg(v, '') from bytea_test_table;
+select string_agg(v, NULL) from bytea_test_table;
+select string_agg(v, decode('ee', 'hex')) from bytea_test_table;
 
 drop table bytea_test_table;

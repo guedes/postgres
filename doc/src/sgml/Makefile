@@ -27,10 +27,6 @@ all: html man
 distprep: html distprep-man
 
 
-ifndef COLLATEINDEX
-COLLATEINDEX = $(DOCBOOKSTYLE)/bin/collateindex.pl
-endif
-
 ifndef JADE
 JADE = jade
 endif
@@ -49,6 +45,8 @@ XSLTPROC = xsltproc
 endif
 
 override XSLTPROCFLAGS += --stringparam pg.version '$(VERSION)'
+
+DBTOEPUB ?= dbtoepub
 
 
 GENERATED_SGML = bookindex.sgml version.sgml \
@@ -120,7 +118,11 @@ HTML.index: postgres.sgml $(ALMOSTALLSGML) stylesheet.dsl
 	$(JADE.html.call) -V html-index $<
 
 bookindex.sgml: HTML.index
+ifdef COLLATEINDEX
 	LC_ALL=C $(PERL) $(COLLATEINDEX) -f -g -i 'bookindex' -o $@ $<
+else
+	@$(missing) collateindex.pl $< $@
+endif
 
 # Technically, this should depend on Makefile.global, but then
 # version.sgml would need to be rebuilt after every configure run,
@@ -255,8 +257,12 @@ postgres.xml: $(srcdir)/postgres.sgml $(ALMOSTALLSGML)
 	rm postgres.xmltmp
 # ' hello Emacs
 
-xslthtml: stylesheet.xsl postgres.xml
+xslthtml: xslthtml-stamp
+
+xslthtml-stamp: stylesheet.xsl postgres.xml
 	$(XSLTPROC) $(XSLTPROCFLAGS) $(XSLTPROC_HTML_FLAGS) $^
+	cp $(srcdir)/stylesheet.css html/
+	touch $@
 
 htmlhelp: stylesheet-hh.xsl postgres.xml
 	$(XSLTPROC) $(XSLTPROCFLAGS) $^
@@ -266,6 +272,10 @@ htmlhelp: stylesheet-hh.xsl postgres.xml
 
 %-US.fo: stylesheet-fo.xsl %.xml
 	$(XSLTPROC) $(XSLTPROCFLAGS) --stringparam paper.type USletter -o $@ $^
+
+epub: postgres.epub
+postgres.epub: postgres.xml
+	$(DBTOEPUB) $<
 
 
 ##
@@ -357,7 +367,7 @@ endif # sqlmansectnum != 7
 
 # tabs are harmless, but it is best to avoid them in SGML files
 check-tabs:
-	@( ! grep '	' $(wildcard $(srcdir)/*.sgml $(srcdir)/ref/*.sgml) ) || (echo "Tabs appear in SGML files";  exit 1)
+	@( ! grep '	' $(wildcard $(srcdir)/*.sgml $(srcdir)/ref/*.sgml $(srcdir)/*.dsl $(srcdir)/*.xsl) ) || (echo "Tabs appear in SGML/XML files" 1>&2;  exit 1)
 
 ##
 ## Clean
@@ -381,6 +391,8 @@ clean:
 	rm -f HTML.index $(GENERATED_SGML)
 # XSLT
 	rm -f postgres.xml postgres.xmltmp htmlhelp.hhp toc.hhc index.hhk *.fo
+# EPUB
+	rm -f postgres.epub
 # Texinfo
 	rm -f *.texixml *.texi *.info db2texi.refs
 

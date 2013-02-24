@@ -3,7 +3,7 @@
  * objectaddress.c
  *	  functions for working with ObjectAddresses
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,12 +15,14 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_cast.h"
+#include "catalog/pg_event_trigger.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_conversion.h"
@@ -46,6 +48,7 @@
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/event_trigger.h"
 #include "commands/extension.h"
 #include "commands/proclang.h"
 #include "commands/tablespace.h"
@@ -60,7 +63,6 @@
 #include "rewrite/rewriteSupport.h"
 #include "storage/lmgr.h"
 #include "storage/sinval.h"
-#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -75,10 +77,17 @@
  */
 typedef struct
 {
-	Oid			class_oid;			/* oid of catalog */
-	Oid			oid_index_oid; 		/* oid of index on system oid column */
-	int			oid_catcache_id;	/* id of catcache on system oid column  */
-	AttrNumber	attnum_namespace;	/* attnum of namespace field */
+	Oid			class_oid;		/* oid of catalog */
+	Oid			oid_index_oid;	/* oid of index on system oid column */
+	int			oid_catcache_id;	/* id of catcache on system oid column	*/
+	int			name_catcache_id;		/* id of catcache on (name,namespace),
+										 * or (name) if the object does not
+										 * live in a namespace */
+	AttrNumber	attnum_name;	/* attnum of name field */
+	AttrNumber	attnum_namespace;		/* attnum of namespace field */
+	AttrNumber	attnum_owner;	/* attnum of owner field */
+	AttrNumber	attnum_acl;		/* attnum of acl field */
+	AclObjectKind acl_kind;		/* ACL_KIND_* of this object type */
 } ObjectPropertyType;
 
 static ObjectPropertyType ObjectProperty[] =
@@ -87,151 +96,287 @@ static ObjectPropertyType ObjectProperty[] =
 		CastRelationId,
 		CastOidIndexId,
 		-1,
-		InvalidAttrNumber
+		-1,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1
 	},
 	{
 		CollationRelationId,
 		CollationOidIndexId,
 		COLLOID,
-		Anum_pg_collation_collnamespace
+		-1,						/* COLLNAMEENCNSP also takes encoding */
+		Anum_pg_collation_collname,
+		Anum_pg_collation_collnamespace,
+		Anum_pg_collation_collowner,
+		InvalidAttrNumber,
+		ACL_KIND_COLLATION
 	},
 	{
 		ConstraintRelationId,
 		ConstraintOidIndexId,
 		CONSTROID,
-		Anum_pg_constraint_connamespace
+		-1,
+		Anum_pg_constraint_conname,
+		Anum_pg_constraint_connamespace,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1
 	},
 	{
 		ConversionRelationId,
 		ConversionOidIndexId,
 		CONVOID,
-		Anum_pg_conversion_connamespace
+		CONNAMENSP,
+		Anum_pg_conversion_conname,
+		Anum_pg_conversion_connamespace,
+		Anum_pg_conversion_conowner,
+		InvalidAttrNumber,
+		ACL_KIND_CONVERSION
 	},
 	{
 		DatabaseRelationId,
 		DatabaseOidIndexId,
 		DATABASEOID,
-		InvalidAttrNumber
+		-1,
+		Anum_pg_database_datname,
+		InvalidAttrNumber,
+		Anum_pg_database_datdba,
+		Anum_pg_database_datacl,
+		ACL_KIND_DATABASE
 	},
 	{
 		ExtensionRelationId,
 		ExtensionOidIndexId,
 		-1,
-		InvalidAttrNumber		/* extension doesn't belong to extnamespace */
+		-1,
+		Anum_pg_extension_extname,
+		InvalidAttrNumber,		/* extension doesn't belong to extnamespace */
+		Anum_pg_extension_extowner,
+		InvalidAttrNumber,
+		ACL_KIND_EXTENSION
 	},
 	{
 		ForeignDataWrapperRelationId,
 		ForeignDataWrapperOidIndexId,
 		FOREIGNDATAWRAPPEROID,
-		InvalidAttrNumber
+		FOREIGNDATAWRAPPERNAME,
+		Anum_pg_foreign_data_wrapper_fdwname,
+		InvalidAttrNumber,
+		Anum_pg_foreign_data_wrapper_fdwowner,
+		Anum_pg_foreign_data_wrapper_fdwacl,
+		ACL_KIND_FDW
 	},
 	{
 		ForeignServerRelationId,
 		ForeignServerOidIndexId,
 		FOREIGNSERVEROID,
-		InvalidAttrNumber
+		FOREIGNSERVERNAME,
+		Anum_pg_foreign_server_srvname,
+		InvalidAttrNumber,
+		Anum_pg_foreign_server_srvowner,
+		Anum_pg_foreign_server_srvacl,
+		ACL_KIND_FOREIGN_SERVER
 	},
 	{
 		ProcedureRelationId,
 		ProcedureOidIndexId,
 		PROCOID,
-		Anum_pg_proc_pronamespace
+		-1,						/* PROCNAMEARGSNSP also takes argument types */
+		Anum_pg_proc_proname,
+		Anum_pg_proc_pronamespace,
+		Anum_pg_proc_proowner,
+		Anum_pg_proc_proacl,
+		ACL_KIND_PROC
 	},
 	{
 		LanguageRelationId,
 		LanguageOidIndexId,
 		LANGOID,
+		LANGNAME,
+		Anum_pg_language_lanname,
 		InvalidAttrNumber,
+		Anum_pg_language_lanowner,
+		Anum_pg_language_lanacl,
+		ACL_KIND_LANGUAGE
 	},
 	{
 		LargeObjectMetadataRelationId,
 		LargeObjectMetadataOidIndexId,
 		-1,
-		InvalidAttrNumber
+		-1,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		Anum_pg_largeobject_metadata_lomowner,
+		Anum_pg_largeobject_metadata_lomacl,
+		ACL_KIND_LARGEOBJECT
 	},
 	{
 		OperatorClassRelationId,
 		OpclassOidIndexId,
 		CLAOID,
+		-1,						/* CLAAMNAMENSP also takes opcmethod */
+		Anum_pg_opclass_opcname,
 		Anum_pg_opclass_opcnamespace,
+		Anum_pg_opclass_opcowner,
+		InvalidAttrNumber,
+		ACL_KIND_OPCLASS
 	},
 	{
 		OperatorRelationId,
 		OperatorOidIndexId,
 		OPEROID,
-		Anum_pg_operator_oprnamespace
+		-1,						/* OPERNAMENSP also takes left and right type */
+		Anum_pg_operator_oprname,
+		Anum_pg_operator_oprnamespace,
+		Anum_pg_operator_oprowner,
+		InvalidAttrNumber,
+		ACL_KIND_OPER
 	},
 	{
 		OperatorFamilyRelationId,
 		OpfamilyOidIndexId,
 		OPFAMILYOID,
-		Anum_pg_opfamily_opfnamespace
+		-1,						/* OPFAMILYAMNAMENSP also takes opfmethod */
+		Anum_pg_opfamily_opfname,
+		Anum_pg_opfamily_opfnamespace,
+		Anum_pg_opfamily_opfowner,
+		InvalidAttrNumber,
+		ACL_KIND_OPFAMILY
 	},
 	{
 		AuthIdRelationId,
 		AuthIdOidIndexId,
 		AUTHOID,
-		InvalidAttrNumber
+		AUTHNAME,
+		Anum_pg_authid_rolname,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1
 	},
 	{
 		RewriteRelationId,
 		RewriteOidIndexId,
 		-1,
-		InvalidAttrNumber
+		-1,
+		Anum_pg_rewrite_rulename,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1
 	},
 	{
 		NamespaceRelationId,
 		NamespaceOidIndexId,
 		NAMESPACEOID,
-		InvalidAttrNumber
+		NAMESPACENAME,
+		Anum_pg_namespace_nspname,
+		InvalidAttrNumber,
+		Anum_pg_namespace_nspowner,
+		Anum_pg_namespace_nspacl,
+		ACL_KIND_NAMESPACE
 	},
 	{
 		RelationRelationId,
 		ClassOidIndexId,
 		RELOID,
-		Anum_pg_class_relnamespace
+		RELNAMENSP,
+		Anum_pg_class_relname,
+		Anum_pg_class_relnamespace,
+		Anum_pg_class_relowner,
+		Anum_pg_class_relacl,
+		ACL_KIND_CLASS
 	},
 	{
 		TableSpaceRelationId,
 		TablespaceOidIndexId,
 		TABLESPACEOID,
-		InvalidAttrNumber
+		-1,
+		Anum_pg_tablespace_spcname,
+		InvalidAttrNumber,
+		Anum_pg_tablespace_spcowner,
+		Anum_pg_tablespace_spcacl,
+		ACL_KIND_TABLESPACE
 	},
 	{
 		TriggerRelationId,
 		TriggerOidIndexId,
 		-1,
-		InvalidAttrNumber
+		-1,
+		Anum_pg_trigger_tgname,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1,
+	},
+	{
+		EventTriggerRelationId,
+		EventTriggerOidIndexId,
+		EVENTTRIGGEROID,
+		EVENTTRIGGERNAME,
+		Anum_pg_event_trigger_evtname,
+		InvalidAttrNumber,
+		Anum_pg_event_trigger_evtowner,
+		InvalidAttrNumber,
+		ACL_KIND_EVENT_TRIGGER,
 	},
 	{
 		TSConfigRelationId,
 		TSConfigOidIndexId,
 		TSCONFIGOID,
-		Anum_pg_ts_config_cfgnamespace
+		TSCONFIGNAMENSP,
+		Anum_pg_ts_config_cfgname,
+		Anum_pg_ts_config_cfgnamespace,
+		Anum_pg_ts_config_cfgowner,
+		InvalidAttrNumber,
+		ACL_KIND_TSCONFIGURATION
 	},
 	{
 		TSDictionaryRelationId,
 		TSDictionaryOidIndexId,
 		TSDICTOID,
-		Anum_pg_ts_dict_dictnamespace
+		TSDICTNAMENSP,
+		Anum_pg_ts_dict_dictname,
+		Anum_pg_ts_dict_dictnamespace,
+		Anum_pg_ts_dict_dictowner,
+		InvalidAttrNumber,
+		ACL_KIND_TSDICTIONARY
 	},
 	{
 		TSParserRelationId,
 		TSParserOidIndexId,
 		TSPARSEROID,
-		Anum_pg_ts_parser_prsnamespace
+		TSPARSERNAMENSP,
+		Anum_pg_ts_parser_prsname,
+		Anum_pg_ts_parser_prsnamespace,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1,
 	},
 	{
 		TSTemplateRelationId,
 		TSTemplateOidIndexId,
 		TSTEMPLATEOID,
+		TSTEMPLATENAMENSP,
+		Anum_pg_ts_template_tmplname,
 		Anum_pg_ts_template_tmplnamespace,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		-1,
 	},
 	{
 		TypeRelationId,
 		TypeOidIndexId,
 		TYPEOID,
-		Anum_pg_type_typnamespace
+		TYPENAMENSP,
+		Anum_pg_type_typname,
+		Anum_pg_type_typnamespace,
+		Anum_pg_type_typowner,
+		Anum_pg_type_typacl,
+		ACL_KIND_TYPE
 	}
 };
 
@@ -286,13 +431,13 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 	for (;;)
 	{
 		/*
-		 * Remember this value, so that, after looking up the object name
-		 * and locking it, we can check whether any invalidation messages
-		 * have been processed that might require a do-over.
+		 * Remember this value, so that, after looking up the object name and
+		 * locking it, we can check whether any invalidation messages have
+		 * been processed that might require a do-over.
 		 */
 		inval_count = SharedInvalidMessageCounter;
 
-		/* Look up object address. */	
+		/* Look up object address. */
 		switch (objtype)
 		{
 			case OBJECT_INDEX:
@@ -325,6 +470,7 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 			case OBJECT_LANGUAGE:
 			case OBJECT_FDW:
 			case OBJECT_FOREIGN_SERVER:
+			case OBJECT_EVENT_TRIGGER:
 				address = get_object_address_unqualified(objtype,
 														 objname, missing_ok);
 				break;
@@ -367,7 +513,7 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 			case OBJECT_OPCLASS:
 			case OBJECT_OPFAMILY:
 				address = get_object_address_opcf(objtype,
-												  objname, objargs, missing_ok);
+											   objname, objargs, missing_ok);
 				break;
 			case OBJECT_LARGEOBJECT:
 				Assert(list_length(objname) == 1);
@@ -377,10 +523,10 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 				if (!LargeObjectExists(address.objectId))
 				{
 					if (!missing_ok)
-					ereport(ERROR,
-							(errcode(ERRCODE_UNDEFINED_OBJECT),
-							 errmsg("large object %u does not exist",
-									address.objectId)));
+						ereport(ERROR,
+								(errcode(ERRCODE_UNDEFINED_OBJECT),
+								 errmsg("large object %u does not exist",
+										address.objectId)));
 				}
 				break;
 			case OBJECT_CAST:
@@ -475,8 +621,8 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 		 * At this point, we've resolved the name to an OID and locked the
 		 * corresponding database object.  However, it's possible that by the
 		 * time we acquire the lock on the object, concurrent DDL has modified
-		 * the database in such a way that the name we originally looked up
-		 * no longer resolves to that OID.
+		 * the database in such a way that the name we originally looked up no
+		 * longer resolves to that OID.
 		 *
 		 * We can be certain that this isn't an issue if (a) no shared
 		 * invalidation messages have been processed or (b) we've locked a
@@ -488,12 +634,12 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 		 * the relation, which is enough to freeze out any concurrent DDL.
 		 *
 		 * In all other cases, however, it's possible that the name we looked
-		 * up no longer refers to the object we locked, so we retry the
-		 * lookup and see whether we get the same answer.
+		 * up no longer refers to the object we locked, so we retry the lookup
+		 * and see whether we get the same answer.
 		 */
-        if (inval_count == SharedInvalidMessageCounter || relation != NULL)
-            break;
-        old_address = address;
+		if (inval_count == SharedInvalidMessageCounter || relation != NULL)
+			break;
+		old_address = address;
 	}
 
 	/* Return the object address and the relation. */
@@ -545,6 +691,9 @@ get_object_address_unqualified(ObjectType objtype,
 				break;
 			case OBJECT_FOREIGN_SERVER:
 				msg = gettext_noop("server name cannot be qualified");
+				break;
+			case OBJECT_EVENT_TRIGGER:
+				msg = gettext_noop("event trigger name cannot be qualified");
 				break;
 			default:
 				elog(ERROR, "unrecognized objtype: %d", (int) objtype);
@@ -601,6 +750,11 @@ get_object_address_unqualified(ObjectType objtype,
 			address.objectId = get_foreign_server_oid(name, missing_ok);
 			address.objectSubId = 0;
 			break;
+		case OBJECT_EVENT_TRIGGER:
+			address.classId = EventTriggerRelationId;
+			address.objectId = get_event_trigger_oid(name, missing_ok);
+			address.objectSubId = 0;
+			break;
 		default:
 			elog(ERROR, "unrecognized objtype: %d", (int) objtype);
 			/* placate compiler, which doesn't know elog won't return */
@@ -621,7 +775,7 @@ get_relation_by_qualified_name(ObjectType objtype, List *objname,
 							   bool missing_ok)
 {
 	Relation	relation;
-	ObjectAddress	address;
+	ObjectAddress address;
 
 	address.classId = RelationRelationId;
 	address.objectId = InvalidOid;
@@ -721,8 +875,8 @@ get_object_address_relobject(ObjectType objtype, List *objname,
 		address.objectSubId = 0;
 
 		/*
-		 * Caller is expecting to get back the relation, even though we
-		 * didn't end up using it to find the rule.
+		 * Caller is expecting to get back the relation, even though we didn't
+		 * end up using it to find the rule.
 		 */
 		if (OidIsValid(address.objectId))
 			relation = heap_open(reloid, AccessShareLock);
@@ -753,7 +907,7 @@ get_object_address_relobject(ObjectType objtype, List *objname,
 			case OBJECT_CONSTRAINT:
 				address.classId = ConstraintRelationId;
 				address.objectId =
-					get_constraint_oid(reloid, depname, missing_ok);
+					get_relation_constraint_oid(reloid, depname, missing_ok);
 				address.objectSubId = 0;
 				break;
 			default:
@@ -768,7 +922,7 @@ get_object_address_relobject(ObjectType objtype, List *objname,
 		if (!OidIsValid(address.objectId))
 		{
 			heap_close(relation, AccessShareLock);
-			relation = NULL;		/* department of accident prevention */
+			relation = NULL;	/* department of accident prevention */
 			return address;
 		}
 	}
@@ -794,6 +948,10 @@ get_object_address_attribute(ObjectType objtype, List *objname,
 	AttrNumber	attnum;
 
 	/* Extract relation name and open relation. */
+	if (list_length(objname) < 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("column name must be qualified")));
 	attname = strVal(lfirst(list_tail(objname)));
 	relname = list_truncate(list_copy(objname), list_length(objname) - 1);
 	relation = relation_openrv(makeRangeVarFromNameList(relname), lockmode);
@@ -830,9 +988,10 @@ static ObjectAddress
 get_object_address_type(ObjectType objtype,
 						List *objname, bool missing_ok)
 {
-	ObjectAddress   address;
+	ObjectAddress address;
 	TypeName   *typename;
-	Type        tup;
+	Type		tup;
+
 	typename = makeTypeNameFromNameList(objname);
 
 	address.classId = TypeRelationId;
@@ -932,8 +1091,7 @@ check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
 		case OBJECT_DOMAIN:
 		case OBJECT_ATTRIBUTE:
 			if (!pg_type_ownercheck(address.objectId, roleid))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TYPE,
-							   format_type_be(address.objectId));
+				aclcheck_error_type(ACLCHECK_NOT_OWNER, address.objectId);
 			break;
 		case OBJECT_AGGREGATE:
 		case OBJECT_FUNCTION:
@@ -974,6 +1132,11 @@ check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
 		case OBJECT_FOREIGN_SERVER:
 			if (!pg_foreign_server_ownercheck(address.objectId, roleid))
 				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_FOREIGN_SERVER,
+							   NameListToString(objname));
+			break;
+		case OBJECT_EVENT_TRIGGER:
+			if (!pg_event_trigger_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_EVENT_TRIGGER,
 							   NameListToString(objname));
 			break;
 		case OBJECT_LANGUAGE:
@@ -1079,7 +1242,7 @@ get_object_namespace(const ObjectAddress *address)
 	HeapTuple	tuple;
 	bool		isnull;
 	Oid			oid;
-	ObjectPropertyType	   *property;
+	ObjectPropertyType *property;
 
 	/* If not owned by a namespace, just return InvalidOid. */
 	property = get_object_property_data(address->classId);
@@ -1106,17 +1269,99 @@ get_object_namespace(const ObjectAddress *address)
 }
 
 /*
+ * Interfaces to reference fields of ObjectPropertyType
+ */
+Oid
+get_object_oid_index(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->oid_index_oid;
+}
+
+int
+get_object_catcache_oid(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->oid_catcache_id;
+}
+
+int
+get_object_catcache_name(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->name_catcache_id;
+}
+
+AttrNumber
+get_object_attnum_name(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->attnum_name;
+}
+
+AttrNumber
+get_object_attnum_namespace(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->attnum_namespace;
+}
+
+AttrNumber
+get_object_attnum_owner(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->attnum_owner;
+}
+
+AttrNumber
+get_object_attnum_acl(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->attnum_acl;
+}
+
+AclObjectKind
+get_object_aclkind(Oid class_id)
+{
+	ObjectPropertyType *prop = get_object_property_data(class_id);
+
+	return prop->acl_kind;
+}
+
+/*
  * Find ObjectProperty structure by class_id.
  */
 static ObjectPropertyType *
 get_object_property_data(Oid class_id)
 {
+	static ObjectPropertyType *prop_last = NULL;
 	int			index;
 
-	for (index = 0; index < lengthof(ObjectProperty); index++)
-		if (ObjectProperty[index].class_oid == class_id)
-			return &ObjectProperty[index];
+	/*
+	 * A shortcut to speed up multiple consecutive lookups of a particular
+	 * object class.
+	 */
+	if (prop_last && prop_last->class_oid == class_id)
+		return prop_last;
 
-	elog(ERROR, "unrecognized class id: %u", class_id);
-	return NULL;		/* not reached */
+	for (index = 0; index < lengthof(ObjectProperty); index++)
+	{
+		if (ObjectProperty[index].class_oid == class_id)
+		{
+			prop_last = &ObjectProperty[index];
+			return &ObjectProperty[index];
+		}
+	}
+
+	ereport(ERROR,
+			(errmsg_internal("unrecognized class id: %u", class_id)));
+
+	return NULL; /* keep MSC compiler happy */
 }

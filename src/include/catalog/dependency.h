@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/dependency.h
@@ -146,6 +146,7 @@ typedef enum ObjectClass
 	OCLASS_USER_MAPPING,		/* pg_user_mapping */
 	OCLASS_DEFACL,				/* pg_default_acl */
 	OCLASS_EXTENSION,			/* pg_extension */
+	OCLASS_EVENT_TRIGGER,		/* pg_event_trigger */
 	MAX_OCLASS					/* MUST BE LAST */
 } ObjectClass;
 
@@ -153,6 +154,7 @@ typedef enum ObjectClass
 /* in dependency.c */
 
 #define PERFORM_DELETION_INTERNAL			0x0001
+#define PERFORM_DELETION_CONCURRENTLY		0x0002
 
 extern void performDeletion(const ObjectAddress *object,
 				DropBehavior behavior, int flags);

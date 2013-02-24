@@ -3,7 +3,7 @@
  * varlena.c
  *	  Functions for the variable-length built-in types.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -76,12 +76,12 @@ static bytea *bytea_substring(Datum str,
 				bool length_not_specified);
 static bytea *bytea_overlay(bytea *t1, bytea *t2, int sp, int sl);
 static StringInfo makeStringAggState(FunctionCallInfo fcinfo);
-void text_format_string_conversion(StringInfo buf, char conversion,
-							  Oid typid, Datum value, bool isNull);
-
+static void text_format_string_conversion(StringInfo buf, char conversion,
+							  FmgrInfo *typOutputInfo,
+							  Datum value, bool isNull);
 static Datum text_to_array_internal(PG_FUNCTION_ARGS);
 static text *array_to_text_internal(FunctionCallInfo fcinfo, ArrayType *v,
-					   char *fldsep, char *null_string);
+					   const char *fldsep, const char *null_string);
 
 
 /*****************************************************************************
@@ -397,7 +397,7 @@ byteasend(PG_FUNCTION_ARGS)
 }
 
 Datum
-bytea_agg_transfn(PG_FUNCTION_ARGS)
+bytea_string_agg_transfn(PG_FUNCTION_ARGS)
 {
 	StringInfo	state;
 
@@ -408,21 +408,28 @@ bytea_agg_transfn(PG_FUNCTION_ARGS)
 	{
 		bytea	   *value = PG_GETARG_BYTEA_PP(1);
 
+		/* On the first time through, we ignore the delimiter. */
 		if (state == NULL)
 			state = makeStringAggState(fcinfo);
+		else if (!PG_ARGISNULL(2))
+		{
+			bytea	   *delim = PG_GETARG_BYTEA_PP(2);
+
+			appendBinaryStringInfo(state, VARDATA_ANY(delim), VARSIZE_ANY_EXHDR(delim));
+		}
 
 		appendBinaryStringInfo(state, VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
 	}
 
 	/*
-	 * The transition type for bytea_agg() is declared to be "internal",
+	 * The transition type for string_agg() is declared to be "internal",
 	 * which is a pass-by-value type the same size as a pointer.
 	 */
 	PG_RETURN_POINTER(state);
 }
 
 Datum
-bytea_agg_finalfn(PG_FUNCTION_ARGS)
+bytea_string_agg_finalfn(PG_FUNCTION_ARGS)
 {
 	StringInfo	state;
 
@@ -1346,6 +1353,7 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2, Oid collid)
 		char		a2buf[STACKBUFLEN];
 		char	   *a1p,
 				   *a2p;
+
 #ifdef HAVE_LOCALE_T
 		pg_locale_t mylocale = 0;
 #endif
@@ -1406,8 +1414,8 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2, Oid collid)
 										(LPWSTR) a1p, a1len / 2);
 				if (!r)
 					ereport(ERROR,
-					 (errmsg("could not convert string to UTF-16: error code %lu",
-							 GetLastError())));
+							(errmsg("could not convert string to UTF-16: error code %lu",
+									GetLastError())));
 			}
 			((LPWSTR) a1p)[r] = 0;
 
@@ -1419,8 +1427,8 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2, Oid collid)
 										(LPWSTR) a2p, a2len / 2);
 				if (!r)
 					ereport(ERROR,
-					 (errmsg("could not convert string to UTF-16: error code %lu",
-							 GetLastError())));
+							(errmsg("could not convert string to UTF-16: error code %lu",
+									GetLastError())));
 			}
 			((LPWSTR) a2p)[r] = 0;
 
@@ -2249,17 +2257,11 @@ text_name(PG_FUNCTION_ARGS)
 
 	/* Truncate oversize input */
 	if (len >= NAMEDATALEN)
-		len = NAMEDATALEN - 1;
+		len = pg_mbcliplen(VARDATA_ANY(s), len, NAMEDATALEN - 1);
 
-	result = (Name) palloc(NAMEDATALEN);
+	/* We use palloc0 here to ensure result is zero-padded */
+	result = (Name) palloc0(NAMEDATALEN);
 	memcpy(NameStr(*result), VARDATA_ANY(s), len);
-
-	/* now null pad to full length... */
-	while (len < NAMEDATALEN)
-	{
-		*(NameStr(*result) + len) = '\0';
-		len++;
-	}
 
 	PG_RETURN_NAME(result);
 }
@@ -2435,6 +2437,119 @@ SplitIdentifierString(char *rawstring, char separator,
 		/*
 		 * Finished isolating current name --- add it to list
 		 */
+		*namelist = lappend(*namelist, curname);
+
+		/* Loop back if we didn't reach end of string */
+	} while (!done);
+
+	return true;
+}
+
+
+/*
+ * SplitDirectoriesString --- parse a string containing directory names
+ *
+ * This is similar to SplitIdentifierString, except that the parsing
+ * rules are meant to handle pathnames instead of identifiers: there is
+ * no downcasing, embedded spaces are allowed, the max length is MAXPGPATH-1,
+ * and we apply canonicalize_path() to each extracted string.  Because of the
+ * last, the returned strings are separately palloc'd rather than being
+ * pointers into rawstring --- but we still scribble on rawstring.
+ *
+ * Inputs:
+ *	rawstring: the input string; must be modifiable!
+ *	separator: the separator punctuation expected between directories
+ *			   (typically ',' or ';').	Whitespace may also appear around
+ *			   directories.
+ * Outputs:
+ *	namelist: filled with a palloc'd list of directory names.
+ *			  Caller should list_free_deep() this even on error return.
+ *
+ * Returns TRUE if okay, FALSE if there is a syntax error in the string.
+ *
+ * Note that an empty string is considered okay here.
+ */
+bool
+SplitDirectoriesString(char *rawstring, char separator,
+					   List **namelist)
+{
+	char	   *nextp = rawstring;
+	bool		done = false;
+
+	*namelist = NIL;
+
+	while (isspace((unsigned char) *nextp))
+		nextp++;				/* skip leading whitespace */
+
+	if (*nextp == '\0')
+		return true;			/* allow empty string */
+
+	/* At the top of the loop, we are at start of a new directory. */
+	do
+	{
+		char	   *curname;
+		char	   *endp;
+
+		if (*nextp == '\"')
+		{
+			/* Quoted name --- collapse quote-quote pairs */
+			curname = nextp + 1;
+			for (;;)
+			{
+				endp = strchr(nextp + 1, '\"');
+				if (endp == NULL)
+					return false;		/* mismatched quotes */
+				if (endp[1] != '\"')
+					break;		/* found end of quoted name */
+				/* Collapse adjacent quotes into one quote, and look again */
+				memmove(endp, endp + 1, strlen(endp));
+				nextp = endp;
+			}
+			/* endp now points at the terminating quote */
+			nextp = endp + 1;
+		}
+		else
+		{
+			/* Unquoted name --- extends to separator or end of string */
+			curname = endp = nextp;
+			while (*nextp && *nextp != separator)
+			{
+				/* trailing whitespace should not be included in name */
+				if (!isspace((unsigned char) *nextp))
+					endp = nextp + 1;
+				nextp++;
+			}
+			if (curname == endp)
+				return false;	/* empty unquoted name not allowed */
+		}
+
+		while (isspace((unsigned char) *nextp))
+			nextp++;			/* skip trailing whitespace */
+
+		if (*nextp == separator)
+		{
+			nextp++;
+			while (isspace((unsigned char) *nextp))
+				nextp++;		/* skip leading whitespace for next */
+			/* we expect another name, so done remains false */
+		}
+		else if (*nextp == '\0')
+			done = true;
+		else
+			return false;		/* invalid syntax */
+
+		/* Now safe to overwrite separator with a null */
+		*endp = '\0';
+
+		/* Truncate path if it's overlength */
+		if (strlen(curname) >= MAXPGPATH)
+			curname[MAXPGPATH - 1] = '\0';
+
+		/*
+		 * Finished isolating current name --- add it to list
+		 */
+		curname = pstrdup(curname);
+		canonicalize_path(curname);
 		*namelist = lappend(*namelist, curname);
 
 		/* Loop back if we didn't reach end of string */
@@ -3336,7 +3451,7 @@ array_to_text_null(PG_FUNCTION_ARGS)
  */
 static text *
 array_to_text_internal(FunctionCallInfo fcinfo, ArrayType *v,
-					   char *fldsep, char *null_string)
+					   const char *fldsep, const char *null_string)
 {
 	text	   *result;
 	int			nitems,
@@ -3676,11 +3791,12 @@ string_agg_finalfn(PG_FUNCTION_ARGS)
 /*
  * Implementation of both concat() and concat_ws().
  *
- * sepstr/seplen describe the separator.  argidx is the first argument
- * to concatenate (counting from zero).
+ * sepstr is the separator string to place between values.
+ * argidx identifies the first argument to concatenate (counting from zero).
+ * Returns NULL if result should be NULL, else text value.
  */
 static text *
-concat_internal(const char *sepstr, int seplen, int argidx,
+concat_internal(const char *sepstr, int argidx,
 				FunctionCallInfo fcinfo)
 {
 	text	   *result;
@@ -3688,6 +3804,48 @@ concat_internal(const char *sepstr, int seplen, int argidx,
 	bool		first_arg = true;
 	int			i;
 
+	/*
+	 * concat(VARIADIC some-array) is essentially equivalent to
+	 * array_to_text(), ie concat the array elements with the given separator.
+	 * So we just pass the case off to that code.
+	 */
+	if (get_fn_expr_variadic(fcinfo->flinfo))
+	{
+		Oid			arr_typid;
+		ArrayType  *arr;
+
+		/* Should have just the one argument */
+		Assert(argidx == PG_NARGS() - 1);
+
+		/* concat(VARIADIC NULL) is defined as NULL */
+		if (PG_ARGISNULL(argidx))
+			return NULL;
+
+		/*
+		 * Non-null argument had better be an array.  The parser doesn't
+		 * enforce this for VARIADIC ANY functions (maybe it should?), so that
+		 * check uses ereport not just elog.
+		 */
+		arr_typid = get_fn_expr_argtype(fcinfo->flinfo, argidx);
+		if (!OidIsValid(arr_typid))
+			elog(ERROR, "could not determine data type of concat() input");
+
+		if (!OidIsValid(get_element_type(arr_typid)))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("VARIADIC argument must be an array")));
+
+		/* OK, safe to fetch the array value */
+		arr = PG_GETARG_ARRAYTYPE_P(argidx);
+
+		/*
+		 * And serialize the array.  We tell array_to_text to ignore null
+		 * elements, which matches the behavior of the loop below.
+		 */
+		return array_to_text_internal(fcinfo, arr, sepstr, NULL);
+	}
+
+	/* Normal case without explicit VARIADIC marker */
 	initStringInfo(&str);
 
 	for (i = argidx; i < PG_NARGS(); i++)
@@ -3703,7 +3861,7 @@ concat_internal(const char *sepstr, int seplen, int argidx,
 			if (first_arg)
 				first_arg = false;
 			else
-				appendBinaryStringInfo(&str, sepstr, seplen);
+				appendStringInfoString(&str, sepstr);
 
 			/* call the appropriate type output function, append the result */
 			valtype = get_fn_expr_argtype(fcinfo->flinfo, i);
@@ -3727,7 +3885,12 @@ concat_internal(const char *sepstr, int seplen, int argidx,
 Datum
 text_concat(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(concat_internal("", 0, 0, fcinfo));
+	text	   *result;
+
+	result = concat_internal("", 0, fcinfo);
+	if (result == NULL)
+		PG_RETURN_NULL();
+	PG_RETURN_TEXT_P(result);
 }
 
 /*
@@ -3737,16 +3900,18 @@ text_concat(PG_FUNCTION_ARGS)
 Datum
 text_concat_ws(PG_FUNCTION_ARGS)
 {
-	text	   *sep;
+	char	   *sep;
+	text	   *result;
 
 	/* return NULL when separator is NULL */
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
+	sep = text_to_cstring(PG_GETARG_TEXT_PP(0));
 
-	sep = PG_GETARG_TEXT_PP(0);
-
-	PG_RETURN_TEXT_P(concat_internal(VARDATA_ANY(sep), VARSIZE_ANY_EXHDR(sep),
-									 1, fcinfo));
+	result = concat_internal(sep, 1, fcinfo);
+	if (result == NULL)
+		PG_RETURN_NULL();
+	PG_RETURN_TEXT_P(result);
 }
 
 /*
@@ -3844,10 +4009,72 @@ text_format(PG_FUNCTION_ARGS)
 	const char *end_ptr;
 	text	   *result;
 	int			arg = 0;
+	bool		funcvariadic;
+	int			nargs;
+	Datum	   *elements = NULL;
+	bool	   *nulls = NULL;
+	Oid			element_type = InvalidOid;
+	Oid			prev_type = InvalidOid;
+	FmgrInfo	typoutputfinfo;
 
 	/* When format string is null, returns null */
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
+
+	/* If argument is marked VARIADIC, expand array into elements */
+	if (get_fn_expr_variadic(fcinfo->flinfo))
+	{
+		Oid			arr_typid;
+		ArrayType  *arr;
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+		int			nitems;
+
+		/* Should have just the one argument */
+		Assert(PG_NARGS() == 2);
+
+		/* If argument is NULL, we treat it as zero-length array */
+		if (PG_ARGISNULL(1))
+			nitems = 0;
+		else
+		{
+			/*
+			 * Non-null argument had better be an array.  The parser doesn't
+			 * enforce this for VARIADIC ANY functions (maybe it should?), so
+			 * that check uses ereport not just elog.
+			 */
+			arr_typid = get_fn_expr_argtype(fcinfo->flinfo, 1);
+			if (!OidIsValid(arr_typid))
+				elog(ERROR, "could not determine data type of format() input");
+
+			if (!OidIsValid(get_element_type(arr_typid)))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("VARIADIC argument must be an array")));
+
+			/* OK, safe to fetch the array value */
+			arr = PG_GETARG_ARRAYTYPE_P(1);
+
+			/* Get info about array element type */
+			element_type = ARR_ELEMTYPE(arr);
+			get_typlenbyvalalign(element_type,
+								 &elmlen, &elmbyval, &elmalign);
+
+			/* Extract all array elements */
+			deconstruct_array(arr, element_type, elmlen, elmbyval, elmalign,
+							  &elements, &nulls, &nitems);
+		}
+
+		nargs = nitems + 1;
+		funcvariadic = true;
+	}
+	else
+	{
+		/* Non-variadic case, we'll process the arguments individually */
+		nargs = PG_NARGS();
+		funcvariadic = false;
+	}
 
 	/* Setup for main loop. */
 	fmt = PG_GETARG_TEXT_PP(0);
@@ -3947,26 +4174,54 @@ text_format(PG_FUNCTION_ARGS)
 		}
 
 		/* Not enough arguments?  Deduct 1 to avoid counting format string. */
-		if (arg > PG_NARGS() - 1)
+		if (arg > nargs - 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("too few arguments for format")));
+
+		/* Get the value and type of the selected argument */
+		if (!funcvariadic)
+		{
+			value = PG_GETARG_DATUM(arg);
+			isNull = PG_ARGISNULL(arg);
+			typid = get_fn_expr_argtype(fcinfo->flinfo, arg);
+		}
+		else
+		{
+			value = elements[arg - 1];
+			isNull = nulls[arg - 1];
+			typid = element_type;
+		}
+		if (!OidIsValid(typid))
+			elog(ERROR, "could not determine data type of format() input");
+
+		/*
+		 * Get the appropriate typOutput function, reusing previous one if
+		 * same type as previous argument.  That's particularly useful in the
+		 * variadic-array case, but often saves work even for ordinary calls.
+		 */
+		if (typid != prev_type)
+		{
+			Oid			typoutputfunc;
+			bool		typIsVarlena;
+
+			getTypeOutputInfo(typid, &typoutputfunc, &typIsVarlena);
+			fmgr_info(typoutputfunc, &typoutputfinfo);
+			prev_type = typid;
+		}
 
 		/*
 		 * At this point, we should see the main conversion specifier. Whether
 		 * or not an argument position was present, it's known that at least
 		 * one character remains in the string at this point.
 		 */
-		value = PG_GETARG_DATUM(arg);
-		isNull = PG_ARGISNULL(arg);
-		typid = get_fn_expr_argtype(fcinfo->flinfo, arg);
-
 		switch (*cp)
 		{
 			case 's':
 			case 'I':
 			case 'L':
-				text_format_string_conversion(&str, *cp, typid, value, isNull);
+				text_format_string_conversion(&str, *cp, &typoutputfinfo,
+											  value, isNull);
 				break;
 			default:
 				ereport(ERROR,
@@ -3976,6 +4231,12 @@ text_format(PG_FUNCTION_ARGS)
 		}
 	}
 
+	/* Don't need deconstruct_array results anymore. */
+	if (elements != NULL)
+		pfree(elements);
+	if (nulls != NULL)
+		pfree(nulls);
+
 	/* Generate results. */
 	result = cstring_to_text_with_len(str.data, str.len);
 	pfree(str.data);
@@ -3984,12 +4245,11 @@ text_format(PG_FUNCTION_ARGS)
 }
 
 /* Format a %s, %I, or %L conversion. */
-void
+static void
 text_format_string_conversion(StringInfo buf, char conversion,
-							  Oid typid, Datum value, bool isNull)
+							  FmgrInfo *typOutputInfo,
+							  Datum value, bool isNull)
 {
-	Oid			typOutput;
-	bool		typIsVarlena;
 	char	   *str;
 
 	/* Handle NULL arguments before trying to stringify the value. */
@@ -4000,13 +4260,12 @@ text_format_string_conversion(StringInfo buf, char conversion,
 		else if (conversion == 'I')
 			ereport(ERROR,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("null values cannot be formatted as an SQL identifier")));
+			errmsg("null values cannot be formatted as an SQL identifier")));
 		return;
 	}
 
 	/* Stringify. */
-	getTypeOutputInfo(typid, &typOutput, &typIsVarlena);
-	str = OidOutputFunctionCall(typOutput, value);
+	str = OutputFunctionCall(typOutputInfo, value);
 
 	/* Escape. */
 	if (conversion == 'I')

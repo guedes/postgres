@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/stringutils.c
  */
@@ -245,8 +245,8 @@ strip_quotes(char *source, char quote, char escape, int encoding)
 	char	   *src;
 	char	   *dst;
 
-	psql_assert(source);
-	psql_assert(quote);
+	Assert(source != NULL);
+	Assert(quote != '\0');
 
 	src = dst = source;
 
@@ -277,7 +277,7 @@ strip_quotes(char *source, char quote, char escape, int encoding)
 /*
  * quote_if_needed
  *
- * Opposite of strip_quotes().  If "source" denotes itself literally without
+ * Opposite of strip_quotes().	If "source" denotes itself literally without
  * quoting or escaping, returns NULL.  Otherwise, returns a malloc'd copy with
  * quoting and escaping applied:
  *
@@ -299,11 +299,11 @@ quote_if_needed(const char *source, const char *entails_quote,
 	char	   *dst;
 	bool		need_quotes = false;
 
-	psql_assert(source);
-	psql_assert(quote);
+	Assert(source != NULL);
+	Assert(quote != '\0');
 
 	src = source;
-	dst = ret = pg_malloc(2 * strlen(src) + 3);	/* excess */
+	dst = ret = pg_malloc(2 * strlen(src) + 3); /* excess */
 
 	*dst++ = quote;
 

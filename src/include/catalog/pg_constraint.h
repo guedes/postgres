@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_constraint.h
@@ -20,6 +20,7 @@
 #define PG_CONSTRAINT_H
 
 #include "catalog/genbki.h"
+#include "catalog/dependency.h"
 #include "nodes/pg_list.h"
 
 /* ----------------
@@ -86,22 +87,23 @@ CATALOG(pg_constraint,2606)
 	bool		conislocal;
 
 	/* Number of times inherited from direct parent relation(s) */
-	int4		coninhcount;
+	int32		coninhcount;
 
 	/* Has a local definition and cannot be inherited */
-	bool		conisonly;
+	bool		connoinherit;
 
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
+
 	/*
 	 * Columns of conrelid that the constraint applies to, if known (this is
 	 * NULL for trigger constraints)
 	 */
-	int2		conkey[1];
+	int16		conkey[1];
 
 	/*
 	 * If a foreign key, the referenced columns of confrelid
 	 */
-	int2		confkey[1];
+	int16		confkey[1];
 
 	/*
 	 * If a foreign key, the OIDs of the PK = FK equality operators for each
@@ -166,7 +168,7 @@ typedef FormData_pg_constraint *Form_pg_constraint;
 #define Anum_pg_constraint_confmatchtype	13
 #define Anum_pg_constraint_conislocal		14
 #define Anum_pg_constraint_coninhcount		15
-#define Anum_pg_constraint_conisonly		16
+#define Anum_pg_constraint_connoinherit		16
 #define Anum_pg_constraint_conkey			17
 #define Anum_pg_constraint_confkey			18
 #define Anum_pg_constraint_conpfeqop		19
@@ -230,7 +232,7 @@ extern Oid CreateConstraintEntry(const char *constraintName,
 					  const char *conSrc,
 					  bool conIsLocal,
 					  int conInhCount,
-					  bool conIsOnly);
+					  bool conNoInherit);
 
 extern void RemoveConstraintById(Oid conId);
 extern void RenameConstraintById(Oid conId, const char *newname);
@@ -243,8 +245,9 @@ extern char *ChooseConstraintName(const char *name1, const char *name2,
 					 List *others);
 
 extern void AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
-						  Oid newNspId, bool isType);
-extern Oid	get_constraint_oid(Oid relid, const char *conname, bool missing_ok);
+						  Oid newNspId, bool isType, ObjectAddresses *objsMoved);
+extern Oid	get_relation_constraint_oid(Oid relid, const char *conname, bool missing_ok);
+extern Oid	get_domain_constraint_oid(Oid typid, const char *conname, bool missing_ok);
 
 extern bool check_functional_grouping(Oid relid,
 						  Index varno, Index varlevelsup,

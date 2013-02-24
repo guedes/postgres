@@ -5,7 +5,7 @@
 #endif
 
 /*
- * Make sure _WIN32_WINNT has the minumum required value.
+ * Make sure _WIN32_WINNT has the minimum required value.
  * Leave a higher value in place.
 */
 #if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0501
@@ -65,12 +65,14 @@
 
 #define USES_WINSOCK
 
-/* defines for dynamic linking on Win32 platform */
+/* defines for dynamic linking on Win32 platform
+ *
+ *	http://support.microsoft.com/kb/132044
+ *	http://msdn.microsoft.com/en-us/library/8fskxacy(v=vs.80).aspx
+ *	http://msdn.microsoft.com/en-us/library/a90k134d(v=vs.80).aspx
+ */
+ 
 #if defined(WIN32) || defined(__CYGWIN__)
-
-#if __GNUC__ && ! defined (__declspec)
-#error You need egcs 1.1 or newer for compiling!
-#endif
 
 #ifdef BUILDING_DLL
 #define PGDLLIMPORT __declspec (dllexport)
@@ -319,7 +321,7 @@ typedef int pid_t;
 #define ECONNREFUSED WSAECONNREFUSED
 #define EOPNOTSUPP WSAEOPNOTSUPP
 #pragma warning(default:4005)
-#endif 
+#endif
 
 /*
  * Extended locale functions with gratuitous underscore prefixes.

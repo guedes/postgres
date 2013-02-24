@@ -4,7 +4,7 @@
  *	  Search code for postgres btrees.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -564,11 +564,11 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 					ScanKeyEntryInitialize(chosen,
 										   (SK_SEARCHNOTNULL | SK_ISNULL |
 											(impliesNN->sk_flags &
-											 (SK_BT_DESC | SK_BT_NULLS_FIRST))),
+										  (SK_BT_DESC | SK_BT_NULLS_FIRST))),
 										   curattr,
-										   ((impliesNN->sk_flags & SK_BT_NULLS_FIRST) ?
-											BTGreaterStrategyNumber :
-											BTLessStrategyNumber),
+								 ((impliesNN->sk_flags & SK_BT_NULLS_FIRST) ?
+								  BTGreaterStrategyNumber :
+								  BTLessStrategyNumber),
 										   InvalidOid,
 										   InvalidOid,
 										   InvalidOid,

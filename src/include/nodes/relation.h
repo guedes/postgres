@@ -4,7 +4,7 @@
  *	  Definitions for planner's internal data structures.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/relation.h
@@ -75,8 +75,6 @@ typedef struct PlannerGlobal
 
 	ParamListInfo boundParams;	/* Param values provided to planner() */
 
-	List	   *paramlist;		/* to keep track of cross-level Params */
-
 	List	   *subplans;		/* Plans for SubPlan nodes */
 
 	List	   *subroots;		/* PlannerInfos for SubPlan nodes */
@@ -92,6 +90,8 @@ typedef struct PlannerGlobal
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
 
 	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
+
+	int			nParamExec;		/* number of PARAM_EXEC Params used */
 
 	Index		lastPHId;		/* highest PlaceHolderVar ID assigned */
 
@@ -127,6 +127,8 @@ typedef struct PlannerInfo
 
 	struct PlannerInfo *parent_root;	/* NULL at outermost Query */
 
+	List	   *plan_params;	/* list of PlannerParamItems, see below */
+
 	/*
 	 * simple_rel_array holds pointers to "base rels" and "other rels" (see
 	 * comments for RelOptInfo for more info).	It is indexed by rangetable
@@ -147,8 +149,8 @@ typedef struct PlannerInfo
 
 	/*
 	 * all_baserels is a Relids set of all base relids (but not "other"
-	 * relids) in the query; that is, the Relids identifier of the final
-	 * join we need to form.
+	 * relids) in the query; that is, the Relids identifier of the final join
+	 * we need to form.
 	 */
 	Relids		all_baserels;
 
@@ -193,7 +195,9 @@ typedef struct PlannerInfo
 	List	   *full_join_clauses;		/* list of RestrictInfos for
 										 * mergejoinable full join clauses */
 
-	List	   *join_info_list; /* list of SpecialJoinInfos */
+	List	   *join_info_list;		/* list of SpecialJoinInfos */
+
+	List	   *lateral_info_list;	/* list of LateralJoinInfos */
 
 	List	   *append_rel_list;	/* list of AppendRelInfos */
 
@@ -223,6 +227,7 @@ typedef struct PlannerInfo
 	bool		hasInheritedTarget;		/* true if parse->resultRelation is an
 										 * inheritance child rel */
 	bool		hasJoinRTEs;	/* true if any RTEs are RTE_JOIN kind */
+	bool		hasLateralRTEs;	/* true if any RTEs are marked LATERAL */
 	bool		hasHavingQual;	/* true if havingQual was non-null */
 	bool		hasPseudoConstantQuals; /* true if any RestrictInfo has
 										 * pseudoconstant = true */
@@ -296,25 +301,28 @@ typedef struct PlannerInfo
  *			   clauses have been applied (ie, output rows of a plan for it)
  *		width - avg. number of bytes per tuple in the relation after the
  *				appropriate projections have been done (ie, output width)
+ *		consider_startup - true if there is any value in keeping paths for
+ *						   this rel on the basis of having cheap startup cost
  *		reltargetlist - List of Var and PlaceHolderVar nodes for the values
  *						we need to output from this relation.
  *						List is in no particular order, but all rels of an
  *						appendrel set must use corresponding orders.
- *						NOTE: in a child relation, may contain RowExpr or
- *						ConvertRowtypeExpr representing a whole-row Var.
+ *						NOTE: in an appendrel child relation, may contain
+ *						arbitrary expressions pulled up from a subquery!
  *		pathlist - List of Path nodes, one for each potentially useful
  *				   method of generating the relation
+ *		ppilist - ParamPathInfo nodes for parameterized Paths, if any
  *		cheapest_startup_path - the pathlist member with lowest startup cost
- *								(regardless of its ordering; but must be
- *								 unparameterized)
+ *			(regardless of ordering) among the unparameterized paths;
+ *			or NULL if there is no unparameterized path
  *		cheapest_total_path - the pathlist member with lowest total cost
- *							  (regardless of its ordering; but must be
- *							   unparameterized)
+ *			(regardless of ordering) among the unparameterized paths;
+ *			or if there is no unparameterized path, the path with lowest
+ *			total cost among the paths with minimum parameterization
  *		cheapest_unique_path - for caching cheapest path to produce unique
- *							   (no duplicates) output from relation
- *		cheapest_parameterized_paths - paths with cheapest total costs for
- *								 their parameterizations; always includes
- *								 cheapest_total_path
+ *			(no duplicates) output from relation; NULL if not yet requested
+ *		cheapest_parameterized_paths - best paths for their parameterizations;
+ *			always includes cheapest_total_path, even if that's unparameterized
  *
  * If the relation is a base relation it will have these fields set:
  *
@@ -327,6 +335,10 @@ typedef struct PlannerInfo
  *				the attribute is needed as part of final targetlist
  *		attr_widths - cache space for per-attribute width estimates;
  *					  zero means not computed yet
+ *		lateral_vars - lateral cross-references of rel, if any (list of
+ *					   Vars and PlaceHolderVars)
+ *		lateral_relids - required outer rels for LATERAL, as a Relids set
+ *						 (for child rels this can be more than lateral_vars)
  *		indexlist - list of IndexOptInfo nodes for relation's indexes
  *					(always NIL if it's not a table)
  *		pages - number of disk pages in relation (zero if not a table)
@@ -334,6 +346,7 @@ typedef struct PlannerInfo
  *		allvisfrac - fraction of disk pages that are marked all-visible
  *		subplan - plan for subquery (NULL if it's not a subquery)
  *		subroot - PlannerInfo for subquery (NULL if it's not a subquery)
+ *		subplan_params - list of PlannerParamItems to be passed to subquery
  *		fdwroutine - function hooks for FDW, if foreign table (else NULL)
  *		fdw_private - private state for FDW, if foreign table (else NULL)
  *
@@ -397,9 +410,13 @@ typedef struct RelOptInfo
 	double		rows;			/* estimated number of result tuples */
 	int			width;			/* estimated avg width of result tuples */
 
+	/* per-relation planner control flags */
+	bool		consider_startup;	/* keep cheap-startup-cost paths? */
+
 	/* materialization information */
 	List	   *reltargetlist;	/* Vars to be output by scan of relation */
 	List	   *pathlist;		/* Path structures */
+	List	   *ppilist;		/* ParamPathInfos used in pathlist */
 	struct Path *cheapest_startup_path;
 	struct Path *cheapest_total_path;
 	struct Path *cheapest_unique_path;
@@ -413,6 +430,8 @@ typedef struct RelOptInfo
 	AttrNumber	max_attr;		/* largest attrno of rel */
 	Relids	   *attr_needed;	/* array indexed [min_attr .. max_attr] */
 	int32	   *attr_widths;	/* array indexed [min_attr .. max_attr] */
+	List	   *lateral_vars;	/* LATERAL Vars and PHVs referenced by rel */
+	Relids		lateral_relids;	/* minimum parameterization of rel */
 	List	   *indexlist;		/* list of IndexOptInfo */
 	BlockNumber pages;			/* size estimates derived from pg_class */
 	double		tuples;
@@ -420,8 +439,9 @@ typedef struct RelOptInfo
 	/* use "struct Plan" to avoid including plannodes.h here */
 	struct Plan *subplan;		/* if subquery */
 	PlannerInfo *subroot;		/* if subquery */
+	List	   *subplan_params;	/* if subquery */
 	/* use "struct FdwRoutine" to avoid including fdwapi.h here */
-	struct FdwRoutine *fdwroutine;	/* if foreign table */
+	struct FdwRoutine *fdwroutine;		/* if foreign table */
 	void	   *fdw_private;	/* if foreign table */
 
 	/* used by various scans and joins: */
@@ -467,9 +487,10 @@ typedef struct IndexOptInfo
 	Oid			reltablespace;	/* tablespace of index (not table) */
 	RelOptInfo *rel;			/* back-link to index's table */
 
-	/* statistics from pg_class */
+	/* index-size statistics (from pg_class and elsewhere) */
 	BlockNumber pages;			/* number of disk pages in index */
 	double		tuples;			/* number of index tuples in index */
+	int			tree_height;	/* index tree height, or -1 if unknown */
 
 	/* index descriptor information */
 	int			ncolumns;		/* number of columns in index */
@@ -573,7 +594,7 @@ typedef struct EquivalenceClass
  *
  * em_is_child signifies that this element was built by transposing a member
  * for an appendrel parent relation to represent the corresponding expression
- * for an appendrel child.  These members are used for determining the
+ * for an appendrel child.	These members are used for determining the
  * pathkeys of scans on the child relation and for explicitly sorting the
  * child when necessary to build a MergeAppend path for the whole appendrel
  * tree.  An em_is_child member has no impact on the properties of the EC as a
@@ -596,6 +617,7 @@ typedef struct EquivalenceMember
 
 	Expr	   *em_expr;		/* the expression represented */
 	Relids		em_relids;		/* all relids appearing in em_expr */
+	Relids		em_nullable_relids;		/* nullable by lower outer joins */
 	bool		em_is_const;	/* expression is pseudoconstant? */
 	bool		em_is_child;	/* derived version for a child relation? */
 	Oid			em_datatype;	/* the "nominal type" used by the opfamily */
@@ -628,6 +650,31 @@ typedef struct PathKey
 	bool		pk_nulls_first; /* do NULLs come before normal values? */
 } PathKey;
 
+
+/*
+ * ParamPathInfo
+ *
+ * All parameterized paths for a given relation with given required outer rels
+ * link to a single ParamPathInfo, which stores common information such as
+ * the estimated rowcount for this parameterization.  We do this partly to
+ * avoid recalculations, but mostly to ensure that the estimated rowcount
+ * is in fact the same for every such path.
+ *
+ * Note: ppi_clauses is only used in ParamPathInfos for base relation paths;
+ * in join cases it's NIL because the set of relevant clauses varies depending
+ * on how the join is formed.  The relevant clauses will appear in each
+ * parameterized join path's joinrestrictinfo list, instead.
+ */
+typedef struct ParamPathInfo
+{
+	NodeTag		type;
+
+	Relids		ppi_req_outer;	/* rels supplying parameters used by path */
+	double		ppi_rows;		/* estimated number of result tuples */
+	List	   *ppi_clauses;	/* join clauses available from outer rels */
+} ParamPathInfo;
+
+
 /*
  * Type "Path" is used as-is for sequential-scan paths, as well as some other
  * simple plan types that we don't need any extra information in the path for.
@@ -638,25 +685,19 @@ typedef struct PathKey
  * the same Path type for multiple Plan types when there is no need to
  * distinguish the Plan type during path processing.
  *
+ * "param_info", if not NULL, links to a ParamPathInfo that identifies outer
+ * relation(s) that provide parameter values to each scan of this path.
+ * That means this path can only be joined to those rels by means of nestloop
+ * joins with this path on the inside.	Also note that a parameterized path
+ * is responsible for testing all "movable" joinclauses involving this rel
+ * and the specified outer rel(s).
+ *
  * "rows" is the same as parent->rows in simple paths, but in parameterized
  * paths and UniquePaths it can be less than parent->rows, reflecting the
  * fact that we've filtered by extra join conditions or removed duplicates.
  *
  * "pathkeys" is a List of PathKey nodes (see above), describing the sort
  * ordering of the path's output rows.
- *
- * "required_outer", if not NULL, contains the relids of one or more relations
- * that must provide parameter values to each scan of this path, because the
- * path relies on join clauses using those rels. That means this path can only
- * be joined to those rels by means of nestloop joins with this path on the
- * inside.  Note: for a normal unparameterized path, required_outer must be
- * NULL, not an empty-but-not-null Bitmapset.
- *
- * "param_clauses" is a List of RestrictInfo nodes, containing the join
- * clauses used by a parameterized path.  Ideally param_clauses should be NIL
- * if and only if required_outer is NULL.  XXX for the moment, however, we do
- * not compute param_clauses for Append and MergeAppend paths, so the list
- * is inaccurate in those paths and possibly paths above them.
  */
 typedef struct Path
 {
@@ -665,6 +706,7 @@ typedef struct Path
 	NodeTag		pathtype;		/* tag identifying scan/join method */
 
 	RelOptInfo *parent;			/* the relation this path can build */
+	ParamPathInfo *param_info;	/* parameterization info, or NULL if none */
 
 	/* estimated size/costs for path (see costsize.c for more info) */
 	double		rows;			/* estimated number of result tuples */
@@ -672,10 +714,12 @@ typedef struct Path
 	Cost		total_cost;		/* total cost (assuming all tuples fetched) */
 
 	List	   *pathkeys;		/* sort ordering of path's output */
-
-	Relids		required_outer;	/* rels supplying parameters used by path */
-	List	   *param_clauses;	/* join clauses that use such parameters */
+	/* pathkeys is a List of PathKey nodes; see above */
 } Path;
+
+/* Macro for extracting a path's parameterization relids; beware double eval */
+#define PATH_REQ_OUTER(path)  \
+	((path)->param_info ? (path)->param_info->ppi_req_outer : (Relids) NULL)
 
 /*----------
  * IndexPath represents an index scan over a single index.
@@ -808,7 +852,7 @@ typedef struct TidPath
 /*
  * ForeignPath represents a potential scan of a foreign table
  *
- * fdw_private stores FDW private data about the scan.  While fdw_private is
+ * fdw_private stores FDW private data about the scan.	While fdw_private is
  * not actually touched by the core code during normal operations, it's
  * generally a good idea to use a representation that can be dumped by
  * nodeToString(), so that you can examine the structure during debugging
@@ -924,8 +968,9 @@ typedef struct JoinPath
 	List	   *joinrestrictinfo;		/* RestrictInfos to apply to join */
 
 	/*
-	 * See the notes for RelOptInfo to understand why joinrestrictinfo is
-	 * needed in JoinPath, and can't be merged into the parent RelOptInfo.
+	 * See the notes for RelOptInfo and ParamPathInfo to understand why
+	 * joinrestrictinfo is needed in JoinPath, and can't be merged into the
+	 * parent RelOptInfo.
 	 */
 } JoinPath;
 
@@ -1061,13 +1106,22 @@ typedef struct HashPath
  * RestrictInfo nodes also contain an outerjoin_delayed flag, which is true
  * if the clause's applicability must be delayed due to any outer joins
  * appearing below it (ie, it has to be postponed to some join level higher
- * than the set of relations it actually references).  There is also a
- * nullable_relids field, which is the set of rels it references that can be
- * forced null by some outer join below the clause.  outerjoin_delayed = true
- * is subtly different from nullable_relids != NULL: a clause might reference
- * some nullable rels and yet not be outerjoin_delayed because it also
- * references all the other rels of the outer join(s).	A clause that is not
- * outerjoin_delayed can be enforced anywhere it is computable.
+ * than the set of relations it actually references).
+ *
+ * There is also an outer_relids field, which is NULL except for outer join
+ * clauses; for those, it is the set of relids on the outer side of the
+ * clause's outer join.  (These are rels that the clause cannot be applied to
+ * in parameterized scans, since pushing it into the join's outer side would
+ * lead to wrong answers.)
+ *
+ * There is also a nullable_relids field, which is the set of rels the clause
+ * references that can be forced null by some outer join below the clause.
+ *
+ * outerjoin_delayed = true is subtly different from nullable_relids != NULL:
+ * a clause might reference some nullable rels and yet not be
+ * outerjoin_delayed because it also references all the other rels of the
+ * outer join(s). A clause that is not outerjoin_delayed can be enforced
+ * anywhere it is computable.
  *
  * In general, the referenced clause might be arbitrarily complex.	The
  * kinds of clauses we can handle as indexscan quals, mergejoin clauses,
@@ -1128,6 +1182,9 @@ typedef struct RestrictInfo
 
 	/* The set of relids required to evaluate the clause: */
 	Relids		required_relids;
+
+	/* If an outer-join clause, the outer-side relations, else NULL: */
+	Relids		outer_relids;
 
 	/* The relids used in the clause that are nullable by lower outer joins: */
 	Relids		nullable_relids;
@@ -1285,6 +1342,35 @@ typedef struct SpecialJoinInfo
 } SpecialJoinInfo;
 
 /*
+ * "Lateral join" info.
+ *
+ * Lateral references in subqueries constrain the join order in a way that's
+ * somewhat like outer joins, though different in detail.  We construct one or
+ * more LateralJoinInfos for each RTE with lateral references, and add them to
+ * the PlannerInfo node's lateral_info_list.
+ *
+ * lateral_rhs is the relid of a baserel with lateral references, and
+ * lateral_lhs is a set of relids of baserels it references, all of which
+ * must be present on the LHS to compute a parameter needed by the RHS.
+ * Typically, lateral_lhs is a singleton, but it can include multiple rels
+ * if the RHS references a PlaceHolderVar with a multi-rel ph_eval_at level.
+ * We disallow joining to only part of the LHS in such cases, since that would
+ * result in a join tree with no convenient place to compute the PHV.
+ *
+ * When an appendrel contains lateral references (eg "LATERAL (SELECT x.col1
+ * UNION ALL SELECT y.col2)"), the LateralJoinInfos reference the parent
+ * baserel not the member otherrels, since it is the parent relid that is
+ * considered for joining purposes.
+ */
+
+typedef struct LateralJoinInfo
+{
+	NodeTag		type;
+	Index		lateral_rhs;	/* a baserel containing lateral refs */
+	Relids		lateral_lhs;	/* some base relids it references */
+} LateralJoinInfo;
+
+/*
  * Append-relation info.
  *
  * When we expand an inheritable table or a UNION-ALL subselect into an
@@ -1427,51 +1513,58 @@ typedef struct MinMaxAggInfo
 } MinMaxAggInfo;
 
 /*
- * glob->paramlist keeps track of the PARAM_EXEC slots that we have decided
- * we need for the query.  At runtime these slots are used to pass values
- * around from one plan node to another.  They can be used to pass values
- * down into subqueries (for outer references in subqueries), or up out of
- * subqueries (for the results of a subplan), or from a NestLoop plan node
- * into its inner relation (when the inner scan is parameterized with values
- * from the outer relation).  The n'th entry in the list (n counts from 0)
- * corresponds to Param->paramid = n.
+ * At runtime, PARAM_EXEC slots are used to pass values around from one plan
+ * node to another.  They can be used to pass values down into subqueries (for
+ * outer references in subqueries), or up out of subqueries (for the results
+ * of a subplan), or from a NestLoop plan node into its inner relation (when
+ * the inner scan is parameterized with values from the outer relation).
+ * The planner is responsible for assigning nonconflicting PARAM_EXEC IDs to
+ * the PARAM_EXEC Params it generates.
  *
- * Each paramlist item shows the absolute query level it is associated with,
- * where the outermost query is level 1 and nested subqueries have higher
- * numbers.  The item the parameter slot represents can be one of four kinds:
+ * Outer references are managed via root->plan_params, which is a list of
+ * PlannerParamItems.  While planning a subquery, each parent query level's
+ * plan_params contains the values required from it by the current subquery.
+ * During create_plan(), we use plan_params to track values that must be
+ * passed from outer to inner sides of NestLoop plan nodes.
  *
- * A Var: the slot represents a variable of that level that must be passed
+ * The item a PlannerParamItem represents can be one of three kinds:
+ *
+ * A Var: the slot represents a variable of this level that must be passed
  * down because subqueries have outer references to it, or must be passed
- * from a NestLoop node of that level to its inner scan.  The varlevelsup
- * value in the Var will always be zero.
+ * from a NestLoop node to its inner scan.  The varlevelsup value in the Var
+ * will always be zero.
  *
- * A PlaceHolderVar: this works much like the Var case.  It is currently
- * only needed for NestLoop parameters, not outer references.
+ * A PlaceHolderVar: this works much like the Var case, except that the
+ * entry is a PlaceHolderVar node with a contained expression.	The PHV
+ * will have phlevelsup = 0, and the contained expression is adjusted
+ * to match in level.
  *
  * An Aggref (with an expression tree representing its argument): the slot
  * represents an aggregate expression that is an outer reference for some
  * subquery.  The Aggref itself has agglevelsup = 0, and its argument tree
  * is adjusted to match in level.
  *
- * A Param: the slot holds the result of a subplan (it is a setParam item
- * for that subplan).  The absolute level shown for such items corresponds
- * to the parent query of the subplan.
- *
  * Note: we detect duplicate Var and PlaceHolderVar parameters and coalesce
- * them into one slot, but we do not bother to do this for Aggrefs, and it
- * would be incorrect to do so for Param slots.  Duplicate detection is
- * actually *necessary* for NestLoop parameters since it serves to match up
- * the usage of a Param (in the inner scan) with the assignment of the value
- * (in the NestLoop node). This might result in the same PARAM_EXEC slot being
- * used by multiple NestLoop nodes or SubPlan nodes, but no harm is done since
- * the same value would be assigned anyway.
+ * them into one slot, but we do not bother to do that for Aggrefs.
+ * The scope of duplicate-elimination only extends across the set of
+ * parameters passed from one query level into a single subquery, or for
+ * nestloop parameters across the set of nestloop parameters used in a single
+ * query level.  So there is no possibility of a PARAM_EXEC slot being used
+ * for conflicting purposes.
+ *
+ * In addition, PARAM_EXEC slots are assigned for Params representing outputs
+ * from subplans (values that are setParam items for those subplans).  These
+ * IDs need not be tracked via PlannerParamItems, since we do not need any
+ * duplicate-elimination nor later processing of the represented expressions.
+ * Instead, we just record the assignment of the slot number by incrementing
+ * root->glob->nParamExec.
  */
 typedef struct PlannerParamItem
 {
 	NodeTag		type;
 
-	Node	   *item;			/* the Var, PlaceHolderVar, Aggref, or Param */
-	Index		abslevel;		/* its absolute query level */
+	Node	   *item;			/* the Var, PlaceHolderVar, or Aggref */
+	int			paramId;		/* its assigned PARAM_EXEC slot number */
 } PlannerParamItem;
 
 /*

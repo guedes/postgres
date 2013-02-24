@@ -9,7 +9,7 @@
  *	  more likely to break across PostgreSQL releases than code that uses
  *	  only the official API.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/interfaces/libpq/libpq-int.h
@@ -271,11 +271,25 @@ typedef struct pgLobjfuncs
 	Oid			fn_lo_create;	/* OID of backend function lo_create	*/
 	Oid			fn_lo_unlink;	/* OID of backend function lo_unlink	*/
 	Oid			fn_lo_lseek;	/* OID of backend function lo_lseek		*/
+	Oid			fn_lo_lseek64;	/* OID of backend function lo_lseek64	*/
 	Oid			fn_lo_tell;		/* OID of backend function lo_tell		*/
+	Oid			fn_lo_tell64;	/* OID of backend function lo_tell64	*/
 	Oid			fn_lo_truncate; /* OID of backend function lo_truncate	*/
+	Oid			fn_lo_truncate64;		/* OID of function lo_truncate64 */
 	Oid			fn_lo_read;		/* OID of backend function LOread		*/
 	Oid			fn_lo_write;	/* OID of backend function LOwrite		*/
 } PGlobjfuncs;
+
+/* PGdataValue represents a data field value being passed to a row processor.
+ * It could be either text or binary data; text data is not zero-terminated.
+ * A SQL NULL is represented by len < 0; then value is still valid but there
+ * are no data bytes there.
+ */
+typedef struct pgDataValue
+{
+	int			len;			/* data length in bytes, or <0 if NULL */
+	const char *value;			/* data value, without zero-termination */
+} PGdataValue;
 
 /*
  * PGconn stores all the state data associated with a single connection
@@ -310,7 +324,7 @@ struct pg_conn
 	char	   *keepalives_count;		/* maximum number of TCP keepalive
 										 * retransmits */
 	char	   *sslmode;		/* SSL mode (require,prefer,allow,disable) */
-	char	   *sslcompression;	/* SSL compression (0 or 1) */
+	char	   *sslcompression; /* SSL compression (0 or 1) */
 	char	   *sslkey;			/* client key filename */
 	char	   *sslcert;		/* client certificate filename */
 	char	   *sslrootcert;	/* root certificate filename */
@@ -342,6 +356,7 @@ struct pg_conn
 	bool		options_valid;	/* true if OK to attempt connection */
 	bool		nonblocking;	/* whether this connection is using nonblock
 								 * sending semantics */
+	bool		singleRowMode;	/* return current query result row-by-row? */
 	char		copy_is_binary; /* 1 = copy binary, 0 = copy text */
 	int			copy_already_done;		/* # bytes already returned in COPY
 										 * OUT */
@@ -396,9 +411,15 @@ struct pg_conn
 								 * msg has no length word */
 	int			outMsgEnd;		/* offset to msg end (so far) */
 
+	/* Row processor interface workspace */
+	PGdataValue *rowBuf;		/* array for passing values to rowProcessor */
+	int			rowBufLen;		/* number of entries allocated in rowBuf */
+
 	/* Status for asynchronous result construction */
 	PGresult   *result;			/* result being constructed */
-	PGresAttValue *curTuple;	/* tuple currently being read */
+	PGresult   *next_result;	/* next result (used in single-row mode) */
+
+	/* Assorted state for SSL, GSS, etc */
 
 #ifdef USE_SSL
 	bool		allow_ssl_try;	/* Allowed to try SSL negotiation */
@@ -435,7 +456,6 @@ struct pg_conn
 								 * connection */
 #endif
 
-
 	/* Buffer for current error message */
 	PQExpBufferData errorMessage;		/* expansible string */
 
@@ -471,6 +491,7 @@ extern char *const pgresStatus[];
 
 /* === in fe-connect.c === */
 
+extern void pqDropConnection(PGconn *conn);
 extern int pqPacketSend(PGconn *conn, char pack_type,
 			 const void *buf, size_t buf_len);
 extern bool pqGetHomeDirectory(char *buf, int bufsize);
@@ -505,11 +526,11 @@ extern void
 pqInternalNotice(const PGNoticeHooks *hooks, const char *fmt,...)
 /* This lets gcc check the format string for consistency. */
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
-extern int	pqAddTuple(PGresult *res, PGresAttValue *tup);
 extern void pqSaveMessageField(PGresult *res, char code,
 				   const char *value);
 extern void pqSaveParameterStatus(PGconn *conn, const char *name,
 					  const char *value);
+extern int	pqRowProcessor(PGconn *conn, const char **errmsgp);
 extern void pqHandleSendFailure(PGconn *conn);
 
 /* === in fe-protocol2.c === */
@@ -558,6 +579,7 @@ extern int	pqGets(PQExpBuffer buf, PGconn *conn);
 extern int	pqGets_append(PQExpBuffer buf, PGconn *conn);
 extern int	pqPuts(const char *s, PGconn *conn);
 extern int	pqGetnchar(char *s, size_t len, PGconn *conn);
+extern int	pqSkipnchar(size_t len, PGconn *conn);
 extern int	pqPutnchar(const char *s, size_t len, PGconn *conn);
 extern int	pqGetInt(int *result, size_t bytes, PGconn *conn);
 extern int	pqPutInt(int value, size_t bytes, PGconn *conn);

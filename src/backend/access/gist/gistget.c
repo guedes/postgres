@@ -4,7 +4,7 @@
  *	  fetch tuples from a GiST scan.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -258,12 +258,12 @@ gistScanPage(IndexScanDesc scan, GISTSearchItem *pageItem, double *myDistances,
 	/*
 	 * Check if we need to follow the rightlink. We need to follow it if the
 	 * page was concurrently split since we visited the parent (in which case
-	 * parentlsn < nsn), or if the the system crashed after a page split but
+	 * parentlsn < nsn), or if the system crashed after a page split but
 	 * before the downlink was inserted into the parent.
 	 */
 	if (!XLogRecPtrIsInvalid(pageItem->data.parentlsn) &&
 		(GistFollowRight(page) ||
-		 XLByteLT(pageItem->data.parentlsn, opaque->nsn)) &&
+		 pageItem->data.parentlsn < GistPageGetNSN(page)) &&
 		opaque->rightlink != InvalidBlockNumber /* sanity check */ )
 	{
 		/* There was a page split, follow right link to add pages */
@@ -535,8 +535,6 @@ gistgettuple(PG_FUNCTION_ARGS)
 			} while (so->nPageData == 0);
 		}
 	}
-
-	PG_RETURN_BOOL(false);		/* keep compiler quiet */
 }
 
 /*

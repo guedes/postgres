@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_pltemplate.h
@@ -33,6 +33,7 @@ CATALOG(pg_pltemplate,1136) BKI_SHARED_RELATION BKI_WITHOUT_OIDS
 	NameData	tmplname;		/* name of PL */
 	bool		tmpltrusted;	/* PL is trusted? */
 	bool		tmpldbacreate;	/* PL is installable by db owner? */
+
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
 	text		tmplhandler;	/* name of call handler function */
 	text		tmplinline;		/* name of anonymous-block handler, or NULL */

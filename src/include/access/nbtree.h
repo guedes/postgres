@@ -4,7 +4,7 @@
  *	  header file for postgres btree access method implementation.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/nbtree.h
@@ -418,12 +418,12 @@ typedef struct xl_btree_newroot
 /*
  *	When a new operator class is declared, we require that the user
  *	supply us with an amproc procedure (BTORDER_PROC) for determining
- *	whether, for two keys a and b, a < b, a = b, or a > b.  This routine
+ *	whether, for two keys a and b, a < b, a = b, or a > b.	This routine
  *	must return < 0, 0, > 0, respectively, in these three cases.  (It must
  *	not return INT_MIN, since we may negate the result before using it.)
  *
  *	To facilitate accelerated sorting, an operator class may choose to
- *	offer a second procedure (BTSORTSUPPORT_PROC).  For full details, see
+ *	offer a second procedure (BTSORTSUPPORT_PROC).	For full details, see
  *	src/include/utils/sortsupport.h.
  */
 
@@ -535,6 +535,7 @@ typedef struct BTArrayKeyInfo
 {
 	int			scan_key;		/* index of associated key in arrayKeyData */
 	int			cur_elem;		/* index of current element in elem_values */
+	int			mark_elem;		/* index of marked element in elem_values */
 	int			num_elems;		/* number of elems in current array value */
 	Datum	   *elem_values;	/* array of num_elems Datums */
 } BTArrayKeyInfo;
@@ -551,7 +552,7 @@ typedef struct BTScanOpaqueData
 	int			numArrayKeys;	/* number of equality-type array keys (-1 if
 								 * there are any unsatisfiable array keys) */
 	BTArrayKeyInfo *arrayKeys;	/* info about each equality-type array key */
-	MemoryContext arrayContext;	/* scan-lifespan context for array data */
+	MemoryContext arrayContext; /* scan-lifespan context for array data */
 
 	/* info about killed items if any (killedItems is NULL if never used) */
 	int		   *killedItems;	/* currPos.items indexes of killed items */
@@ -559,8 +560,8 @@ typedef struct BTScanOpaqueData
 
 	/*
 	 * If we are doing an index-only scan, these are the tuple storage
-	 * workspaces for the currPos and markPos respectively.  Each is of
-	 * size BLCKSZ, so it can hold as much as a full page's worth of tuples.
+	 * workspaces for the currPos and markPos respectively.  Each is of size
+	 * BLCKSZ, so it can hold as much as a full page's worth of tuples.
 	 */
 	char	   *currTuples;		/* tuple storage for currPos */
 	char	   *markTuples;		/* tuple storage for markPos */
@@ -625,6 +626,7 @@ extern void _bt_insert_parent(Relation rel, Buffer buf, Buffer rbuf,
 extern void _bt_initmetapage(Page page, BlockNumber rootbknum, uint32 level);
 extern Buffer _bt_getroot(Relation rel, int access);
 extern Buffer _bt_gettrueroot(Relation rel);
+extern int	_bt_getrootheight(Relation rel);
 extern void _bt_checkpage(Relation rel, Buffer buf);
 extern Buffer _bt_getbuf(Relation rel, BlockNumber blkno, int access);
 extern Buffer _bt_relandgetbuf(Relation rel, Buffer obuf,
@@ -665,6 +667,8 @@ extern void _bt_freestack(BTStack stack);
 extern void _bt_preprocess_array_keys(IndexScanDesc scan);
 extern void _bt_start_array_keys(IndexScanDesc scan, ScanDirection dir);
 extern bool _bt_advance_array_keys(IndexScanDesc scan, ScanDirection dir);
+extern void _bt_mark_array_keys(IndexScanDesc scan);
+extern void _bt_restore_array_keys(IndexScanDesc scan);
 extern void _bt_preprocess_keys(IndexScanDesc scan);
 extern IndexTuple _bt_checkkeys(IndexScanDesc scan,
 			  Page page, OffsetNumber offnum,
@@ -682,7 +686,8 @@ extern void BTreeShmemInit(void);
  */
 typedef struct BTSpool BTSpool; /* opaque type known only within nbtsort.c */
 
-extern BTSpool *_bt_spoolinit(Relation index, bool isunique, bool isdead);
+extern BTSpool *_bt_spoolinit(Relation heap, Relation index,
+			  bool isunique, bool isdead);
 extern void _bt_spooldestroy(BTSpool *btspool);
 extern void _bt_spool(IndexTuple itup, BTSpool *btspool);
 extern void _bt_leafbuild(BTSpool *btspool, BTSpool *spool2);

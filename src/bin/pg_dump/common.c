@@ -4,7 +4,7 @@
  *	Catalog routines used by pg_dump; long ago these were shared
  *	by another dump tool, but not anymore.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -18,8 +18,6 @@
 #include <ctype.h>
 
 #include "catalog/pg_class.h"
-#include "dumpmem.h"
-#include "dumputils.h"
 
 
 /*
@@ -48,16 +46,19 @@ static TableInfo *tblinfo;
 static TypeInfo *typinfo;
 static FuncInfo *funinfo;
 static OprInfo *oprinfo;
+static NamespaceInfo *nspinfo;
 static int	numTables;
 static int	numTypes;
 static int	numFuncs;
 static int	numOperators;
 static int	numCollations;
+static int	numNamespaces;
 static DumpableObject **tblinfoindex;
 static DumpableObject **typinfoindex;
 static DumpableObject **funinfoindex;
 static DumpableObject **oprinfoindex;
 static DumpableObject **collinfoindex;
+static DumpableObject **nspinfoindex;
 
 
 static void flagInhTables(TableInfo *tbinfo, int numTables,
@@ -81,7 +82,6 @@ getSchemaData(Archive *fout, int *numTablesPtr)
 	ExtensionInfo *extinfo;
 	InhInfo    *inhinfo;
 	CollInfo   *collinfo;
-	int			numNamespaces;
 	int			numExtensions;
 	int			numAggregates;
 	int			numInherits;
@@ -98,10 +98,12 @@ getSchemaData(Archive *fout, int *numTablesPtr)
 	int			numForeignDataWrappers;
 	int			numForeignServers;
 	int			numDefaultACLs;
+	int			numEventTriggers;
 
 	if (g_verbose)
 		write_msg(NULL, "reading schemas\n");
-	getNamespaces(fout, &numNamespaces);
+	nspinfo = getNamespaces(fout, &numNamespaces);
+	nspinfoindex = buildIndexArray(nspinfo, numNamespaces, sizeof(NamespaceInfo));
 
 	/*
 	 * getTables should be done as soon as possible, so as to minimize the
@@ -113,6 +115,9 @@ getSchemaData(Archive *fout, int *numTablesPtr)
 		write_msg(NULL, "reading user-defined tables\n");
 	tblinfo = getTables(fout, &numTables);
 	tblinfoindex = buildIndexArray(tblinfo, numTables, sizeof(TableInfo));
+
+	/* Do this after we've built tblinfoindex */
+	getOwnedSeqs(fout, tblinfo, numTables);
 
 	if (g_verbose)
 		write_msg(NULL, "reading extensions\n");
@@ -233,6 +238,10 @@ getSchemaData(Archive *fout, int *numTablesPtr)
 	if (g_verbose)
 		write_msg(NULL, "reading triggers\n");
 	getTriggers(fout, tblinfo, numTables);
+
+	if (g_verbose)
+		write_msg(NULL, "reading event triggers\n");
+	getEventTriggers(fout, &numEventTriggers);
 
 	*numTablesPtr = numTables;
 	return tblinfo;
@@ -591,8 +600,8 @@ buildIndexArray(void *objArray, int numObjs, Size objSize)
 static int
 DOCatalogIdCompare(const void *p1, const void *p2)
 {
-	const DumpableObject *obj1 = *(DumpableObject * const *) p1;
-	const DumpableObject *obj2 = *(DumpableObject * const *) p2;
+	const DumpableObject *obj1 = *(DumpableObject *const *) p1;
+	const DumpableObject *obj2 = *(DumpableObject *const *) p2;
 	int			cmpval;
 
 	/*
@@ -727,6 +736,17 @@ CollInfo *
 findCollationByOid(Oid oid)
 {
 	return (CollInfo *) findObjectByOid(oid, collinfoindex, numCollations);
+}
+
+/*
+ * findNamespaceByOid
+ *	  finds the entry (in nspinfo) of the namespace with the given oid
+ *	  returns NULL if not found
+ */
+NamespaceInfo *
+findNamespaceByOid(Oid oid)
+{
+	return (NamespaceInfo *) findObjectByOid(oid, nspinfoindex, numNamespaces);
 }
 
 
@@ -876,24 +896,6 @@ simple_oid_list_append(SimpleOidList *list, Oid val)
 	list->tail = cell;
 }
 
-void
-simple_string_list_append(SimpleStringList *list, const char *val)
-{
-	SimpleStringListCell *cell;
-
-	/* this calculation correctly accounts for the null trailing byte */
-	cell = (SimpleStringListCell *)
-		pg_malloc(sizeof(SimpleStringListCell) + strlen(val));
-	cell->next = NULL;
-	strcpy(cell->val, val);
-
-	if (list->tail)
-		list->tail->next = cell;
-	else
-		list->head = cell;
-	list->tail = cell;
-}
-
 bool
 simple_oid_list_member(SimpleOidList *list, Oid val)
 {
@@ -902,19 +904,6 @@ simple_oid_list_member(SimpleOidList *list, Oid val)
 	for (cell = list->head; cell; cell = cell->next)
 	{
 		if (cell->val == val)
-			return true;
-	}
-	return false;
-}
-
-bool
-simple_string_list_member(SimpleStringList *list, const char *val)
-{
-	SimpleStringListCell *cell;
-
-	for (cell = list->head; cell; cell = cell->next)
-	{
-		if (strcmp(cell->val, val) == 0)
 			return true;
 	}
 	return false;

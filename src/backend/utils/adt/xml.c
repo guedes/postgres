@@ -4,7 +4,7 @@
  *	  XML data type support.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/utils/adt/xml.c
@@ -48,14 +48,26 @@
 #ifdef USE_LIBXML
 #include <libxml/chvalid.h>
 #include <libxml/parser.h>
+#include <libxml/parserInternals.h>
 #include <libxml/tree.h>
 #include <libxml/uri.h>
 #include <libxml/xmlerror.h>
+#include <libxml/xmlversion.h>
 #include <libxml/xmlwriter.h>
 #include <libxml/xpath.h>
 #include <libxml/xpathInternals.h>
+
+/*
+ * We used to check for xmlStructuredErrorContext via a configure test; but
+ * that doesn't work on Windows, so instead use this grottier method of
+ * testing the library version number.
+ */
+#if LIBXML_VERSION >= 20704
+#define HAVE_XMLSTRUCTUREDERRORCONTEXT 1
+#endif
 #endif   /* USE_LIBXML */
 
+#include "access/htup_details.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -99,8 +111,12 @@ struct PgXmlErrorContext
 	/* previous libxml error handling state (saved by pg_xml_init) */
 	xmlStructuredErrorFunc saved_errfunc;
 	void	   *saved_errcxt;
+	/* previous libxml entity handler (saved by pg_xml_init) */
+	xmlExternalEntityLoader saved_entityfunc;
 };
 
+static xmlParserInputPtr xmlPgEntityLoader(const char *URL, const char *ID,
+				  xmlParserCtxtPtr ctxt);
 static void xml_errorHandler(void *data, xmlErrorPtr error);
 static void xml_ereport_by_code(int level, int sqlcode,
 					const char *msg, int errcode);
@@ -126,8 +142,8 @@ static bool print_xml_decl(StringInfo buf, const xmlChar *version,
 static xmlDocPtr xml_parse(text *data, XmlOptionType xmloption_arg,
 		  bool preserve_whitespace, int encoding);
 static text *xml_xmlnodetoxmltype(xmlNodePtr cur);
-static int	xml_xpathobjtoxmlarray(xmlXPathObjectPtr xpathobj,
-								   ArrayBuildState **astate);
+static int xml_xpathobjtoxmlarray(xmlXPathObjectPtr xpathobj,
+					   ArrayBuildState **astate);
 #endif   /* USE_LIBXML */
 
 static StringInfo query_to_xml_internal(const char *query, char *tablename,
@@ -913,7 +929,7 @@ pg_xml_init_library(void)
  * pg_xml_init --- set up for use of libxml and register an error handler
  *
  * This should be called by each function that is about to use libxml
- * facilities and requires error handling.  It initializes libxml with
+ * facilities and requires error handling.	It initializes libxml with
  * pg_xml_init_library() and establishes our libxml error handler.
  *
  * strictness determines which errors are reported and which are ignored.
@@ -943,9 +959,9 @@ pg_xml_init(PgXmlStrictness strictness)
 	/*
 	 * Save original error handler and install ours. libxml originally didn't
 	 * distinguish between the contexts for generic and for structured error
-	 * handlers.  If we're using an old libxml version, we must thus save
-	 * the generic error context, even though we're using a structured
-	 * error handler.
+	 * handlers.  If we're using an old libxml version, we must thus save the
+	 * generic error context, even though we're using a structured error
+	 * handler.
 	 */
 	errcxt->saved_errfunc = xmlStructuredError;
 
@@ -959,13 +975,13 @@ pg_xml_init(PgXmlStrictness strictness)
 
 	/*
 	 * Verify that xmlSetStructuredErrorFunc set the context variable we
-	 * expected it to.  If not, the error context pointer we just saved is not
+	 * expected it to.	If not, the error context pointer we just saved is not
 	 * the correct thing to restore, and since that leaves us without a way to
 	 * restore the context in pg_xml_done, we must fail.
 	 *
 	 * The only known situation in which this test fails is if we compile with
 	 * headers from a libxml2 that doesn't track the structured error context
-	 * separately (<= 2.7.3), but at runtime use a version that does, or vice
+	 * separately (< 2.7.4), but at runtime use a version that does, or vice
 	 * versa.  The libxml2 authors did not treat that change as constituting
 	 * an ABI break, so the LIBXML_TEST_VERSION test in pg_xml_init_library
 	 * fails to protect us from this.
@@ -984,6 +1000,13 @@ pg_xml_init(PgXmlStrictness strictness)
 				 errhint("This probably indicates that the version of libxml2"
 						 " being used is not compatible with the libxml2"
 						 " header files that PostgreSQL was built with.")));
+
+	/*
+	 * Also, install an entity loader to prevent unwanted fetches of external
+	 * files and URLs.
+	 */
+	errcxt->saved_entityfunc = xmlGetExternalEntityLoader();
+	xmlSetExternalEntityLoader(xmlPgEntityLoader);
 
 	return errcxt;
 }
@@ -1014,9 +1037,9 @@ pg_xml_done(PgXmlErrorContext *errcxt, bool isError)
 	Assert(!errcxt->err_occurred || isError);
 
 	/*
-	 * Check that libxml's global state is correct, warn if not.  This is
-	 * a real test and not an Assert because it has a higher probability
-	 * of happening.
+	 * Check that libxml's global state is correct, warn if not.  This is a
+	 * real test and not an Assert because it has a higher probability of
+	 * happening.
 	 */
 #ifdef HAVE_XMLSTRUCTUREDERRORCONTEXT
 	cur_errcxt = xmlStructuredErrorContext;
@@ -1027,8 +1050,9 @@ pg_xml_done(PgXmlErrorContext *errcxt, bool isError)
 	if (cur_errcxt != (void *) errcxt)
 		elog(WARNING, "libxml error handling state is out of sync with xml.c");
 
-	/* Restore the saved handler */
+	/* Restore the saved handlers */
 	xmlSetStructuredErrorFunc(errcxt->saved_errcxt, errcxt->saved_errfunc);
+	xmlSetExternalEntityLoader(errcxt->saved_entityfunc);
 
 	/*
 	 * Mark the struct as invalid, just in case somebody somehow manages to
@@ -1108,7 +1132,7 @@ parse_xml_decl(const xmlChar *str, size_t *lenp,
 	int			utf8len;
 
 	/*
-	 * Only initialize libxml.  We don't need error handling here, but we do
+	 * Only initialize libxml.	We don't need error handling here, but we do
 	 * need to make sure libxml is initialized before calling any of its
 	 * functions.  Note that this is safe (and a no-op) if caller has already
 	 * done pg_xml_init().
@@ -1473,6 +1497,25 @@ xml_pstrdup(const char *string)
 
 
 /*
+ * xmlPgEntityLoader --- entity loader callback function
+ *
+ * Silently prevent any external entity URL from being loaded.  We don't want
+ * to throw an error, so instead make the entity appear to expand to an empty
+ * string.
+ *
+ * We would prefer to allow loading entities that exist in the system's
+ * global XML catalog; but the available libxml2 APIs make that a complex
+ * and fragile task.  For now, just shut down all external access.
+ */
+static xmlParserInputPtr
+xmlPgEntityLoader(const char *URL, const char *ID,
+				  xmlParserCtxtPtr ctxt)
+{
+	return xmlNewStringInputStream(ctxt, (const xmlChar *) "");
+}
+
+
+/*
  * xml_ereport --- report an XML-related error
  *
  * The "msg" is the SQL-level message; some can be adopted from the SQL/XML
@@ -1516,9 +1559,9 @@ xml_errorHandler(void *data, xmlErrorPtr error)
 	PgXmlErrorContext *xmlerrcxt = (PgXmlErrorContext *) data;
 	xmlParserCtxtPtr ctxt = (xmlParserCtxtPtr) error->ctxt;
 	xmlParserInputPtr input = (ctxt != NULL) ? ctxt->input : NULL;
-	xmlNodePtr node = error->node;
+	xmlNodePtr	node = error->node;
 	const xmlChar *name = (node != NULL &&
-						   node->type == XML_ELEMENT_NODE) ? node->name : NULL;
+						 node->type == XML_ELEMENT_NODE) ? node->name : NULL;
 	int			domain = error->domain;
 	int			level = error->level;
 	StringInfo	errorBuf;
@@ -1566,7 +1609,14 @@ xml_errorHandler(void *data, xmlErrorPtr error)
 		case XML_FROM_NONE:
 		case XML_FROM_MEMORY:
 		case XML_FROM_IO:
-			/* Accept error regardless of the parsing purpose */
+			/*
+			 * Suppress warnings about undeclared entities.  We need to do
+			 * this to avoid problems due to not loading DTD definitions.
+			 */
+			if (error->code == XML_WAR_UNDECLARED_ENTITY)
+				return;
+
+			/* Otherwise, accept error regardless of the parsing purpose */
 			break;
 
 		default:
@@ -1599,7 +1649,7 @@ xml_errorHandler(void *data, xmlErrorPtr error)
 	if (input != NULL)
 	{
 		xmlGenericErrorFunc errFuncSaved = xmlGenericError;
-		void   *errCtxSaved = xmlGenericErrorContext;
+		void	   *errCtxSaved = xmlGenericErrorContext;
 
 		xmlSetGenericErrorFunc((void *) errorBuf,
 							   (xmlGenericErrorFunc) appendStringInfo);
@@ -1617,8 +1667,8 @@ xml_errorHandler(void *data, xmlErrorPtr error)
 	chopStringInfoNewlines(errorBuf);
 
 	/*
-	 * Legacy error handling mode.  err_occurred is never set, we just add the
-	 * message to err_buf.  This mode exists because the xml2 contrib module
+	 * Legacy error handling mode.	err_occurred is never set, we just add the
+	 * message to err_buf.	This mode exists because the xml2 contrib module
 	 * uses our error-handling infrastructure, but we don't want to change its
 	 * behaviour since it's deprecated anyway.  This is also why we don't
 	 * distinguish between notices, warnings and errors here --- the old-style
@@ -2383,7 +2433,7 @@ xmldata_root_element_start(StringInfo result, const char *eltname,
 		else
 			appendStringInfo(result, " xsi:noNamespaceSchemaLocation=\"#\"");
 	}
-	appendStringInfo(result, ">\n\n");
+	appendStringInfo(result, ">\n");
 }
 
 
@@ -2417,8 +2467,11 @@ query_to_xml_internal(const char *query, char *tablename,
 				 errmsg("invalid query")));
 
 	if (!tableforest)
+	{
 		xmldata_root_element_start(result, xmltn, xmlschema,
 								   targetns, top_level);
+		appendStringInfoString(result, "\n");
+	}
 
 	if (xmlschema)
 		appendStringInfo(result, "%s\n\n", xmlschema);
@@ -2581,6 +2634,7 @@ schema_to_xml_internal(Oid nspid, const char *xmlschema, bool nulls,
 	result = makeStringInfo();
 
 	xmldata_root_element_start(result, xmlsn, xmlschema, targetns, top_level);
+	appendStringInfoString(result, "\n");
 
 	if (xmlschema)
 		appendStringInfo(result, "%s\n\n", xmlschema);
@@ -2624,7 +2678,7 @@ schema_to_xml(PG_FUNCTION_ARGS)
 	Oid			nspid;
 
 	schemaname = NameStr(*name);
-	nspid = LookupExplicitNamespace(schemaname);
+	nspid = LookupExplicitNamespace(schemaname, false);
 
 	PG_RETURN_XML_P(stringinfo_to_xmltype(schema_to_xml_internal(nspid, NULL,
 									   nulls, tableforest, targetns, true)));
@@ -2670,7 +2724,7 @@ schema_to_xmlschema_internal(const char *schemaname, bool nulls,
 
 	result = makeStringInfo();
 
-	nspid = LookupExplicitNamespace(schemaname);
+	nspid = LookupExplicitNamespace(schemaname, false);
 
 	xsd_schema_element_start(result, targetns);
 
@@ -2728,7 +2782,7 @@ schema_to_xml_and_xmlschema(PG_FUNCTION_ARGS)
 	StringInfo	xmlschema;
 
 	schemaname = NameStr(*name);
-	nspid = LookupExplicitNamespace(schemaname);
+	nspid = LookupExplicitNamespace(schemaname, false);
 
 	xmlschema = schema_to_xmlschema_internal(schemaname, nulls,
 											 tableforest, targetns);
@@ -2758,6 +2812,7 @@ database_to_xml_internal(const char *xmlschema, bool nulls,
 	result = makeStringInfo();
 
 	xmldata_root_element_start(result, xmlcn, xmlschema, targetns, true);
+	appendStringInfoString(result, "\n");
 
 	if (xmlschema)
 		appendStringInfo(result, "%s\n\n", xmlschema);
@@ -3574,7 +3629,7 @@ xml_xmlnodetoxmltype(xmlNodePtr cur)
 		PG_TRY();
 		{
 			/* Here we rely on XML having the same representation as TEXT */
-			char   *escaped = escape_xml((char *) str);
+			char	   *escaped = escape_xml((char *) str);
 
 			result = (xmltype *) cstring_to_text(escaped);
 			pfree(escaped);
@@ -3623,7 +3678,7 @@ xml_xpathobjtoxmlarray(xmlXPathObjectPtr xpathobj,
 				result = xpathobj->nodesetval->nodeNr;
 				if (astate != NULL)
 				{
-					int		i;
+					int			i;
 
 					for (i = 0; i < result; i++)
 					{

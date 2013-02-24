@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/common.c
  */
@@ -31,67 +31,6 @@
 static bool ExecQueryUsingCursor(const char *query, double *elapsed_msec);
 static bool command_no_begin(const char *query);
 static bool is_select_command(const char *query);
-
-/*
- * "Safe" wrapper around strdup()
- */
-char *
-pg_strdup(const char *string)
-{
-	char	   *tmp;
-
-	if (!string)
-	{
-		fprintf(stderr, _("%s: pg_strdup: cannot duplicate null pointer (internal error)\n"),
-				pset.progname);
-		exit(EXIT_FAILURE);
-	}
-	tmp = strdup(string);
-	if (!tmp)
-	{
-		psql_error("out of memory\n");
-		exit(EXIT_FAILURE);
-	}
-	return tmp;
-}
-
-void *
-pg_malloc(size_t size)
-{
-	void	   *tmp;
-
-	tmp = malloc(size);
-	if (!tmp)
-	{
-		psql_error("out of memory\n");
-		exit(EXIT_FAILURE);
-	}
-	return tmp;
-}
-
-void *
-pg_malloc_zero(size_t size)
-{
-	void	   *tmp;
-
-	tmp = pg_malloc(size);
-	memset(tmp, 0, size);
-	return tmp;
-}
-
-void *
-pg_calloc(size_t nmemb, size_t size)
-{
-	void	   *tmp;
-
-	tmp = calloc(nmemb, size);
-	if (!tmp)
-	{
-		psql_error("out of memory\n");
-		exit(EXIT_FAILURE);
-	}
-	return tmp;
-}
 
 /*
  * setQFout
@@ -161,7 +100,7 @@ psql_error(const char *fmt,...)
 	va_list		ap;
 
 	fflush(stdout);
-	if (pset.queryFout != stdout)
+	if (pset.queryFout && pset.queryFout != stdout)
 		fflush(pset.queryFout);
 
 	if (pset.inputfile)
@@ -219,6 +158,7 @@ static PGcancel *volatile cancelConn = NULL;
 static CRITICAL_SECTION cancelConnLock;
 #endif
 
+/* Used from signal handlers, no buffering */
 #define write_stderr(str)	write(fileno(stderr), str, strlen(str))
 
 
@@ -350,19 +290,19 @@ CheckConnection(void)
 			exit(EXIT_BADCONN);
 		}
 
-		fputs(_("The connection to the server was lost. Attempting reset: "), stderr);
+		psql_error("The connection to the server was lost. Attempting reset: ");
 		PQreset(pset.db);
 		OK = ConnectionUp();
 		if (!OK)
 		{
-			fputs(_("Failed.\n"), stderr);
+			psql_error("Failed.\n");
 			PQfinish(pset.db);
 			pset.db = NULL;
 			ResetCancelConn();
 			UnsyncVariables();
 		}
 		else
-			fputs(_("Succeeded.\n"), stderr);
+			psql_error("Succeeded.\n");
 	}
 
 	return OK;
@@ -450,7 +390,6 @@ AcceptResult(const PGresult *result)
 			case PGRES_EMPTY_QUERY:
 			case PGRES_COPY_IN:
 			case PGRES_COPY_OUT:
-			case PGRES_COPY_BOTH:
 				/* Fine, do nothing */
 				OK = true;
 				break;
@@ -463,7 +402,7 @@ AcceptResult(const PGresult *result)
 
 			default:
 				OK = false;
-				psql_error("unexpected PQresultStatus (%d)",
+				psql_error("unexpected PQresultStatus: %d\n",
 						   PQresultStatus(result));
 				break;
 		}
@@ -618,14 +557,70 @@ PrintQueryTuples(const PGresult *results)
 
 		pset.queryFout = queryFout_copy;
 		pset.queryFoutPipe = queryFoutPipe_copy;
-
-		free(pset.gfname);
-		pset.gfname = NULL;
 	}
 	else
 		printQuery(results, &my_popt, pset.queryFout, pset.logfile);
 
 	return true;
+}
+
+
+/*
+ * StoreQueryTuple: assuming query result is OK, save data into variables
+ *
+ * Returns true if successful, false otherwise.
+ */
+static bool
+StoreQueryTuple(const PGresult *result)
+{
+	bool		success = true;
+
+	if (PQntuples(result) < 1)
+	{
+		psql_error("no rows returned for \\gset\n");
+		success = false;
+	}
+	else if (PQntuples(result) > 1)
+	{
+		psql_error("more than one row returned for \\gset\n");
+		success = false;
+	}
+	else
+	{
+		int			i;
+
+		for (i = 0; i < PQnfields(result); i++)
+		{
+			char	   *colname = PQfname(result, i);
+			char	   *varname;
+			char	   *value;
+
+			/* concate prefix and column name */
+			varname = pg_malloc(strlen(pset.gset_prefix) + strlen(colname) + 1);
+			strcpy(varname, pset.gset_prefix);
+			strcat(varname, colname);
+
+			if (!PQgetisnull(result, 0, i))
+				value = PQgetvalue(result, 0, i);
+			else
+			{
+				/* for NULL value, unset rather than set the variable */
+				value = NULL;
+			}
+
+			if (!SetVariable(pset.vars, varname, value))
+			{
+				psql_error("could not set variable \"%s\"\n", varname);
+				free(varname);
+				success = false;
+				break;
+			}
+
+			free(varname);
+		}
+	}
+
+	return success;
 }
 
 
@@ -673,33 +668,21 @@ ProcessResult(PGresult **results)
 		result_status = PQresultStatus(*results);
 		switch (result_status)
 		{
-			case PGRES_COPY_BOTH:
-				/*
-				 * No now-existing SQL command can yield PGRES_COPY_BOTH, but
-				 * defend against the future.  PQexec() can't short-circuit
-				 * it's way out of a PGRES_COPY_BOTH, so the connection will
-				 * be useless at this point.  XXX is there a method for
-				 * clearing this status that's likely to work with every
-				 * future command that can initiate it?
-				 */
-				psql_error("unexpected PQresultStatus (%d)", result_status);
-				return false;
-
-			case PGRES_COPY_OUT:
-			case PGRES_COPY_IN:
-				is_copy = true;
-				break;
-
 			case PGRES_EMPTY_QUERY:
 			case PGRES_COMMAND_OK:
 			case PGRES_TUPLES_OK:
 				is_copy = false;
 				break;
 
+			case PGRES_COPY_OUT:
+			case PGRES_COPY_IN:
+				is_copy = true;
+				break;
+
 			default:
 				/* AcceptResult() should have caught anything else. */
 				is_copy = false;
-				psql_error("unexpected PQresultStatus (%d)", result_status);
+				psql_error("unexpected PQresultStatus: %d\n", result_status);
 				break;
 		}
 
@@ -720,7 +703,7 @@ ProcessResult(PGresult **results)
 
 			/*
 			 * Call PQgetResult() once more.  In the typical case of a
-			 * single-command string, it will return NULL.  Otherwise, we'll
+			 * single-command string, it will return NULL.	Otherwise, we'll
 			 * have other results to process that may include other COPYs.
 			 */
 			PQclear(*results);
@@ -778,7 +761,7 @@ PrintQueryStatus(PGresult *results)
 
 
 /*
- * PrintQueryResults: print out query results as required
+ * PrintQueryResults: print out (or store) query results as required
  *
  * Note: Utility function for use by SendQuery() only.
  *
@@ -796,8 +779,11 @@ PrintQueryResults(PGresult *results)
 	switch (PQresultStatus(results))
 	{
 		case PGRES_TUPLES_OK:
-			/* print the data ... */
-			success = PrintQueryTuples(results);
+			/* store or print the data ... */
+			if (pset.gset_prefix)
+				success = StoreQueryTuple(results);
+			else
+				success = PrintQueryTuples(results);
 			/* if it's INSERT/UPDATE/DELETE RETURNING, also print status */
 			cmdstatus = PQcmdStatus(results);
 			if (strncmp(cmdstatus, "INSERT", 6) == 0 ||
@@ -817,7 +803,6 @@ PrintQueryResults(PGresult *results)
 
 		case PGRES_COPY_OUT:
 		case PGRES_COPY_IN:
-		case PGRES_COPY_BOTH:
 			/* nothing to do here */
 			success = true;
 			break;
@@ -830,7 +815,7 @@ PrintQueryResults(PGresult *results)
 
 		default:
 			success = false;
-			psql_error("unexpected PQresultStatus (%d)",
+			psql_error("unexpected PQresultStatus: %d\n",
 					   PQresultStatus(results));
 			break;
 	}
@@ -859,14 +844,14 @@ SendQuery(const char *query)
 	PGresult   *results;
 	PGTransactionStatusType transaction_status;
 	double		elapsed_msec = 0;
-	bool		OK,
-				on_error_rollback_savepoint = false;
+	bool		OK = false;
+	bool		on_error_rollback_savepoint = false;
 	static bool on_error_rollback_warning = false;
 
 	if (!pset.db)
 	{
 		psql_error("You are currently not connected to a database.\n");
-		return false;
+		goto sendquery_cleanup;
 	}
 
 	if (pset.singlestep)
@@ -880,7 +865,7 @@ SendQuery(const char *query)
 		fflush(stdout);
 		if (fgets(buf, sizeof(buf), stdin) != NULL)
 			if (buf[0] == 'x')
-				return false;
+				goto sendquery_cleanup;
 	}
 	else if (pset.echo == PSQL_ECHO_QUERIES)
 	{
@@ -911,7 +896,7 @@ SendQuery(const char *query)
 			psql_error("%s", PQerrorMessage(pset.db));
 			PQclear(results);
 			ResetCancelConn();
-			return false;
+			goto sendquery_cleanup;
 		}
 		PQclear(results);
 		transaction_status = PQtransactionStatus(pset.db);
@@ -924,8 +909,8 @@ SendQuery(const char *query)
 	{
 		if (on_error_rollback_warning == false && pset.sversion < 80000)
 		{
-			fprintf(stderr, _("The server (version %d.%d) does not support savepoints for ON_ERROR_ROLLBACK.\n"),
-					pset.sversion / 10000, (pset.sversion / 100) % 100);
+			psql_error("The server (version %d.%d) does not support savepoints for ON_ERROR_ROLLBACK.\n",
+					   pset.sversion / 10000, (pset.sversion / 100) % 100);
 			on_error_rollback_warning = true;
 		}
 		else
@@ -936,7 +921,7 @@ SendQuery(const char *query)
 				psql_error("%s", PQerrorMessage(pset.db));
 				PQclear(results);
 				ResetCancelConn();
-				return false;
+				goto sendquery_cleanup;
 			}
 			PQclear(results);
 			on_error_rollback_savepoint = true;
@@ -996,11 +981,12 @@ SendQuery(const char *query)
 				break;
 
 			case PQTRANS_INTRANS:
+
 				/*
 				 * Do nothing if they are messing with savepoints themselves:
-				 * If the user did RELEASE or ROLLBACK, our savepoint is
-				 * gone. If they issued a SAVEPOINT, releasing ours would
-				 * remove theirs.
+				 * If the user did RELEASE or ROLLBACK, our savepoint is gone.
+				 * If they issued a SAVEPOINT, releasing ours would remove
+				 * theirs.
 				 */
 				if (results &&
 					(strcmp(PQcmdStatus(results), "SAVEPOINT") == 0 ||
@@ -1031,10 +1017,11 @@ SendQuery(const char *query)
 			{
 				psql_error("%s", PQerrorMessage(pset.db));
 				PQclear(svptres);
+				OK = false;
 
 				PQclear(results);
 				ResetCancelConn();
-				return false;
+				goto sendquery_cleanup;
 			}
 			PQclear(svptres);
 		}
@@ -1059,6 +1046,24 @@ SendQuery(const char *query)
 	}
 
 	PrintNotifications();
+
+	/* perform cleanup that should occur after any attempted query */
+
+sendquery_cleanup:
+
+	/* reset \g's output-to-filename trigger */
+	if (pset.gfname)
+	{
+		free(pset.gfname);
+		pset.gfname = NULL;
+	}
+
+	/* reset \gset trigger */
+	if (pset.gset_prefix)
+	{
+		free(pset.gset_prefix);
+		pset.gset_prefix = NULL;
+	}
 
 	return OK;
 }
@@ -1086,6 +1091,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	bool		started_txn = false;
 	bool		did_pager = false;
 	int			ntuples;
+	int			fetch_count;
 	char		fetch_cmd[64];
 	instr_time	before,
 				after;
@@ -1133,9 +1139,18 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 		*elapsed_msec += INSTR_TIME_GET_MILLISEC(after);
 	}
 
+	/*
+	 * In \gset mode, we force the fetch count to be 2, so that we will throw
+	 * the appropriate error if the query returns more than one row.
+	 */
+	if (pset.gset_prefix)
+		fetch_count = 2;
+	else
+		fetch_count = pset.fetch_count;
+
 	snprintf(fetch_cmd, sizeof(fetch_cmd),
 			 "FETCH FORWARD %d FROM _psql_cursor",
-			 pset.fetch_count);
+			 fetch_count);
 
 	/* prepare to write output to \g argument, if any */
 	if (pset.gfname)
@@ -1161,7 +1176,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 		if (pset.timing)
 			INSTR_TIME_SET_CURRENT(before);
 
-		/* get FETCH_COUNT tuples at a time */
+		/* get fetch_count tuples at a time */
 		results = PQexec(pset.db, fetch_cmd);
 
 		if (pset.timing)
@@ -1183,14 +1198,22 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 			}
 
 			OK = AcceptResult(results);
-			psql_assert(!OK);
+			Assert(!OK);
+			PQclear(results);
+			break;
+		}
+
+		if (pset.gset_prefix)
+		{
+			/* StoreQueryTuple will complain if not exactly one row */
+			OK = StoreQueryTuple(results);
 			PQclear(results);
 			break;
 		}
 
 		ntuples = PQntuples(results);
 
-		if (ntuples < pset.fetch_count)
+		if (ntuples < fetch_count)
 		{
 			/* this is the last result set, so allow footer decoration */
 			my_popt.topt.stop_table = true;
@@ -1228,7 +1251,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 		 * writing things to the stream, we presume $PAGER has disappeared and
 		 * stop bothering to pull down more data.
 		 */
-		if (ntuples < pset.fetch_count || cancel_pressed || flush_error ||
+		if (ntuples < fetch_count || cancel_pressed || flush_error ||
 			ferror(pset.queryFout))
 			break;
 	}
@@ -1241,9 +1264,6 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 
 		pset.queryFout = queryFout_copy;
 		pset.queryFoutPipe = queryFoutPipe_copy;
-
-		free(pset.gfname);
-		pset.gfname = NULL;
 	}
 	else if (did_pager)
 	{

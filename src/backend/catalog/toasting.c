@@ -4,7 +4,7 @@
  *	  This file contains routines to support creation of toast tables
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -84,9 +84,7 @@ BootstrapToastTable(char *relName, Oid toastOid, Oid toastIndexOid)
 
 	rel = heap_openrv(makeRangeVar(NULL, relName, -1), AccessExclusiveLock);
 
-	/* Note: during bootstrap may see uncataloged relation */
-	if (rel->rd_rel->relkind != RELKIND_RELATION &&
-		rel->rd_rel->relkind != RELKIND_UNCATALOGED)
+	if (rel->rd_rel->relkind != RELKIND_RELATION)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a table",
@@ -198,7 +196,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 	 * Toast tables for regular relations go in pg_toast; those for temp
 	 * relations go into the per-backend temp-toast-table namespace.
 	 */
-	if (RelationUsesTempNamespace(rel))
+	if (isTempOrToastNamespace(rel->rd_rel->relnamespace))
 		namespaceid = GetTempToastNamespace();
 	else
 		namespaceid = PG_TOAST_NAMESPACE;
@@ -228,6 +226,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 										   ONCOMMIT_NOOP,
 										   reloptions,
 										   false,
+										   true,
 										   true);
 	Assert(toast_relid != InvalidOid);
 
@@ -281,7 +280,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 				 rel->rd_rel->reltablespace,
 				 collationObjectId, classObjectId, coloptions, (Datum) 0,
 				 true, false, false, false,
-				 true, false, false);
+				 true, false, false, true);
 
 	heap_close(toast_rel, NoLock);
 

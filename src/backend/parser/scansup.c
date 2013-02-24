@@ -4,7 +4,7 @@
  *	  support routines for the lex/flex scanner, used by both the normal
  * backend as well as the bootstrap backend
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -56,6 +56,8 @@ scanstr(const char *s)
 			 * appear in pairs, so there should be another character.
 			 */
 			i++;
+			/* The bootstrap parser is not as smart, so check here. */
+			Assert(s[i] == '\'');
 			newStr[j] = s[i];
 		}
 		else if (s[i] == '\\')

@@ -3,7 +3,7 @@
  * heap.c
  *	  code to create and destroy POSTGRES heap relations
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,6 +29,8 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "access/multixact.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -48,6 +50,7 @@
 #include "catalog/pg_type.h"
 #include "catalog/pg_type_fn.h"
 #include "catalog/storage.h"
+#include "catalog/storage_xlog.h"
 #include "commands/tablecmds.h"
 #include "commands/typecmds.h"
 #include "miscadmin.h"
@@ -92,10 +95,12 @@ static Oid AddNewRelationType(const char *typeName,
 				   Oid new_array_type);
 static void RelationRemoveInheritance(Oid relid);
 static void StoreRelCheck(Relation rel, char *ccname, Node *expr,
-			  bool is_validated, bool is_local, int inhcount, bool is_only);
+			  bool is_validated, bool is_local, int inhcount,
+			  bool is_no_inherit);
 static void StoreConstraints(Relation rel, List *cooked_constraints);
 static bool MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
-							bool allow_merge, bool is_local, bool is_only);
+							bool allow_merge, bool is_local,
+							bool is_no_inherit);
 static void SetRelationNumChecks(Relation rel, int numchecks);
 static Node *cookConstraint(ParseState *pstate,
 			   Node *raw_constraint,
@@ -240,26 +245,13 @@ heap_create(const char *relname,
 			char relkind,
 			char relpersistence,
 			bool shared_relation,
-			bool mapped_relation,
-			bool allow_system_table_mods)
+			bool mapped_relation)
 {
 	bool		create_storage;
 	Relation	rel;
 
 	/* The caller must have provided an OID for the relation. */
 	Assert(OidIsValid(relid));
-
-	/*
-	 * sanity checks
-	 */
-	if (!allow_system_table_mods &&
-		(IsSystemNamespace(relnamespace) || IsToastNamespace(relnamespace)) &&
-		IsNormalProcessingMode())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("permission denied to create \"%s.%s\"",
-						get_namespace_name(relnamespace), relname),
-		errdetail("System catalog modifications are currently disallowed.")));
 
 	/*
 	 * Decide if we need storage or not, and handle a couple other special
@@ -325,7 +317,8 @@ heap_create(const char *relname,
 									 reltablespace,
 									 shared_relation,
 									 mapped_relation,
-									 relpersistence);
+									 relpersistence,
+									 relkind);
 
 	/*
 	 * Have the storage manager create the relation's disk file, if needed.
@@ -787,6 +780,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relhastriggers - 1] = BoolGetDatum(rd_rel->relhastriggers);
 	values[Anum_pg_class_relhassubclass - 1] = BoolGetDatum(rd_rel->relhassubclass);
 	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
+	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
 	if (relacl != (Datum) 0)
 		values[Anum_pg_class_relacl - 1] = relacl;
 	else
@@ -862,7 +856,7 @@ AddNewRelationTuple(Relation pg_class_desc,
 			break;
 	}
 
-	/* Initialize relfrozenxid */
+	/* Initialize relfrozenxid and relminmxid */
 	if (relkind == RELKIND_RELATION ||
 		relkind == RELKIND_TOASTVALUE)
 	{
@@ -872,6 +866,15 @@ AddNewRelationTuple(Relation pg_class_desc,
 		 * that will do.
 		 */
 		new_rel_reltup->relfrozenxid = RecentXmin;
+		/*
+		 * Similarly, initialize the minimum Multixact to the first value that
+		 * could possibly be stored in tuples in the table.  Running
+		 * transactions could reuse values from their local cache, so we are
+		 * careful to consider all currently running multis.
+		 *
+		 * XXX this could be refined further, but is it worth the hassle?
+		 */
+		new_rel_reltup->relminmxid = GetOldestMultiXactId();
 	}
 	else
 	{
@@ -882,12 +885,12 @@ AddNewRelationTuple(Relation pg_class_desc,
 		 * commands/sequence.c.)
 		 */
 		new_rel_reltup->relfrozenxid = InvalidTransactionId;
+		new_rel_reltup->relfrozenxid = InvalidMultiXactId;
 	}
 
 	new_rel_reltup->relowner = relowner;
 	new_rel_reltup->reltype = new_type_oid;
 	new_rel_reltup->reloftype = reloftype;
-	new_rel_reltup->relkind = relkind;
 
 	new_rel_desc->rd_att->tdtypeid = new_type_oid;
 
@@ -995,7 +998,8 @@ heap_create_with_catalog(const char *relname,
 						 OnCommitAction oncommit,
 						 Datum reloptions,
 						 bool use_user_acl,
-						 bool allow_system_table_mods)
+						 bool allow_system_table_mods,
+						 bool is_internal)
 {
 	Relation	pg_class_desc;
 	Relation	new_rel_desc;
@@ -1122,8 +1126,7 @@ heap_create_with_catalog(const char *relname,
 							   relkind,
 							   relpersistence,
 							   shared_relation,
-							   mapped_relation,
-							   allow_system_table_mods);
+							   mapped_relation);
 
 	Assert(relid == RelationGetRelid(new_rel_desc));
 
@@ -1286,8 +1289,15 @@ heap_create_with_catalog(const char *relname,
 	}
 
 	/* Post creation hook for new relation */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   RelationRelationId, relid, 0, NULL);
+	if (object_access_hook)
+	{
+		ObjectAccessPostCreate	post_create_args;
+
+		memset(&post_create_args, 0, sizeof(ObjectAccessPostCreate));
+		post_create_args.is_internal = is_internal;
+		(*object_access_hook)(OAT_POST_CREATE, RelationRelationId,
+							  relid, 0, &post_create_args);
+    }
 
 	/*
 	 * Store any supplied constraints and defaults.
@@ -1304,24 +1314,10 @@ heap_create_with_catalog(const char *relname,
 	if (oncommit != ONCOMMIT_NOOP)
 		register_on_commit_action(relid, oncommit);
 
-	/*
-	 * If this is an unlogged relation, it needs an init fork so that it can
-	 * be correctly reinitialized on restart.  Since we're going to do an
-	 * immediate sync, we only need to xlog this if archiving or streaming is
-	 * enabled.  And the immediate sync is required, because otherwise there's
-	 * no guarantee that this will hit the disk before the next checkpoint
-	 * moves the redo pointer.
-	 */
 	if (relpersistence == RELPERSISTENCE_UNLOGGED)
 	{
 		Assert(relkind == RELKIND_RELATION || relkind == RELKIND_TOASTVALUE);
-
-		RelationOpenSmgr(new_rel_desc);
-		smgrcreate(new_rel_desc->rd_smgr, INIT_FORKNUM, false);
-		if (XLogIsNeeded())
-			log_smgrcreate(&new_rel_desc->rd_smgr->smgr_rnode.node,
-						   INIT_FORKNUM);
-		smgrimmedsync(new_rel_desc->rd_smgr, INIT_FORKNUM);
+		heap_create_init_fork(new_rel_desc);
 	}
 
 	/*
@@ -1334,6 +1330,22 @@ heap_create_with_catalog(const char *relname,
 	return relid;
 }
 
+/*
+ * Set up an init fork for an unlogged table so that it can be correctly
+ * reinitialized on restart.  Since we're going to do an immediate sync, we
+ * only need to xlog this if archiving or streaming is enabled.  And the
+ * immediate sync is required, because otherwise there's no guarantee that
+ * this will hit the disk before the next checkpoint moves the redo pointer.
+ */
+void
+heap_create_init_fork(Relation rel)
+{
+	RelationOpenSmgr(rel);
+	smgrcreate(rel->rd_smgr, INIT_FORKNUM, false);
+	if (XLogIsNeeded())
+		log_smgrcreate(&rel->rd_smgr->smgr_rnode.node, INIT_FORKNUM);
+	smgrimmedsync(rel->rd_smgr, INIT_FORKNUM);
+}
 
 /*
  *		RelationRemoveInheritance
@@ -1425,6 +1437,47 @@ DeleteAttributeTuples(Oid relid)
 
 	scan = systable_beginscan(attrel, AttributeRelidNumIndexId, true,
 							  SnapshotNow, 1, key);
+
+	/* Delete all the matching tuples */
+	while ((atttup = systable_getnext(scan)) != NULL)
+		simple_heap_delete(attrel, &atttup->t_self);
+
+	/* Clean up after the scan */
+	systable_endscan(scan);
+	heap_close(attrel, RowExclusiveLock);
+}
+
+/*
+ *		DeleteSystemAttributeTuples
+ *
+ * Remove pg_attribute rows for system columns of the given relid.
+ *
+ * Note: this is only used when converting a table to a view.  Views don't
+ * have system columns, so we should remove them from pg_attribute.
+ */
+void
+DeleteSystemAttributeTuples(Oid relid)
+{
+	Relation	attrel;
+	SysScanDesc scan;
+	ScanKeyData key[2];
+	HeapTuple	atttup;
+
+	/* Grab an appropriate lock on the pg_attribute relation */
+	attrel = heap_open(AttributeRelationId, RowExclusiveLock);
+
+	/* Use the index to scan only system attributes of the target relation */
+	ScanKeyInit(&key[0],
+				Anum_pg_attribute_attrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+	ScanKeyInit(&key[1],
+				Anum_pg_attribute_attnum,
+				BTLessEqualStrategyNumber, F_INT2LE,
+				Int16GetDatum(0));
+
+	scan = systable_beginscan(attrel, AttributeRelidNumIndexId, true,
+							  SnapshotNow, 2, key);
 
 	/* Delete all the matching tuples */
 	while ((atttup = systable_getnext(scan)) != NULL)
@@ -1868,7 +1921,8 @@ StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr)
  */
 static void
 StoreRelCheck(Relation rel, char *ccname, Node *expr,
-			  bool is_validated, bool is_local, int inhcount, bool is_only)
+			  bool is_validated, bool is_local, int inhcount,
+			  bool is_no_inherit)
 {
 	char	   *ccbin;
 	char	   *ccsrc;
@@ -1952,7 +2006,7 @@ StoreRelCheck(Relation rel, char *ccname, Node *expr,
 						  ccsrc,	/* Source form of check constraint */
 						  is_local,		/* conislocal */
 						  inhcount,		/* coninhcount */
-						  is_only);		/* conisonly */
+						  is_no_inherit);		/* connoinherit */
 
 	pfree(ccbin);
 	pfree(ccsrc);
@@ -1993,7 +2047,7 @@ StoreConstraints(Relation rel, List *cooked_constraints)
 				break;
 			case CONSTR_CHECK:
 				StoreRelCheck(rel, con->name, con->expr, !con->skip_validation,
-							  con->is_local, con->inhcount, con->is_only);
+						   con->is_local, con->inhcount, con->is_no_inherit);
 				numchecks++;
 				break;
 			default:
@@ -2036,8 +2090,7 @@ AddRelationNewConstraints(Relation rel,
 						  List *newColDefaults,
 						  List *newConstraints,
 						  bool allow_merge,
-						  bool is_local,
-						  bool is_only)
+						  bool is_local)
 {
 	List	   *cookedConstraints = NIL;
 	TupleDesc	tupleDesc;
@@ -2110,7 +2163,7 @@ AddRelationNewConstraints(Relation rel,
 		cooked->skip_validation = false;
 		cooked->is_local = is_local;
 		cooked->inhcount = is_local ? 0 : 1;
-		cooked->is_only = is_only;
+		cooked->is_no_inherit = false;
 		cookedConstraints = lappend(cookedConstraints, cooked);
 	}
 
@@ -2178,7 +2231,8 @@ AddRelationNewConstraints(Relation rel,
 			 * what ATAddCheckConstraint wants.)
 			 */
 			if (MergeWithExistingConstraint(rel, ccname, expr,
-								allow_merge, is_local, is_only))
+											allow_merge, is_local,
+											cdef->is_no_inherit))
 				continue;
 		}
 		else
@@ -2225,7 +2279,7 @@ AddRelationNewConstraints(Relation rel,
 		 * OK, store it.
 		 */
 		StoreRelCheck(rel, ccname, expr, !cdef->skip_validation, is_local,
-					  is_local ? 0 : 1, is_only);
+					  is_local ? 0 : 1, cdef->is_no_inherit);
 
 		numchecks++;
 
@@ -2237,7 +2291,7 @@ AddRelationNewConstraints(Relation rel,
 		cooked->skip_validation = cdef->skip_validation;
 		cooked->is_local = is_local;
 		cooked->inhcount = is_local ? 0 : 1;
-		cooked->is_only = is_only;
+		cooked->is_no_inherit = cdef->is_no_inherit;
 		cookedConstraints = lappend(cookedConstraints, cooked);
 	}
 
@@ -2266,7 +2320,7 @@ AddRelationNewConstraints(Relation rel,
 static bool
 MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
 							bool allow_merge, bool is_local,
-							bool is_only)
+							bool is_no_inherit)
 {
 	bool		found;
 	Relation	conDesc;
@@ -2322,8 +2376,8 @@ MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
 			tup = heap_copytuple(tup);
 			con = (Form_pg_constraint) GETSTRUCT(tup);
 
-			/* If the constraint is "only" then cannot merge */
-			if (con->conisonly)
+			/* If the constraint is "no inherit" then cannot merge */
+			if (con->connoinherit)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("constraint \"%s\" conflicts with non-inherited constraint on relation \"%s\"",
@@ -2333,15 +2387,15 @@ MergeWithExistingConstraint(Relation rel, char *ccname, Node *expr,
 				con->conislocal = true;
 			else
 				con->coninhcount++;
-			if (is_only)
+			if (is_no_inherit)
 			{
 				Assert(is_local);
-				con->conisonly = true;
+				con->connoinherit = true;
 			}
 			/* OK to update the tuple */
 			ereport(NOTICE,
-					(errmsg("merging constraint \"%s\" with inherited definition",
-							ccname)));
+			   (errmsg("merging constraint \"%s\" with inherited definition",
+					   ccname)));
 			simple_heap_update(conDesc, &tup->t_self, tup);
 			CatalogUpdateIndexes(conDesc, tup);
 			break;
@@ -2424,10 +2478,11 @@ cookDefault(ParseState *pstate,
 	/*
 	 * Transform raw parsetree to executable expression.
 	 */
-	expr = transformExpr(pstate, raw_default);
+	expr = transformExpr(pstate, raw_default, EXPR_KIND_COLUMN_DEFAULT);
 
 	/*
-	 * Make sure default expr does not refer to any vars.
+	 * Make sure default expr does not refer to any vars (we need this check
+	 * since the pstate includes the target table).
 	 */
 	if (contain_var_clause(expr))
 		ereport(ERROR,
@@ -2435,28 +2490,15 @@ cookDefault(ParseState *pstate,
 			  errmsg("cannot use column references in default expression")));
 
 	/*
+	 * transformExpr() should have already rejected subqueries, aggregates,
+	 * and window functions, based on the EXPR_KIND_ for a default expression.
+	 *
 	 * It can't return a set either.
 	 */
 	if (expression_returns_set(expr))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("default expression must not return a set")));
-
-	/*
-	 * No subplans or aggregates, either...
-	 */
-	if (pstate->p_hasSubLinks)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot use subquery in default expression")));
-	if (pstate->p_hasAggs)
-		ereport(ERROR,
-				(errcode(ERRCODE_GROUPING_ERROR),
-			 errmsg("cannot use aggregate function in default expression")));
-	if (pstate->p_hasWindowFuncs)
-		ereport(ERROR,
-				(errcode(ERRCODE_WINDOWING_ERROR),
-				 errmsg("cannot use window function in default expression")));
 
 	/*
 	 * Coerce the expression to the correct type and typmod, if given. This
@@ -2508,7 +2550,7 @@ cookConstraint(ParseState *pstate,
 	/*
 	 * Transform raw parsetree to executable expression.
 	 */
-	expr = transformExpr(pstate, raw_constraint);
+	expr = transformExpr(pstate, raw_constraint, EXPR_KIND_CHECK_CONSTRAINT);
 
 	/*
 	 * Make sure it yields a boolean result.
@@ -2521,29 +2563,14 @@ cookConstraint(ParseState *pstate,
 	assign_expr_collations(pstate, expr);
 
 	/*
-	 * Make sure no outside relations are referred to.
+	 * Make sure no outside relations are referred to (this is probably dead
+	 * code now that add_missing_from is history).
 	 */
 	if (list_length(pstate->p_rtable) != 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 			errmsg("only table \"%s\" can be referenced in check constraint",
 				   relname)));
-
-	/*
-	 * No subplans or aggregates, either...
-	 */
-	if (pstate->p_hasSubLinks)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot use subquery in check constraint")));
-	if (pstate->p_hasAggs)
-		ereport(ERROR,
-				(errcode(ERRCODE_GROUPING_ERROR),
-			   errmsg("cannot use aggregate function in check constraint")));
-	if (pstate->p_hasWindowFuncs)
-		ereport(ERROR,
-				(errcode(ERRCODE_WINDOWING_ERROR),
-				 errmsg("cannot use window function in check constraint")));
 
 	return expr;
 }

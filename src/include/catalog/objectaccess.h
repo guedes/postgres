@@ -3,7 +3,7 @@
  *
  *		Object access hooks.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  */
 
@@ -15,7 +15,7 @@
  * performing certain actions on a SQL object.	This is intended as
  * infrastructure for security or logging pluggins.
  *
- * OAT_POST_CREATE should be invoked just after the the object is created.
+ * OAT_POST_CREATE should be invoked just after the object is created.
  * Typically, this is done after inserting the primary catalog records and
  * associated dependencies.
  *
@@ -31,15 +31,28 @@ typedef enum ObjectAccessType
 } ObjectAccessType;
 
 /*
+ * Arguments of OAT_POST_CREATE event
+ */
+typedef struct
+{
+	/*
+	 * This flag informs extensions whether the context of this creation
+	 * is invoked by user's operations, or not. E.g, it shall be dealt
+	 * as internal stuff on toast tables or indexes due to type changes.
+	 */
+	bool		is_internal;
+} ObjectAccessPostCreate;
+
+/*
  * Arguments of OAT_DROP event
  */
 typedef struct
 {
 	/*
-	 * Flags to inform extensions the context of this deletion.
-	 * Also see PERFORM_DELETION_* in dependency.h
+	 * Flags to inform extensions the context of this deletion. Also see
+	 * PERFORM_DELETION_* in dependency.h
 	 */
-	int		dropflags;
+	int			dropflags;
 } ObjectAccessDrop;
 
 /*

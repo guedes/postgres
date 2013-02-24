@@ -4,7 +4,7 @@
  *	  private declarations for GiST -- declarations related to the
  *	  internal implementation of GiST, not the public API
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/gist_private.h
@@ -167,7 +167,7 @@ typedef GISTScanOpaqueData *GISTScanOpaque;
 #define XLOG_GIST_PAGE_SPLIT		0x30
  /* #define XLOG_GIST_INSERT_COMPLETE	 0x40 */	/* not used anymore */
 #define XLOG_GIST_CREATE_INDEX		0x50
-#define XLOG_GIST_PAGE_DELETE		0x60
+ /* #define XLOG_GIST_PAGE_DELETE		 0x60 */	/* not used anymore */
 
 typedef struct gistxlogPageUpdate
 {
@@ -211,12 +211,6 @@ typedef struct gistxlogPage
 	int			num;			/* number of index tuples following */
 } gistxlogPage;
 
-typedef struct gistxlogPageDelete
-{
-	RelFileNode node;
-	BlockNumber blkno;
-} gistxlogPageDelete;
-
 /* SplitedPageLayout - gistSplit function result */
 typedef struct SplitedPageLayout
 {
@@ -254,20 +248,21 @@ typedef struct GISTInsertStack
 	struct GISTInsertStack *parent;
 } GISTInsertStack;
 
+/* Working state and results for multi-column split logic in gistsplit.c */
 typedef struct GistSplitVector
 {
-	GIST_SPLITVEC splitVector;	/* to/from PickSplit method */
+	GIST_SPLITVEC splitVector;	/* passed to/from user PickSplit method */
 
 	Datum		spl_lattr[INDEX_MAX_KEYS];		/* Union of subkeys in
-												 * spl_left */
+												 * splitVector.spl_left */
 	bool		spl_lisnull[INDEX_MAX_KEYS];
 
 	Datum		spl_rattr[INDEX_MAX_KEYS];		/* Union of subkeys in
-												 * spl_right */
+												 * splitVector.spl_right */
 	bool		spl_risnull[INDEX_MAX_KEYS];
 
-	bool	   *spl_equiv;		/* equivalent tuples which can be freely
-								 * distributed between left and right pages */
+	bool	   *spl_dontcare;	/* flags tuples which could go to either side
+								 * of the split for zero penalty */
 } GistSplitVector;
 
 typedef struct
@@ -326,7 +321,10 @@ typedef struct
 	/* is this buffer queued for emptying? */
 	bool		queuedForEmptying;
 
-	struct GISTBufferingInsertStack *path;
+	/* is this a temporary copy, not in the hash table? */
+	bool		isTemp;
+
+	int			level;			/* 0 == leaf */
 } GISTNodeBuffer;
 
 /*
@@ -335,7 +333,7 @@ typedef struct
  */
 #define LEVEL_HAS_BUFFERS(nlevel, gfbb) \
 	((nlevel) != 0 && (nlevel) % (gfbb)->levelStep == 0 && \
-	 (nlevel) != (gfbb)->rootitem->level)
+	 (nlevel) != (gfbb)->rootlevel)
 
 /* Is specified buffer at least half-filled (should be queued for emptying)? */
 #define BUFFER_HALF_FILLED(nodeBuffer, gfbb) \
@@ -348,26 +346,6 @@ typedef struct
  */
 #define BUFFER_OVERFLOWED(nodeBuffer, gfbb) \
 	((nodeBuffer)->blocksCount > (gfbb)->pagesPerBuffer)
-
-/*
- * Extended GISTInsertStack for buffering GiST index build.
- */
-typedef struct GISTBufferingInsertStack
-{
-	/* current page */
-	BlockNumber blkno;
-
-	/* offset of the downlink in the parent page, that points to this page */
-	OffsetNumber downlinkoffnum;
-
-	/* pointer to parent */
-	struct GISTBufferingInsertStack *parent;
-
-	int			refCount;
-
-	/* level number */
-	int			level;
-} GISTBufferingInsertStack;
 
 /*
  * Data structure with general information about build buffers.
@@ -413,8 +391,8 @@ typedef struct GISTBuildBuffers
 	int			loadedBuffersCount;		/* # of entries in loadedBuffers */
 	int			loadedBuffersLen;		/* allocated size of loadedBuffers */
 
-	/* A path item that points to the current root node */
-	GISTBufferingInsertStack *rootitem;
+	/* Level of the current root node (= height of the index tree - 1) */
+	int			rootlevel;
 } GISTBuildBuffers;
 
 /*
@@ -425,7 +403,7 @@ typedef struct GiSTOptions
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int			fillfactor;		/* page fill factor in percent (0..100) */
 	int			bufferingModeOffset;	/* use buffering build? */
-}	GiSTOptions;
+} GiSTOptions;
 
 /* gist.c */
 extern Datum gistbuildempty(PG_FUNCTION_ARGS);
@@ -447,7 +425,8 @@ typedef struct
 
 extern bool gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
 				Buffer buffer,
-				IndexTuple *itup, int ntup, OffsetNumber oldoffnum,
+				IndexTuple *itup, int ntup,
+				OffsetNumber oldoffnum, BlockNumber *newblkno,
 				Buffer leftchildbuf,
 				List **splitinfo,
 				bool markleftchild);
@@ -522,7 +501,7 @@ extern void gistdentryinit(GISTSTATE *giststate, int nkey, GISTENTRY *e,
 extern float gistpenalty(GISTSTATE *giststate, int attno,
 			GISTENTRY *key1, bool isNull1,
 			GISTENTRY *key2, bool isNull2);
-extern void gistMakeUnionItVec(GISTSTATE *giststate, IndexTuple *itvec, int len, int startkey,
+extern void gistMakeUnionItVec(GISTSTATE *giststate, IndexTuple *itvec, int len,
 				   Datum *attr, bool *isnull);
 extern bool gistKeyIsEQ(GISTSTATE *giststate, int attno, Datum a, Datum b);
 extern void gistDeCompressAtt(GISTSTATE *giststate, Relation r, IndexTuple tuple, Page p,
@@ -533,7 +512,7 @@ extern void gistMakeUnionKey(GISTSTATE *giststate, int attno,
 				 GISTENTRY *entry2, bool isnull2,
 				 Datum *dst, bool *dstisnull);
 
-extern XLogRecPtr GetXLogRecPtrForTemp(void);
+extern XLogRecPtr gistGetFakeLSN(Relation rel);
 
 /* gistvacuum.c */
 extern Datum gistbulkdelete(PG_FUNCTION_ARGS);
@@ -542,21 +521,19 @@ extern Datum gistvacuumcleanup(PG_FUNCTION_ARGS);
 /* gistsplit.c */
 extern void gistSplitByKey(Relation r, Page page, IndexTuple *itup,
 			   int len, GISTSTATE *giststate,
-			   GistSplitVector *v, GistEntryVector *entryvec,
+			   GistSplitVector *v,
 			   int attno);
 
 /* gistbuild.c */
 extern Datum gistbuild(PG_FUNCTION_ARGS);
 extern void gistValidateBufferingOption(char *value);
-extern void gistDecreasePathRefcount(GISTBufferingInsertStack *path);
 
 /* gistbuildbuffers.c */
 extern GISTBuildBuffers *gistInitBuildBuffers(int pagesPerBuffer, int levelStep,
 					 int maxLevel);
 extern GISTNodeBuffer *gistGetNodeBuffer(GISTBuildBuffers *gfbb,
 				  GISTSTATE *giststate,
-				  BlockNumber blkno, OffsetNumber downlinkoffnum,
-				  GISTBufferingInsertStack *parent);
+				  BlockNumber blkno, int level);
 extern void gistPushItupToNodeBuffer(GISTBuildBuffers *gfbb,
 						 GISTNodeBuffer *nodeBuffer, IndexTuple item);
 extern bool gistPopItupFromNodeBuffer(GISTBuildBuffers *gfbb,
@@ -564,7 +541,7 @@ extern bool gistPopItupFromNodeBuffer(GISTBuildBuffers *gfbb,
 extern void gistFreeBuildBuffers(GISTBuildBuffers *gfbb);
 extern void gistRelocateBuildBuffersOnSplit(GISTBuildBuffers *gfbb,
 								GISTSTATE *giststate, Relation r,
-								GISTBufferingInsertStack *path, Buffer buffer,
+								int level, Buffer buffer,
 								List *splitinfo);
 extern void gistUnloadNodeBuffers(GISTBuildBuffers *gfbb);
 

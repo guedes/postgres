@@ -3,7 +3,7 @@
  * auth.c
  *	  Routines to handle network authentication
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -145,7 +145,7 @@ static int	pg_krb5_recvauth(Port *port);
 #include <com_err.h>
 #endif
 /*
- * Various krb5 state which is not connection specfic, and a flag to
+ * Various krb5 state which is not connection specific, and a flag to
  * indicate whether we have initialised it yet.
  */
 static int	pg_krb5_initialised;
@@ -316,8 +316,8 @@ ClientAuthentication(Port *port)
 	/*
 	 * Get the authentication method to use for this frontend/database
 	 * combination.  Note: we do not parse the file at this point; this has
-	 * already been done elsewhere.  hba.c dropped an error message
-	 * into the server logfile if parsing the hba config file failed.
+	 * already been done elsewhere.  hba.c dropped an error message into the
+	 * server logfile if parsing the hba config file failed.
 	 */
 	hba_getauthmethod(port);
 
@@ -1098,8 +1098,6 @@ pg_GSS_recvauth(Port *port)
 			/*
 			 * Negotiation generated data to be sent to the client.
 			 */
-			OM_uint32	lmin_s;
-
 			elog(DEBUG4, "sending GSS response token of length %u",
 				 (unsigned int) port->gss->outbuf.length);
 
@@ -1110,8 +1108,6 @@ pg_GSS_recvauth(Port *port)
 
 		if (maj_stat != GSS_S_COMPLETE && maj_stat != GSS_S_CONTINUE_NEEDED)
 		{
-			OM_uint32	lmin_s;
-
 			gss_delete_sec_context(&lmin_s, &port->gss->ctx, GSS_C_NO_BUFFER);
 			pg_GSS_error(ERROR,
 					   gettext_noop("accepting GSS security context failed"),
@@ -1365,10 +1361,10 @@ pg_SSPI_recvauth(Port *port)
 		}
 
 		/*
-		 * Overwrite the current context with the one we just received.
-		 * If sspictx is NULL it was the first loop and we need to allocate
-		 * a buffer for it. On subsequent runs, we can just overwrite the
-		 * buffer contents since the size does not change.
+		 * Overwrite the current context with the one we just received. If
+		 * sspictx is NULL it was the first loop and we need to allocate a
+		 * buffer for it. On subsequent runs, we can just overwrite the buffer
+		 * contents since the size does not change.
 		 */
 		if (sspictx == NULL)
 		{
@@ -1437,8 +1433,8 @@ pg_SSPI_recvauth(Port *port)
 
 	if (!GetTokenInformation(token, TokenUser, NULL, 0, &retlen) && GetLastError() != 122)
 		ereport(ERROR,
-			 (errmsg_internal("could not get token user size: error code %lu",
-							  GetLastError())));
+			(errmsg_internal("could not get token user size: error code %lu",
+							 GetLastError())));
 
 	tokenuser = malloc(retlen);
 	if (tokenuser == NULL)
@@ -1453,8 +1449,8 @@ pg_SSPI_recvauth(Port *port)
 	if (!LookupAccountSid(NULL, tokenuser->User.Sid, accountname, &accountnamesize,
 						  domainname, &domainnamesize, &accountnameuse))
 		ereport(ERROR,
-			  (errmsg_internal("could not look up account SID: error code %lu",
-							   GetLastError())));
+			(errmsg_internal("could not look up account SID: error code %lu",
+							 GetLastError())));
 
 	free(tokenuser);
 
@@ -1600,9 +1596,9 @@ ident_inet(hbaPort *port)
 	const SockAddr remote_addr = port->raddr;
 	const SockAddr local_addr = port->laddr;
 	char		ident_user[IDENT_USERNAME_MAX + 1];
-	pgsocket	sock_fd,		/* File descriptor for socket on which we talk
+	pgsocket	sock_fd;		/* File descriptor for socket on which we talk
 								 * to Ident */
-				rc;				/* Return code from a locally called function */
+	int			rc;				/* Return code from a locally called function */
 	bool		ident_return;
 	char		remote_addr_s[NI_MAXHOST];
 	char		remote_port[NI_MAXSERV];
@@ -2041,8 +2037,7 @@ InitializeLDAPConnection(Port *port, LDAP **ldap)
 	{
 #ifndef WIN32
 		ereport(LOG,
-				(errmsg("could not initialize LDAP: error code %d",
-						errno)));
+				(errmsg("could not initialize LDAP: %m")));
 #else
 		ereport(LOG,
 				(errmsg("could not initialize LDAP: error code %d",
@@ -2055,7 +2050,7 @@ InitializeLDAPConnection(Port *port, LDAP **ldap)
 	{
 		ldap_unbind(*ldap);
 		ereport(LOG,
-		  (errmsg("could not set LDAP protocol version: error code %d", r)));
+		  (errmsg("could not set LDAP protocol version: %s", ldap_err2string(r))));
 		return STATUS_ERROR;
 	}
 
@@ -2108,7 +2103,7 @@ InitializeLDAPConnection(Port *port, LDAP **ldap)
 		{
 			ldap_unbind(*ldap);
 			ereport(LOG,
-			 (errmsg("could not start LDAP TLS session: error code %d", r)));
+			 (errmsg("could not start LDAP TLS session: %s", ldap_err2string(r))));
 			return STATUS_ERROR;
 		}
 	}
@@ -2166,6 +2161,7 @@ CheckLDAPAuth(Port *port)
 		char	   *attributes[2];
 		char	   *dn;
 		char	   *c;
+		int			count;
 
 		/*
 		 * Disallow any characters that we would otherwise need to escape,
@@ -2197,8 +2193,8 @@ CheckLDAPAuth(Port *port)
 		if (r != LDAP_SUCCESS)
 		{
 			ereport(LOG,
-					(errmsg("could not perform initial LDAP bind for ldapbinddn \"%s\" on server \"%s\": error code %d",
-						  port->hba->ldapbinddn, port->hba->ldapserver, r)));
+					(errmsg("could not perform initial LDAP bind for ldapbinddn \"%s\" on server \"%s\": %s",
+						  port->hba->ldapbinddn, port->hba->ldapserver, ldap_err2string(r))));
 			return STATUS_ERROR;
 		}
 
@@ -2213,7 +2209,7 @@ CheckLDAPAuth(Port *port)
 
 		r = ldap_search_s(ldap,
 						  port->hba->ldapbasedn,
-						  LDAP_SCOPE_SUBTREE,
+						  port->hba->ldapscope,
 						  filter,
 						  attributes,
 						  0,
@@ -2222,23 +2218,27 @@ CheckLDAPAuth(Port *port)
 		if (r != LDAP_SUCCESS)
 		{
 			ereport(LOG,
-					(errmsg("could not search LDAP for filter \"%s\" on server \"%s\": error code %d",
-							filter, port->hba->ldapserver, r)));
+					(errmsg("could not search LDAP for filter \"%s\" on server \"%s\": %s",
+							filter, port->hba->ldapserver, ldap_err2string(r))));
 			pfree(filter);
 			return STATUS_ERROR;
 		}
 
-		if (ldap_count_entries(ldap, search_message) != 1)
+		count = ldap_count_entries(ldap, search_message);
+		if (count != 1)
 		{
-			if (ldap_count_entries(ldap, search_message) == 0)
+			if (count == 0)
 				ereport(LOG,
-						(errmsg("LDAP search failed for filter \"%s\" on server \"%s\": no such user",
-								filter, port->hba->ldapserver)));
+						(errmsg("LDAP user \"%s\" does not exist", port->user_name),
+						 errdetail("LDAP search for filter \"%s\" on server \"%s\" returned no entries.",
+								   filter, port->hba->ldapserver)));
 			else
 				ereport(LOG,
-						(errmsg("LDAP search failed for filter \"%s\" on server \"%s\": user is not unique (%ld matches)",
-								filter, port->hba->ldapserver,
-						  (long) ldap_count_entries(ldap, search_message))));
+						(errmsg("LDAP user \"%s\" is not unique", port->user_name),
+						 errdetail_plural("LDAP search for filter \"%s\" on server \"%s\" returned %d entry.",
+										  "LDAP search for filter \"%s\" on server \"%s\" returned %d entries.",
+										  count,
+										  filter, port->hba->ldapserver, count)));
 
 			pfree(filter);
 			ldap_msgfree(search_message);
@@ -2310,8 +2310,8 @@ CheckLDAPAuth(Port *port)
 	if (r != LDAP_SUCCESS)
 	{
 		ereport(LOG,
-				(errmsg("LDAP login failed for user \"%s\" on server \"%s\": error code %d",
-						fulluser, port->hba->ldapserver, r)));
+				(errmsg("LDAP login failed for user \"%s\" on server \"%s\": %s",
+						fulluser, port->hba->ldapserver, ldap_err2string(r))));
 		pfree(fulluser);
 		return STATUS_ERROR;
 	}

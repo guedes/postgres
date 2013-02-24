@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/command.c
  */
@@ -99,7 +99,7 @@ HandleSlashCmds(PsqlScanState scan_state,
 	char	   *cmd;
 	char	   *arg;
 
-	psql_assert(scan_state);
+	Assert(scan_state != NULL);
 
 	/* Parse off the command name */
 	cmd = psql_scan_slash_command(scan_state);
@@ -110,7 +110,7 @@ HandleSlashCmds(PsqlScanState scan_state,
 	if (status == PSQL_CMD_UNKNOWN)
 	{
 		if (pset.cur_cmd_interactive)
-			fprintf(stderr, _("Invalid command \\%s. Try \\? for help.\n"), cmd);
+			psql_error("Invalid command \\%s. Try \\? for help.\n", cmd);
 		else
 			psql_error("invalid command \\%s\n", cmd);
 		status = PSQL_CMD_ERROR;
@@ -314,6 +314,7 @@ exec_command(const char *cmd,
 			else
 				printf(_("You are connected to database \"%s\" as user \"%s\" on host \"%s\" at port \"%s\".\n"),
 					   db, PQuser(pset.db), host, PQport(pset.db));
+			printSSLInfo();
 		}
 	}
 
@@ -488,6 +489,9 @@ exec_command(const char *cmd,
 					success = listExtensionContents(pattern);
 				else
 					success = listExtensions(pattern);
+				break;
+			case 'y':			/* Event Triggers */
+				success = listEventTriggers(pattern, show_verbose);
 				break;
 			default:
 				status = PSQL_CMD_UNKNOWN;
@@ -727,7 +731,7 @@ exec_command(const char *cmd,
 		free(fname);
 	}
 
-	/* \g means send query */
+	/* \g [filename] -- send query, optionally with output to file/pipe */
 	else if (strcmp(cmd, "g") == 0)
 	{
 		char	   *fname = psql_scan_slash_option(scan_state,
@@ -741,6 +745,22 @@ exec_command(const char *cmd,
 			pset.gfname = pg_strdup(fname);
 		}
 		free(fname);
+		status = PSQL_CMD_SEND;
+	}
+
+	/* \gset [prefix] -- send query and store result into variables */
+	else if (strcmp(cmd, "gset") == 0)
+	{
+		char	   *prefix = psql_scan_slash_option(scan_state,
+													OT_NORMAL, NULL, false);
+
+		if (prefix)
+			pset.gset_prefix = prefix;
+		else
+		{
+			/* we must set a non-NULL prefix to trigger storing */
+			pset.gset_prefix = pg_strdup("");
+		}
 		status = PSQL_CMD_SEND;
 	}
 
@@ -777,7 +797,7 @@ exec_command(const char *cmd,
 
 	/* \i and \ir include files */
 	else if (strcmp(cmd, "i") == 0 || strcmp(cmd, "include") == 0
-			|| strcmp(cmd, "ir") == 0 || strcmp(cmd, "include_relative") == 0)
+		   || strcmp(cmd, "ir") == 0 || strcmp(cmd, "include_relative") == 0)
 	{
 		char	   *fname = psql_scan_slash_option(scan_state,
 												   OT_NORMAL, NULL, true);
@@ -789,7 +809,7 @@ exec_command(const char *cmd,
 		}
 		else
 		{
-			bool	include_relative;
+			bool		include_relative;
 
 			include_relative = (strcmp(cmd, "ir") == 0
 								|| strcmp(cmd, "include_relative") == 0);
@@ -900,7 +920,7 @@ exec_command(const char *cmd,
 
 		if (strcmp(pw1, pw2) != 0)
 		{
-			fprintf(stderr, _("Passwords didn't match.\n"));
+			psql_error("Passwords didn't match.\n");
 			success = false;
 		}
 		else
@@ -918,7 +938,7 @@ exec_command(const char *cmd,
 
 			if (!encrypted_password)
 			{
-				fprintf(stderr, _("Password encryption failed.\n"));
+				psql_error("Password encryption failed.\n");
 				success = false;
 			}
 			else
@@ -1039,6 +1059,17 @@ exec_command(const char *cmd,
 		char	   *fname = psql_scan_slash_option(scan_state,
 												   OT_NORMAL, NULL, true);
 
+#if defined(WIN32) && !defined(__CYGWIN__)
+
+		/*
+		 * XXX This does not work for all terminal environments or for output
+		 * containing non-ASCII characters; see comments in simple_prompt().
+		 */
+#define DEVTTY	"con"
+#else
+#define DEVTTY	"/dev/tty"
+#endif
+
 		expand_tilde(&fname);
 		/* This scrolls off the screen when using /dev/tty */
 		success = saveHistory(fname ? fname : DEVTTY, -1, false, false);
@@ -1103,18 +1134,18 @@ exec_command(const char *cmd,
 	else if (strcmp(cmd, "setenv") == 0)
 	{
 		char	   *envvar = psql_scan_slash_option(scan_state,
-												  OT_NORMAL, NULL, false);
+													OT_NORMAL, NULL, false);
 		char	   *envval = psql_scan_slash_option(scan_state,
-												  OT_NORMAL, NULL, false);
+													OT_NORMAL, NULL, false);
 
 		if (!envvar)
 		{
 			psql_error("\\%s: missing required argument\n", cmd);
 			success = false;
 		}
-		else if (strchr(envvar,'=') != NULL)
+		else if (strchr(envvar, '=') != NULL)
 		{
-			psql_error("\\%s: environment variable name must not contain '='\n",
+			psql_error("\\%s: environment variable name must not contain \"=\"\n",
 					   cmd);
 			success = false;
 		}
@@ -1127,16 +1158,17 @@ exec_command(const char *cmd,
 		else
 		{
 			/* Set variable to the value of the next argument */
-			int         len = strlen(envvar) + strlen(envval) + 1;
+			int			len = strlen(envvar) + strlen(envval) + 1;
 			char	   *newval = pg_malloc(len + 1);
 
-			snprintf(newval, len+1, "%s=%s", envvar, envval);
+			snprintf(newval, len + 1, "%s=%s", envvar, envval);
 			putenv(newval);
 			success = true;
+
 			/*
-			 * Do not free newval here, it will screw up the environment
-			 * if you do. See putenv man page for details. That means we
-			 * leak a bit of memory here, but not enough to worry about.
+			 * Do not free newval here, it will screw up the environment if
+			 * you do. See putenv man page for details. That means we leak a
+			 * bit of memory here, but not enough to worry about.
 			 */
 		}
 		free(envvar);
@@ -1436,7 +1468,7 @@ exec_command(const char *cmd,
 		while ((value = psql_scan_slash_option(scan_state,
 											   OT_NORMAL, NULL, true)))
 		{
-			fprintf(stderr, "+ opt(%d) = |%s|\n", i++, value);
+			psql_error("+ opt(%d) = |%s|\n", i++, value);
 			free(value);
 		}
 	}
@@ -1467,7 +1499,7 @@ prompt_for_password(const char *username)
 	{
 		char	   *prompt_text;
 
-		prompt_text = malloc(strlen(username) + 100);
+		prompt_text = pg_malloc(strlen(username) + 100);
 		snprintf(prompt_text, strlen(username) + 100,
 				 _("Password for user %s: "), username);
 		result = simple_prompt(prompt_text, 100, false);
@@ -1507,6 +1539,18 @@ do_connect(char *dbname, char *user, char *host, char *port)
 			   *n_conn;
 	char	   *password = NULL;
 
+	if (!o_conn && (!dbname || !user || !host || !port))
+	{
+		/*
+		 *	We don't know the supplied connection parameters and don't want
+		 *	to connect to the wrong database by using defaults, so require
+		 *	all parameters to be specified.
+		 */
+		psql_error("All connection parameters must be supplied because no "
+				   "database connection exists\n");
+		return false;
+	}
+
 	if (!dbname)
 		dbname = PQdb(o_conn);
 	if (!user)
@@ -1532,7 +1576,7 @@ do_connect(char *dbname, char *user, char *host, char *port)
 	}
 	else if (o_conn && user && strcmp(PQuser(o_conn), user) == 0)
 	{
-		password = strdup(PQpass(o_conn));
+		password = pg_strdup(PQpass(o_conn));
 	}
 
 	while (true)
@@ -1592,7 +1636,7 @@ do_connect(char *dbname, char *user, char *host, char *port)
 
 			/* pset.db is left unmodified */
 			if (o_conn)
-				fputs(_("Previous connection kept\n"), stderr);
+				psql_error("Previous connection kept\n");
 		}
 		else
 		{
@@ -1677,8 +1721,8 @@ connection_warnings(bool in_startup)
 		else if (in_startup)
 			printf("%s (%s)\n", pset.progname, PG_VERSION);
 
-		if (pset.sversion / 100 != client_ver / 100)
-			printf(_("WARNING: %s version %d.%d, server version %d.%d.\n"
+		if (pset.sversion / 100 > client_ver / 100)
+			printf(_("WARNING: %s major version %d.%d, server major version %d.%d.\n"
 					 "         Some psql features might not work.\n"),
 				 pset.progname, client_ver / 10000, (client_ver / 100) % 100,
 				   pset.sversion / 10000, (pset.sversion / 100) % 100);
@@ -1802,7 +1846,7 @@ editFile(const char *fname, int lineno)
 	char	   *sys;
 	int			result;
 
-	psql_assert(fname);
+	Assert(fname != NULL);
 
 	/* Find an editor to use */
 	editorName = getenv("PSQL_EDITOR");
@@ -2038,22 +2082,24 @@ process_file(char *filename, bool single_txn, bool use_relative_path)
 	PGresult   *res;
 
 	if (!filename)
-		return EXIT_FAILURE;
-
-	if (strcmp(filename, "-") != 0)
+	{
+		fd = stdin;
+		filename = NULL;
+	}
+	else if (strcmp(filename, "-") != 0)
 	{
 		canonicalize_path(filename);
 
 		/*
 		 * If we were asked to resolve the pathname relative to the location
-		 * of the currently executing script, and there is one, and this is
-		 * a relative pathname, then prepend all but the last pathname
-		 * component of the current script to this pathname.
+		 * of the currently executing script, and there is one, and this is a
+		 * relative pathname, then prepend all but the last pathname component
+		 * of the current script to this pathname.
 		 */
-		if (use_relative_path && pset.inputfile && !is_absolute_path(filename)
-			&& !has_drive_prefix(filename))
+		if (use_relative_path && pset.inputfile &&
+			!is_absolute_path(filename) && !has_drive_prefix(filename))
 		{
-			snprintf(relpath, MAXPGPATH, "%s", pset.inputfile);
+			strlcpy(relpath, pset.inputfile, sizeof(relpath));
 			get_parent_directory(relpath);
 			join_path_components(relpath, relpath, filename);
 			canonicalize_path(relpath);
@@ -2145,6 +2191,9 @@ _align2string(enum printFormat in)
 		case PRINT_LATEX:
 			return "latex";
 			break;
+		case PRINT_LATEX_LONGTABLE:
+			return "latex-longtable";
+			break;
 		case PRINT_TROFF_MS:
 			return "troff-ms";
 			break;
@@ -2158,7 +2207,7 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 {
 	size_t		vallen = 0;
 
-	psql_assert(param);
+	Assert(param != NULL);
 
 	if (value)
 		vallen = strlen(value);
@@ -2178,6 +2227,8 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 			popt->topt.format = PRINT_HTML;
 		else if (pg_strncasecmp("latex", value, vallen) == 0)
 			popt->topt.format = PRINT_LATEX;
+		else if (pg_strncasecmp("latex-longtable", value, vallen) == 0)
+			popt->topt.format = PRINT_LATEX_LONGTABLE;
 		else if (pg_strncasecmp("troff-ms", value, vallen) == 0)
 			popt->topt.format = PRINT_TROFF_MS;
 		else
@@ -2407,12 +2458,12 @@ do_pset(const char *param, const char *value, printQueryOpt *popt, bool quiet)
 	else if (strcmp(param, "footer") == 0)
 	{
 		if (value)
-			popt->default_footer = ParseVariableBool(value);
+			popt->topt.default_footer = ParseVariableBool(value);
 		else
-			popt->default_footer = !popt->default_footer;
+			popt->topt.default_footer = !popt->topt.default_footer;
 		if (!quiet)
 		{
-			if (popt->default_footer)
+			if (popt->topt.default_footer)
 				puts(_("Default footer is on."));
 			else
 				puts(_("Default footer is off."));
@@ -2471,10 +2522,10 @@ do_shell(const char *command)
 		sys = pg_malloc(strlen(shellName) + 16);
 #ifndef WIN32
 		sprintf(sys,
-		/* See EDITOR handling comment for an explaination */
+		/* See EDITOR handling comment for an explanation */
 				"exec %s", shellName);
 #else
-		/* See EDITOR handling comment for an explaination */
+		/* See EDITOR handling comment for an explanation */
 		sprintf(sys, SYSTEMQUOTE "\"%s\"" SYSTEMQUOTE, shellName);
 #endif
 		result = system(sys);

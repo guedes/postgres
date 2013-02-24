@@ -453,18 +453,8 @@
      The type <type>integer</type> is the common choice, as it offers
      the best balance between range, storage size, and performance.
      The <type>smallint</type> type is generally only used if disk
-     space is at a premium.  The <type>bigint</type> type should only
-     be used if the range of the <type>integer</type> type is insufficient,
-     because the latter is definitely faster.
-    </para>
-
-    <para>
-     On very minimal operating systems the <type>bigint</type> type
-     might not function correctly, because it relies on compiler support
-     for eight-byte integers.  On such machines, <type>bigint</type>
-     acts the same as <type>integer</type>, but still takes up eight
-     bytes of storage.  (We are not aware of any modern
-     platform where this is the case.)
+     space is at a premium.  The <type>bigint</type> type is designed to be
+     used when the range of the <type>integer</type> type is insufficient.
     </para>
 
     <para>
@@ -568,7 +558,7 @@ NUMERIC
      type is more akin to <type>varchar(<replaceable>n</>)</type>
      than to <type>char(<replaceable>n</>)</type>.)  The actual storage
      requirement is two bytes for each group of four decimal digits,
-     plus five to eight bytes overhead.
+     plus three to eight bytes overhead.
     </para>
 
     <indexterm>
@@ -830,6 +820,20 @@ ALTER SEQUENCE <replaceable class="parameter">tablename</replaceable>_<replaceab
     </para>
 
     <note>
+      <para>
+        Because <type>smallserial</type>, <type>serial</type> and
+        <type>bigserial</type> are implemented using sequences, there may
+        be "holes" or gaps in the sequence of values which appears in the
+        column, even if no rows are ever deleted.  A value allocated
+        from the sequence is still "used up" even if a row containing that
+        value is never successfully inserted into the table column.  This
+        may happen, for example, if the inserting transaction rolls back.
+        See <literal>nextval()</literal> in <xref linkend="functions-sequence">
+        for details.
+      </para>
+    </note>
+
+    <note>
      <para>
       Prior to <productname>PostgreSQL</productname> 7.3, <type>serial</type>
       implied <literal>UNIQUE</literal>.  This is no longer automatic.  If
@@ -856,7 +860,7 @@ ALTER SEQUENCE <replaceable class="parameter">tablename</replaceable>_<replaceab
      column.  <type>bigserial</type> should be used if you anticipate
      the use of more than 2<superscript>31</> identifiers over the
      lifetime of the table. The type names <type>smallserial</type> and
-     <type>serial2</type> also work the same way, execpt that they
+     <type>serial2</type> also work the same way, except that they
      create a <type>smallint</type> column.
     </para>
 
@@ -1511,6 +1515,9 @@ SELECT E'\\xDEADBEEF';
     linkend="datatype-datetime-table">.  The operations available
     on these data types are described in
     <xref linkend="functions-datetime">.
+    Dates are counted according to the Gregorian calendar, even in
+    years before that calendar was introduced (see <xref
+    linkend="datetime-units-history"> for more information).
    </para>
 
     <table id="datatype-datetime-table">
@@ -1804,7 +1811,7 @@ MINUTE TO SECOND
         </row>
         <row>
          <entry>J2451187</entry>
-         <entry>Julian day</entry>
+         <entry>Julian date</entry>
         </row>
         <row>
          <entry>January 8, 99 BC</entry>
@@ -2203,28 +2210,38 @@ January 8 04:05:06 1999 PST
        </thead>
        <tbody>
         <row>
-         <entry>ISO</entry>
-         <entry>ISO 8601/SQL standard</entry>
-         <entry>1997-12-17 07:37:16-08</entry>
+         <entry><literal>ISO</literal></entry>
+         <entry>ISO 8601, SQL standard</entry>
+         <entry><literal>1997-12-17 07:37:16-08</literal></entry>
         </row>
         <row>
-         <entry>SQL</entry>
+         <entry><literal>SQL</literal></entry>
          <entry>traditional style</entry>
-         <entry>12/17/1997 07:37:16.00 PST</entry>
+         <entry><literal>12/17/1997 07:37:16.00 PST</literal></entry>
         </row>
         <row>
-         <entry>POSTGRES</entry>
+         <entry><literal>Postgres</literal></entry>
          <entry>original style</entry>
-         <entry>Wed Dec 17 07:37:16 1997 PST</entry>
+         <entry><literal>Wed Dec 17 07:37:16 1997 PST</literal></entry>
         </row>
         <row>
-         <entry>German</entry>
+         <entry><literal>German</literal></entry>
          <entry>regional style</entry>
-         <entry>17.12.1997 07:37:16.00 PST</entry>
+         <entry><literal>17.12.1997 07:37:16.00 PST</literal></entry>
         </row>
        </tbody>
       </tgroup>
      </table>
+
+    <note>
+     <para>
+      ISO 8601 specifies the use of uppercase letter <literal>T</> to separate
+      the date and time.  <productname>PostgreSQL</> accepts that format on
+      input, but on output it uses a space rather than <literal>T</>, as shown
+      above.  This is for readability and for consistency with RFC 3339 as
+      well as some other database systems.
+     </para>
+    </note>
 
     <para>
      In the <acronym>SQL</acronym> and POSTGRES styles, day appears before
@@ -2232,8 +2249,7 @@ January 8 04:05:06 1999 PST
      before day.
      (See <xref linkend="datatype-datetime-input">
      for how this setting also affects interpretation of input values.)
-     <xref linkend="datatype-datetime-output2-table"> shows an
-     example.
+     <xref linkend="datatype-datetime-output2-table"> shows examples.
     </para>
 
      <table id="datatype-datetime-output2-table">
@@ -2250,29 +2266,33 @@ January 8 04:05:06 1999 PST
         <row>
          <entry><literal>SQL, DMY</></entry>
          <entry><replaceable>day</replaceable>/<replaceable>month</replaceable>/<replaceable>year</replaceable></entry>
-         <entry>17/12/1997 15:37:16.00 CET</entry>
+         <entry><literal>17/12/1997 15:37:16.00 CET</literal></entry>
         </row>
         <row>
          <entry><literal>SQL, MDY</></entry>
          <entry><replaceable>month</replaceable>/<replaceable>day</replaceable>/<replaceable>year</replaceable></entry>
-         <entry>12/17/1997 07:37:16.00 PST</entry>
+         <entry><literal>12/17/1997 07:37:16.00 PST</literal></entry>
         </row>
         <row>
          <entry><literal>Postgres, DMY</></entry>
          <entry><replaceable>day</replaceable>/<replaceable>month</replaceable>/<replaceable>year</replaceable></entry>
-         <entry>Wed 17 Dec 07:37:16 1997 PST</entry>
+         <entry><literal>Wed 17 Dec 07:37:16 1997 PST</literal></entry>
         </row>
        </tbody>
       </tgroup>
      </table>
 
     <para>
-     The date/time styles can be selected by the user using the
+     The date/time style can be selected by the user using the
      <command>SET datestyle</command> command, the <xref
      linkend="guc-datestyle"> parameter in the
      <filename>postgresql.conf</filename> configuration file, or the
      <envar>PGDATESTYLE</envar> environment variable on the server or
-     client.  The formatting function <function>to_char</function>
+     client.
+    </para>
+
+    <para>
+     The formatting function <function>to_char</function>
      (see <xref linkend="functions-formatting">) is also available as
      a more flexible way to format date/time output.
     </para>
@@ -2755,23 +2775,6 @@ P <optional> <replaceable>years</>-<replaceable>months</>-<replaceable>days</> <
        </tgroup>
     </table>
 
-   </sect2>
-
-   <sect2 id="datatype-datetime-internals">
-    <title>Internals</title>
-
-    <para>
-     <productname>PostgreSQL</productname> uses Julian dates
-     for all date/time calculations. This has the useful property of correctly
-     calculating dates from 4713 BC
-     to far into the future, using the assumption that the length of the
-     year is 365.2425 days.
-    </para>
-
-    <para>
-     Date conventions before the 19th century make for interesting reading,
-     but are not consistent enough to warrant coding into a date/time handler.
-    </para>
    </sect2>
 
   </sect1>
@@ -3593,7 +3596,7 @@ SELECT person.name, holidays.num_weeks FROM person, holidays
      as the canonical form for MAC addresses, and specifies the first
      form (with colons) as the bit-reversed notation, so that
      08-00-2b-01-02-03 = 01:00:4D:08:04:0C.  This convention is widely
-     ignored nowadays, and it is only relevant for obsolete network
+     ignored nowadays, and it is relevant only for obsolete network
      protocols (such as Token Ring).  PostgreSQL makes no provisions
      for bit reversal, and all accepted formats use the canonical LSB
      order.
@@ -4183,10 +4186,13 @@ SET xmloption TO { DOCUMENT | CONTENT };
    </indexterm>
 
    <para>
-    The <type>json</type> data type can be used to store JSON data.  Such
+    The <type>json</type> data type can be used to store JSON (JavaScript
+    Object Notation) data, as specified in <ulink
+    url="http://www.ietf.org/rfc/rfc4627.txt">RFC 4627</ulink>.  Such
     data can also be stored as <type>text</type>, but the
     <type>json</type> data type has the advantage of checking that each
-    stored value is a valid JSON value.
+    stored value is a valid JSON value.  There are also related support
+    functions available; see <xref linkend="functions-json">.
    </para>
 
    <para>

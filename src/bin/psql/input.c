@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/input.c
  */
@@ -288,7 +288,8 @@ initializeInput(int flags)
 
 		if (histfile == NULL)
 		{
-			char * envhist;
+			char	   *envhist;
+
 			envhist = getenv("PSQL_HISTORY");
 			if (envhist != NULL && strlen(envhist) > 0)
 				histfile = envhist;

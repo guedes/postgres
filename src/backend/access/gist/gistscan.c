@@ -4,7 +4,7 @@
  *	  routines to manage scans on GiST index relations
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -124,7 +124,7 @@ gistbeginscan(PG_FUNCTION_ARGS)
 	so->giststate = giststate;
 	giststate->tempCxt = createTempGistContext();
 	so->queue = NULL;
-	so->queueCxt = giststate->scanCxt;			/* see gistrescan */
+	so->queueCxt = giststate->scanCxt;	/* see gistrescan */
 
 	/* workspaces with size dependent on numberOfOrderBys: */
 	so->tmpTreeItem = palloc(GSTIHDRSZ + sizeof(double) * scan->numberOfOrderBys);

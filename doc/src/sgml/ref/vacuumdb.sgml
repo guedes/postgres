@@ -23,26 +23,30 @@ PostgreSQL documentation
   <cmdsynopsis>
    <command>vacuumdb</command>
    <arg rep="repeat"><replaceable>connection-option</replaceable></arg>
-   <group><arg>--full</arg><arg>-f</arg></group>
-   <group><arg>--freeze</arg><arg>-F</arg></group>
-   <group><arg>--verbose</arg><arg>-v</arg></group>
-   <group><arg>--analyze</arg><arg>-z</arg></group>
-   <group><arg>--analyze-only</arg><arg>-Z</arg></group>
-   <arg>--table | -t <replaceable>table</replaceable>
-    <arg>( <replaceable class="parameter">column</replaceable> [,...] )</arg>
+   <arg rep="repeat"><replaceable>option</replaceable></arg>
+
+   <arg choice="plain" rep="repeat">
+    <arg choice="opt">
+     <group choice="plain">
+      <arg choice="plain"><option>--table</option></arg>
+      <arg choice="plain"><option>-t</option></arg>
+     </group>
+     <replaceable>table</replaceable>
+     <arg choice="opt">( <replaceable class="parameter">column</replaceable> [,...] )</arg>
+    </arg>
    </arg>
-   <arg><replaceable>dbname</replaceable></arg>
+
+   <arg choice="opt"><replaceable>dbname</replaceable></arg>
   </cmdsynopsis>
 
   <cmdsynopsis>
    <command>vacuumdb</command>
    <arg rep="repeat"><replaceable>connection-option</replaceable></arg>
-   <group><arg>--full</arg><arg>-f</arg></group>
-   <group><arg>--freeze</arg><arg>-F</arg></group>
-   <group><arg>--verbose</arg><arg>-v</arg></group>
-   <group><arg>--analyze</arg><arg>-z</arg></group>
-   <group><arg>--analyze-only</arg><arg>-Z</arg></group>
-   <group><arg>--all</arg><arg>-a</arg></group>
+   <arg rep="repeat"><replaceable>option</replaceable></arg>
+   <group choice="plain">
+    <arg choice="plain"><option>--all</option></arg>
+    <arg choice="plain"><option>-a</option></arg>
+   </group>
   </cmdsynopsis>
  </refsynopsisdiv>
 
@@ -147,6 +151,8 @@ PostgreSQL documentation
         Clean or analyze <replaceable class="parameter">table</replaceable> only.
         Column names can be specified only in conjunction with
         the <option>--analyze</option> or <option>--analyze-only</option> options.
+        Multiple tables can be vacuumed by writing multiple
+        <option>-t</> switches.
        </para>
        <tip>
         <para>

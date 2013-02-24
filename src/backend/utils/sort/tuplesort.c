@@ -87,7 +87,7 @@
  * above.  Nonetheless, with large workMem we can have many tapes.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -100,6 +100,7 @@
 
 #include <limits.h>
 
+#include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "catalog/index.h"
 #include "commands/tablespace.h"
@@ -195,8 +196,8 @@ typedef enum
 #define TAPE_BUFFER_OVERHEAD		(BLCKSZ * 3)
 #define MERGE_BUFFER_SIZE			(BLCKSZ * 32)
 
-typedef int	(*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
-	Tuplesortstate *state);
+typedef int (*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
+												Tuplesortstate *state);
 
 /*
  * Private state of a Tuplesort operation.
@@ -226,7 +227,7 @@ struct Tuplesortstate
 	 * <0, 0, >0 according as a<b, a=b, a>b.  The API must match
 	 * qsort_arg_comparator.
 	 */
-	SortTupleComparator	comparetup;
+	SortTupleComparator comparetup;
 
 	/*
 	 * Function to copy a supplied input tuple into palloc'd space and set up
@@ -275,6 +276,7 @@ struct Tuplesortstate
 	SortTuple  *memtuples;		/* array of SortTuple structs */
 	int			memtupcount;	/* number of tuples currently present */
 	int			memtupsize;		/* allocated length of memtuples array */
+	bool		growmemtuples;	/* memtuples' growth still underway? */
 
 	/*
 	 * While building initial runs, this is the current output run number
@@ -342,7 +344,13 @@ struct Tuplesortstate
 	 * tuplesort_begin_heap and used only by the MinimalTuple routines.
 	 */
 	TupleDesc	tupDesc;
-	SortSupport	sortKeys;		/* array of length nKeys */
+	SortSupport sortKeys;		/* array of length nKeys */
+
+	/*
+	 * This variable is shared by the single-key MinimalTuple case and the
+	 * Datum case (which both use qsort_ssup()).  Otherwise it's NULL.
+	 */
+	SortSupport onlyKey;
 
 	/*
 	 * These variables are specific to the CLUSTER case; they are set by
@@ -356,6 +364,7 @@ struct Tuplesortstate
 	 * These variables are specific to the IndexTuple case; they are set by
 	 * tuplesort_begin_index_xxx and used only by the IndexTuple routines.
 	 */
+	Relation	heapRel;		/* table the index is being built on */
 	Relation	indexRel;		/* index being built */
 
 	/* These are specific to the index_btree subcase: */
@@ -364,9 +373,6 @@ struct Tuplesortstate
 
 	/* These are specific to the index_hash subcase: */
 	uint32		hash_mask;		/* mask for sortable part of hash code */
-
-	/* This is initialized when, and only when, there's just one key. */
-	SortSupport	onlyKey;
 
 	/*
 	 * These variables are specific to the Datum case; they are set by
@@ -497,7 +503,11 @@ static void reversedirection_datum(Tuplesortstate *state);
 static void free_sort_tuple(Tuplesortstate *state, SortTuple *stup);
 
 /*
- * Special version of qsort, just for SortTuple objects.
+ * Special versions of qsort just for SortTuple objects.  qsort_tuple() sorts
+ * any variant of SortTuples, using the appropriate comparetup function.
+ * qsort_ssup() is specialized for the case where the comparetup function
+ * reduces to ApplySortComparator(), that is single-key MinimalTuple sorts
+ * and Datum sorts.
  */
 #include "qsort_tuple.c"
 
@@ -562,6 +572,7 @@ tuplesort_begin_common(int workMem, bool randomAccess)
 
 	state->memtupcount = 0;
 	state->memtupsize = 1024;	/* initial guess */
+	state->growmemtuples = true;
 	state->memtuples = (SortTuple *) palloc(state->memtupsize * sizeof(SortTuple));
 
 	USEMEM(state, GetMemoryChunkSpace(state->memtuples));
@@ -627,7 +638,7 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 
 	for (i = 0; i < nkeys; i++)
 	{
-		SortSupport	sortKey = state->sortKeys + i;
+		SortSupport sortKey = state->sortKeys + i;
 
 		AssertArg(attNums[i] != 0);
 		AssertArg(sortOperators[i] != 0);
@@ -710,7 +721,8 @@ tuplesort_begin_cluster(TupleDesc tupDesc,
 }
 
 Tuplesortstate *
-tuplesort_begin_index_btree(Relation indexRel,
+tuplesort_begin_index_btree(Relation heapRel,
+							Relation indexRel,
 							bool enforceUnique,
 							int workMem, bool randomAccess)
 {
@@ -741,6 +753,7 @@ tuplesort_begin_index_btree(Relation indexRel,
 	state->readtup = readtup_index;
 	state->reversedirection = reversedirection_index_btree;
 
+	state->heapRel = heapRel;
 	state->indexRel = indexRel;
 	state->indexScanKey = _bt_mkscankey_nodata(indexRel);
 	state->enforceUnique = enforceUnique;
@@ -751,7 +764,8 @@ tuplesort_begin_index_btree(Relation indexRel,
 }
 
 Tuplesortstate *
-tuplesort_begin_index_hash(Relation indexRel,
+tuplesort_begin_index_hash(Relation heapRel,
+						   Relation indexRel,
 						   uint32 hash_mask,
 						   int workMem, bool randomAccess)
 {
@@ -776,6 +790,7 @@ tuplesort_begin_index_hash(Relation indexRel,
 	state->readtup = readtup_index;
 	state->reversedirection = reversedirection_index_hash;
 
+	state->heapRel = heapRel;
 	state->indexRel = indexRel;
 
 	state->hash_mask = hash_mask;
@@ -947,37 +962,110 @@ tuplesort_end(Tuplesortstate *state)
 
 /*
  * Grow the memtuples[] array, if possible within our memory constraint.
- * Return TRUE if able to enlarge the array, FALSE if not.
+ * Return TRUE if we were able to enlarge the array, FALSE if not.
  *
- * At each increment we double the size of the array.  When we are short
- * on memory we could consider smaller increases, but because availMem
- * moves around with tuple addition/removal, this might result in thrashing.
- * Small increases in the array size are likely to be pretty inefficient.
+ * Normally, at each increment we double the size of the array.  When we no
+ * longer have enough memory to do that, we attempt one last, smaller increase
+ * (and then clear the growmemtuples flag so we don't try any more).  That
+ * allows us to use allowedMem as fully as possible; sticking to the pure
+ * doubling rule could result in almost half of allowedMem going unused.
+ * Because availMem moves around with tuple addition/removal, we need some
+ * rule to prevent making repeated small increases in memtupsize, which would
+ * just be useless thrashing.  The growmemtuples flag accomplishes that and
+ * also prevents useless recalculations in this function.
  */
 static bool
 grow_memtuples(Tuplesortstate *state)
 {
+	int			newmemtupsize;
+	int			memtupsize = state->memtupsize;
+	long		memNowUsed = state->allowedMem - state->availMem;
+
+	/* Forget it if we've already maxed out memtuples, per comment above */
+	if (!state->growmemtuples)
+		return false;
+
+	/* Select new value of memtupsize */
+	if (memNowUsed <= state->availMem)
+	{
+		/*
+		 * It is surely safe to double memtupsize if we've used no more than
+		 * half of allowedMem.
+		 *
+		 * Note: it might seem that we need to worry about memtupsize * 2
+		 * overflowing an int, but the MaxAllocSize clamp applied below
+		 * ensures the existing memtupsize can't be large enough for that.
+		 */
+		newmemtupsize = memtupsize * 2;
+	}
+	else
+	{
+		/*
+		 * This will be the last increment of memtupsize.  Abandon doubling
+		 * strategy and instead increase as much as we safely can.
+		 *
+		 * To stay within allowedMem, we can't increase memtupsize by more
+		 * than availMem / sizeof(SortTuple) elements.	In practice, we want
+		 * to increase it by considerably less, because we need to leave some
+		 * space for the tuples to which the new array slots will refer.  We
+		 * assume the new tuples will be about the same size as the tuples
+		 * we've already seen, and thus we can extrapolate from the space
+		 * consumption so far to estimate an appropriate new size for the
+		 * memtuples array.  The optimal value might be higher or lower than
+		 * this estimate, but it's hard to know that in advance.
+		 *
+		 * This calculation is safe against enlarging the array so much that
+		 * LACKMEM becomes true, because the memory currently used includes
+		 * the present array; thus, there would be enough allowedMem for the
+		 * new array elements even if no other memory were currently used.
+		 *
+		 * We do the arithmetic in float8, because otherwise the product of
+		 * memtupsize and allowedMem could overflow.  (A little algebra shows
+		 * that grow_ratio must be less than 2 here, so we are not risking
+		 * integer overflow this way.)	Any inaccuracy in the result should be
+		 * insignificant; but even if we computed a completely insane result,
+		 * the checks below will prevent anything really bad from happening.
+		 */
+		double		grow_ratio;
+
+		grow_ratio = (double) state->allowedMem / (double) memNowUsed;
+		newmemtupsize = (int) (memtupsize * grow_ratio);
+
+		/* We won't make any further enlargement attempts */
+		state->growmemtuples = false;
+	}
+
+	/* Must enlarge array by at least one element, else report failure */
+	if (newmemtupsize <= memtupsize)
+		goto noalloc;
+
+	/*
+	 * On a 64-bit machine, allowedMem could be more than MaxAllocSize.  Clamp
+	 * to ensure our request won't be rejected by palloc.
+	 */
+	if ((Size) newmemtupsize >= MaxAllocSize / sizeof(SortTuple))
+	{
+		newmemtupsize = (int) (MaxAllocSize / sizeof(SortTuple));
+		state->growmemtuples = false;	/* can't grow any more */
+	}
+
 	/*
 	 * We need to be sure that we do not cause LACKMEM to become true, else
-	 * the space management algorithm will go nuts.  We assume here that the
-	 * memory chunk overhead associated with the memtuples array is constant
-	 * and so there will be no unexpected addition to what we ask for.	(The
-	 * minimum array size established in tuplesort_begin_common is large
-	 * enough to force palloc to treat it as a separate chunk, so this
-	 * assumption should be good.  But let's check it.)
+	 * the space management algorithm will go nuts.  The code above should
+	 * never generate a dangerous request, but to be safe, check explicitly
+	 * that the array growth fits within availMem.	(We could still cause
+	 * LACKMEM if the memory chunk overhead associated with the memtuples
+	 * array were to increase.	That shouldn't happen with any sane value of
+	 * allowedMem, because at any array size large enough to risk LACKMEM,
+	 * palloc would be treating both old and new arrays as separate chunks.
+	 * But we'll check LACKMEM explicitly below just in case.)
 	 */
-	if (state->availMem <= (long) (state->memtupsize * sizeof(SortTuple)))
-		return false;
+	if (state->availMem < (long) ((newmemtupsize - memtupsize) * sizeof(SortTuple)))
+		goto noalloc;
 
-	/*
-	 * On a 64-bit machine, allowedMem could be high enough to get us into
-	 * trouble with MaxAllocSize, too.
-	 */
-	if ((Size) (state->memtupsize * 2) >= MaxAllocSize / sizeof(SortTuple))
-		return false;
-
+	/* OK, do it */
 	FREEMEM(state, GetMemoryChunkSpace(state->memtuples));
-	state->memtupsize *= 2;
+	state->memtupsize = newmemtupsize;
 	state->memtuples = (SortTuple *)
 		repalloc(state->memtuples,
 				 state->memtupsize * sizeof(SortTuple));
@@ -985,6 +1073,11 @@ grow_memtuples(Tuplesortstate *state)
 	if (LACKMEM(state))
 		elog(ERROR, "unexpected out-of-memory situation during sort");
 	return true;
+
+noalloc:
+	/* If for any reason we didn't realloc, shut off future attempts */
+	state->growmemtuples = false;
+	return false;
 }
 
 /*
@@ -1168,6 +1261,7 @@ puttuple_common(Tuplesortstate *state, SortTuple *tuple)
 			{
 				/* new tuple <= top of the heap, so we can discard it */
 				free_sort_tuple(state, tuple);
+				CHECK_FOR_INTERRUPTS();
 			}
 			else
 			{
@@ -1235,6 +1329,7 @@ tuplesort_performsort(Tuplesortstate *state)
 			 */
 			if (state->memtupcount > 1)
 			{
+				/* Can we use the single-key sort function? */
 				if (state->onlyKey != NULL)
 					qsort_ssup(state->memtuples, state->memtupcount,
 							   state->onlyKey);
@@ -2431,6 +2526,7 @@ make_bounded_heap(Tuplesortstate *state)
 		{
 			/* New tuple would just get thrown out, so skip it */
 			free_sort_tuple(state, &state->memtuples[i]);
+			CHECK_FOR_INTERRUPTS();
 		}
 		else
 		{
@@ -2518,6 +2614,8 @@ tuplesort_heap_insert(Tuplesortstate *state, SortTuple *tuple,
 	memtuples = state->memtuples;
 	Assert(state->memtupcount < state->memtupsize);
 
+	CHECK_FOR_INTERRUPTS();
+
 	/*
 	 * Sift-up the new entry, per Knuth 5.2.3 exercise 16. Note that Knuth is
 	 * using 1-based array indexes, not 0-based.
@@ -2549,6 +2647,9 @@ tuplesort_heap_siftup(Tuplesortstate *state, bool checkIndex)
 
 	if (--state->memtupcount <= 0)
 		return;
+
+	CHECK_FOR_INTERRUPTS();
+
 	n = state->memtupcount;
 	tuple = &memtuples[n];		/* tuple that must be reinserted */
 	i = 0;						/* i is where the "hole" is */
@@ -2670,7 +2771,7 @@ inlineApplySortFunction(FmgrInfo *sortFunction, int sk_flags, Oid collation,
 static int
 comparetup_heap(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
 {
-	SortSupport	sortKey = state->sortKeys;
+	SortSupport sortKey = state->sortKeys;
 	HeapTupleData ltup;
 	HeapTupleData rtup;
 	TupleDesc	tupDesc;
@@ -2791,7 +2892,7 @@ readtup_heap(Tuplesortstate *state, SortTuple *stup,
 static void
 reversedirection_heap(Tuplesortstate *state)
 {
-	SortSupport	sortKey = state->sortKeys;
+	SortSupport sortKey = state->sortKeys;
 	int			nkey;
 
 	for (nkey = 0; nkey < state->nKeys; nkey++, sortKey++)
@@ -3054,7 +3155,6 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 	 * they *must* get compared at some stage of the sort --- otherwise the
 	 * sort algorithm wouldn't have checked whether one must appear before the
 	 * other.
-	 *
 	 */
 	if (state->enforceUnique && !equal_hasnull)
 	{
@@ -3062,9 +3162,10 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 		bool		isnull[INDEX_MAX_KEYS];
 
 		/*
-		 * Some rather brain-dead implementations of qsort (such as the one in QNX 4)
-		 * will sometimes call the comparison routine to compare a value to itself,
-		 * but we always use our own implementation, which does not.
+		 * Some rather brain-dead implementations of qsort (such as the one in
+		 * QNX 4) will sometimes call the comparison routine to compare a
+		 * value to itself, but we always use our own implementation, which
+		 * does not.
 		 */
 		Assert(tuple1 != tuple2);
 
@@ -3075,13 +3176,15 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 						RelationGetRelationName(state->indexRel)),
 				 errdetail("Key %s is duplicated.",
 						   BuildIndexValueDescription(state->indexRel,
-													  values, isnull))));
+													  values, isnull)),
+				 errtableconstraint(state->heapRel,
+								 RelationGetRelationName(state->indexRel))));
 	}
 
 	/*
 	 * If key values are equal, we sort on ItemPointer.  This does not affect
-	 * validity of the finished index, but it may be useful to have index scans
-	 * in physical order.
+	 * validity of the finished index, but it may be useful to have index
+	 * scans in physical order.
 	 */
 	{
 		BlockNumber blk1 = ItemPointerGetBlockNumber(&tuple1->t_tid);
@@ -3126,8 +3229,8 @@ comparetup_index_hash(const SortTuple *a, const SortTuple *b,
 
 	/*
 	 * If hash values are equal, we sort on ItemPointer.  This does not affect
-	 * validity of the finished index, but it may be useful to have index scans
-	 * in physical order.
+	 * validity of the finished index, but it may be useful to have index
+	 * scans in physical order.
 	 */
 	tuple1 = (IndexTuple) a->tuple;
 	tuple2 = (IndexTuple) b->tuple;
@@ -3236,9 +3339,9 @@ reversedirection_index_hash(Tuplesortstate *state)
 static int
 comparetup_datum(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
 {
-	/* Not currently needed */
-	elog(ERROR, "comparetup_datum() should not be called");
-	return 0;
+	return ApplySortComparator(a->datum1, a->isnull1,
+							   b->datum1, b->isnull1,
+							   state->onlyKey);
 }
 
 static void

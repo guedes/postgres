@@ -1,6 +1,5 @@
 CREATE EXTENSION dblink;
 CREATE TABLE foo(f1 int, f2 text, f3 text[], primary key (f1,f2));
-NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "foo_pkey" for table "foo"
 INSERT INTO foo VALUES (0,'a','{"a0","b0","c0"}');
 INSERT INTO foo VALUES (1,'b','{"a1","b1","c1"}');
 INSERT INTO foo VALUES (2,'c','{"a2","b2","c2"}');
@@ -56,7 +55,6 @@ ERROR:  invalid attribute number 4
 -- retest using a quoted and schema qualified table
 CREATE SCHEMA "MySchema";
 CREATE TABLE "MySchema"."Foo"(f1 int, f2 text, f3 text[], primary key (f1,f2));
-NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "Foo_pkey" for table "Foo"
 INSERT INTO "MySchema"."Foo" VALUES (0,'a','{"a0","b0","c0"}');
 -- list the primary key fields
 SELECT *
@@ -371,7 +369,7 @@ SELECT *
 FROM dblink('myconn','SELECT * FROM foobar',false) AS t(a int, b text, c text[])
 WHERE t.a > 7;
 NOTICE:  relation "foobar" does not exist
-CONTEXT:  Error occurred on dblink connection named "unnamed": could not execute query.
+CONTEXT:  Error occurred on dblink connection named "myconn": could not execute query.
  a | b | c 
 ---+---+---
 (0 rows)
@@ -494,7 +492,7 @@ SELECT dblink_close('myconn','rmt_foo_cursor');
 -- this should fail because there is no open transaction
 SELECT dblink_exec('myconn','DECLARE xact_test CURSOR FOR SELECT * FROM foo');
 ERROR:  DECLARE CURSOR can only be used in transaction blocks
-CONTEXT:  Error occurred on dblink connection named "unnamed": could not execute command.
+CONTEXT:  Error occurred on dblink connection named "myconn": could not execute command.
 -- reset remote transaction state
 SELECT dblink_exec('myconn','ABORT');
  dblink_exec 
@@ -785,8 +783,12 @@ SELECT dblink_disconnect('dtest1');
 
 -- test foreign data wrapper functionality
 CREATE USER dblink_regression_test;
-CREATE FOREIGN DATA WRAPPER postgresql;
-CREATE SERVER fdtest FOREIGN DATA WRAPPER postgresql OPTIONS (dbname 'contrib_regression');
+CREATE SERVER fdtest FOREIGN DATA WRAPPER dblink_fdw
+  OPTIONS (dbname 'contrib_regression');
+CREATE USER MAPPING FOR public SERVER fdtest
+  OPTIONS (server 'localhost');  -- fail, can't specify server here
+ERROR:  invalid option "server"
+HINT:  Valid options in this context are: user, password
 CREATE USER MAPPING FOR public SERVER fdtest;
 GRANT USAGE ON FOREIGN SERVER fdtest TO dblink_regression_test;
 GRANT EXECUTE ON FUNCTION dblink_connect_u(text, text) TO dblink_regression_test;
@@ -825,7 +827,6 @@ REVOKE EXECUTE ON FUNCTION dblink_connect_u(text, text) FROM dblink_regression_t
 DROP USER dblink_regression_test;
 DROP USER MAPPING FOR public SERVER fdtest;
 DROP SERVER fdtest;
-DROP FOREIGN DATA WRAPPER postgresql;
 -- test asynchronous notifications
 SELECT dblink_connect('dbname=contrib_regression');
  dblink_connect 
@@ -885,8 +886,6 @@ CREATE TEMP TABLE test_dropped
 	col2 INT NOT NULL DEFAULT 112,
 	col2b INT NOT NULL DEFAULT 113
 );
-NOTICE:  CREATE TABLE will create implicit sequence "test_dropped_id_seq" for serial column "test_dropped.id"
-NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_dropped_pkey" for table "test_dropped"
 INSERT INTO test_dropped VALUES(default);
 ALTER TABLE test_dropped
 	DROP COLUMN col1,

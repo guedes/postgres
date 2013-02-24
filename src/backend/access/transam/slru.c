@@ -38,7 +38,7 @@
  * by re-setting the page's page_dirty flag.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/slru.c
@@ -403,12 +403,6 @@ SimpleLruReadPage(SlruCtl ctl, int pageno, bool write_ok,
 		/* Acquire per-buffer lock (cannot deadlock, see notes at top) */
 		LWLockAcquire(shared->buffer_locks[slotno], LW_EXCLUSIVE);
 
-		/*
-		 * Temporarily mark page as recently-used to discourage
-		 * SlruSelectLRUPage from selecting it again for someone else.
-		 */
-		SlruRecentlyUsed(shared, slotno);
-
 		/* Release control lock while doing I/O */
 		LWLockRelease(shared->ControlLock);
 
@@ -537,7 +531,7 @@ SlruInternalWritePage(SlruCtl ctl, int slotno, SlruFlush fdata)
 		int			i;
 
 		for (i = 0; i < fdata->num_files; i++)
-			close(fdata->fd[i]);
+			CloseTransientFile(fdata->fd[i]);
 	}
 
 	/* Re-acquire control lock and update page state */
@@ -599,7 +593,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
 	 * SlruPhysicalWritePage).	Hence, if we are InRecovery, allow the case
 	 * where the file doesn't exist, and return zeroes instead.
 	 */
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
+	fd = OpenTransientFile(path, O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
 	if (fd < 0)
 	{
 		if (errno != ENOENT || !InRecovery)
@@ -620,7 +614,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
 	{
 		slru_errcause = SLRU_SEEK_FAILED;
 		slru_errno = errno;
-		close(fd);
+		CloseTransientFile(fd);
 		return false;
 	}
 
@@ -629,11 +623,11 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
 	{
 		slru_errcause = SLRU_READ_FAILED;
 		slru_errno = errno;
-		close(fd);
+		CloseTransientFile(fd);
 		return false;
 	}
 
-	if (close(fd))
+	if (CloseTransientFile(fd))
 	{
 		slru_errcause = SLRU_CLOSE_FAILED;
 		slru_errno = errno;
@@ -691,7 +685,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 		{
 			XLogRecPtr	this_lsn = shared->group_lsn[lsnindex++];
 
-			if (XLByteLT(max_lsn, this_lsn))
+			if (max_lsn < this_lsn)
 				max_lsn = this_lsn;
 		}
 
@@ -746,8 +740,8 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 		 * don't use O_EXCL or O_TRUNC or anything like that.
 		 */
 		SlruFileName(ctl, path, segno);
-		fd = BasicOpenFile(path, O_RDWR | O_CREAT | PG_BINARY,
-						   S_IRUSR | S_IWUSR);
+		fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY,
+							   S_IRUSR | S_IWUSR);
 		if (fd < 0)
 		{
 			slru_errcause = SLRU_OPEN_FAILED;
@@ -779,7 +773,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 		slru_errcause = SLRU_SEEK_FAILED;
 		slru_errno = errno;
 		if (!fdata)
-			close(fd);
+			CloseTransientFile(fd);
 		return false;
 	}
 
@@ -792,7 +786,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 		slru_errcause = SLRU_WRITE_FAILED;
 		slru_errno = errno;
 		if (!fdata)
-			close(fd);
+			CloseTransientFile(fd);
 		return false;
 	}
 
@@ -806,11 +800,11 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 		{
 			slru_errcause = SLRU_FSYNC_FAILED;
 			slru_errno = errno;
-			close(fd);
+			CloseTransientFile(fd);
 			return false;
 		}
 
-		if (close(fd))
+		if (CloseTransientFile(fd))
 		{
 			slru_errcause = SLRU_CLOSE_FAILED;
 			slru_errno = errno;
@@ -909,9 +903,12 @@ SlruSelectLRUPage(SlruCtl ctl, int pageno)
 	{
 		int			slotno;
 		int			cur_count;
-		int			bestslot;
-		int			best_delta;
-		int			best_page_number;
+		int			bestvalidslot = 0;	/* keep compiler quiet */
+		int			best_valid_delta = -1;
+		int			best_valid_page_number = 0; /* keep compiler quiet */
+		int			bestinvalidslot = 0;		/* keep compiler quiet */
+		int			best_invalid_delta = -1;
+		int			best_invalid_page_number = 0;		/* keep compiler quiet */
 
 		/* See if page already has a buffer assigned */
 		for (slotno = 0; slotno < shared->num_slots; slotno++)
@@ -922,8 +919,16 @@ SlruSelectLRUPage(SlruCtl ctl, int pageno)
 		}
 
 		/*
-		 * If we find any EMPTY slot, just select that one. Else locate the
-		 * least-recently-used slot to replace.
+		 * If we find any EMPTY slot, just select that one. Else choose a
+		 * victim page to replace.	We normally take the least recently used
+		 * valid page, but we will never take the slot containing
+		 * latest_page_number, even if it appears least recently used.	We
+		 * will select a slot that is already I/O busy only if there is no
+		 * other choice: a read-busy slot will not be least recently used once
+		 * the read finishes, and waiting for an I/O on a write-busy slot is
+		 * inferior to just picking some other slot.  Testing shows the slot
+		 * we pick instead will often be clean, allowing us to begin a read at
+		 * once.
 		 *
 		 * Normally the page_lru_count values will all be different and so
 		 * there will be a well-defined LRU page.  But since we allow
@@ -931,9 +936,6 @@ SlruSelectLRUPage(SlruCtl ctl, int pageno)
 		 * SimpleLruReadPage_ReadOnly(), it is possible that multiple pages
 		 * acquire the same lru_count values.  In that case we break ties by
 		 * choosing the furthest-back page.
-		 *
-		 * In no case will we select the slot containing latest_page_number
-		 * for replacement, even if it appears least recently used.
 		 *
 		 * Notice that this next line forcibly advances cur_lru_count to a
 		 * value that is certainly beyond any value that will be in the
@@ -944,9 +946,6 @@ SlruSelectLRUPage(SlruCtl ctl, int pageno)
 		 * multiple pages with the same lru_count.
 		 */
 		cur_count = (shared->cur_lru_count)++;
-		best_delta = -1;
-		bestslot = 0;			/* no-op, just keeps compiler quiet */
-		best_page_number = 0;	/* ditto */
 		for (slotno = 0; slotno < shared->num_slots; slotno++)
 		{
 			int			this_delta;
@@ -968,34 +967,57 @@ SlruSelectLRUPage(SlruCtl ctl, int pageno)
 				this_delta = 0;
 			}
 			this_page_number = shared->page_number[slotno];
-			if ((this_delta > best_delta ||
-				 (this_delta == best_delta &&
-				  ctl->PagePrecedes(this_page_number, best_page_number))) &&
-				this_page_number != shared->latest_page_number)
+			if (this_page_number == shared->latest_page_number)
+				continue;
+			if (shared->page_status[slotno] == SLRU_PAGE_VALID)
 			{
-				bestslot = slotno;
-				best_delta = this_delta;
-				best_page_number = this_page_number;
+				if (this_delta > best_valid_delta ||
+					(this_delta == best_valid_delta &&
+					 ctl->PagePrecedes(this_page_number,
+									   best_valid_page_number)))
+				{
+					bestvalidslot = slotno;
+					best_valid_delta = this_delta;
+					best_valid_page_number = this_page_number;
+				}
 			}
+			else
+			{
+				if (this_delta > best_invalid_delta ||
+					(this_delta == best_invalid_delta &&
+					 ctl->PagePrecedes(this_page_number,
+									   best_invalid_page_number)))
+				{
+					bestinvalidslot = slotno;
+					best_invalid_delta = this_delta;
+					best_invalid_page_number = this_page_number;
+				}
+			}
+		}
+
+		/*
+		 * If all pages (except possibly the latest one) are I/O busy, we'll
+		 * have to wait for an I/O to complete and then retry.	In that
+		 * unhappy case, we choose to wait for the I/O on the least recently
+		 * used slot, on the assumption that it was likely initiated first of
+		 * all the I/Os in progress and may therefore finish first.
+		 */
+		if (best_valid_delta < 0)
+		{
+			SimpleLruWaitIO(ctl, bestinvalidslot);
+			continue;
 		}
 
 		/*
 		 * If the selected page is clean, we're set.
 		 */
-		if (shared->page_status[bestslot] == SLRU_PAGE_VALID &&
-			!shared->page_dirty[bestslot])
-			return bestslot;
+		if (!shared->page_dirty[bestvalidslot])
+			return bestvalidslot;
 
 		/*
-		 * We need to wait for I/O.  Normal case is that it's dirty and we
-		 * must initiate a write, but it's possible that the page is already
-		 * write-busy, or in the worst case still read-busy.  In those cases
-		 * we wait for the existing I/O to complete.
+		 * Write the page.
 		 */
-		if (shared->page_status[bestslot] == SLRU_PAGE_VALID)
-			SlruInternalWritePage(ctl, bestslot, NULL);
-		else
-			SimpleLruWaitIO(ctl, bestslot);
+		SlruInternalWritePage(ctl, bestvalidslot, NULL);
 
 		/*
 		 * Now loop back and try again.  This is the easiest way of dealing
@@ -1056,7 +1078,7 @@ SimpleLruFlush(SlruCtl ctl, bool checkpoint)
 			ok = false;
 		}
 
-		if (close(fdata.fd[i]))
+		if (CloseTransientFile(fdata.fd[i]))
 		{
 			slru_errcause = SLRU_CLOSE_FAILED;
 			slru_errno = errno;
@@ -1146,20 +1168,20 @@ restart:;
 
 /*
  * SlruScanDirectory callback
- * 		This callback reports true if there's any segment prior to the one
- * 		containing the page passed as "data".
+ *		This callback reports true if there's any segment prior to the one
+ *		containing the page passed as "data".
  */
 bool
 SlruScanDirCbReportPresence(SlruCtl ctl, char *filename, int segpage, void *data)
 {
-	int		cutoffPage = *(int *) data;
+	int			cutoffPage = *(int *) data;
 
 	cutoffPage -= cutoffPage % SLRU_PAGES_PER_SEGMENT;
 
 	if (ctl->PagePrecedes(segpage, cutoffPage))
-		return true;	/* found one; don't iterate any more */
+		return true;			/* found one; don't iterate any more */
 
-	return false;	/* keep going */
+	return false;				/* keep going */
 }
 
 /*
@@ -1169,8 +1191,8 @@ SlruScanDirCbReportPresence(SlruCtl ctl, char *filename, int segpage, void *data
 static bool
 SlruScanDirCbDeleteCutoff(SlruCtl ctl, char *filename, int segpage, void *data)
 {
-	char	path[MAXPGPATH];
-	int		cutoffPage = *(int *) data;
+	char		path[MAXPGPATH];
+	int			cutoffPage = *(int *) data;
 
 	if (ctl->PagePrecedes(segpage, cutoffPage))
 	{
@@ -1180,7 +1202,7 @@ SlruScanDirCbDeleteCutoff(SlruCtl ctl, char *filename, int segpage, void *data)
 		unlink(path);
 	}
 
-	return false;	/* keep going */
+	return false;				/* keep going */
 }
 
 /*
@@ -1190,14 +1212,14 @@ SlruScanDirCbDeleteCutoff(SlruCtl ctl, char *filename, int segpage, void *data)
 bool
 SlruScanDirCbDeleteAll(SlruCtl ctl, char *filename, int segpage, void *data)
 {
-	char	path[MAXPGPATH];
+	char		path[MAXPGPATH];
 
 	snprintf(path, MAXPGPATH, "%s/%s", ctl->Dir, filename);
 	ereport(DEBUG2,
 			(errmsg("removing file \"%s\"", path)));
 	unlink(path);
 
-	return false;	/* keep going */
+	return false;				/* keep going */
 }
 
 /*

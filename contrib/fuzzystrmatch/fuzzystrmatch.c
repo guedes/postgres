@@ -6,7 +6,7 @@
  * Joe Conway <mail@joeconway.com>
  *
  * contrib/fuzzystrmatch/fuzzystrmatch.c
- * Copyright (c) 2001-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2013, PostgreSQL Global Development Group
  * ALL RIGHTS RESERVED;
  *
  * metaphone()
@@ -157,7 +157,7 @@ getcode(char c)
 /* These letters are passed through unchanged */
 #define NOCHANGE(c) (getcode(c) & 2)	/* FJMNR */
 
-/* These form dipthongs when preceding H */
+/* These form diphthongs when preceding H */
 #define AFFECTH(c)	(getcode(c) & 4)	/* CGPST */
 
 /* These make C and G soft */

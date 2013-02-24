@@ -4,7 +4,7 @@
  *	  Standard POSTGRES buffer page definitions.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/bufpage.h
@@ -83,6 +83,21 @@ typedef uint16 LocationIndex;
 
 
 /*
+ * For historical reasons, the 64-bit LSN value is stored as two 32-bit
+ * values.
+ */
+typedef struct
+{
+	uint32		xlogid;			/* high bits */
+	uint32		xrecoff;		/* low bits */
+} PageXLogRecPtr;
+
+#define PageXLogRecPtrGet(val) \
+	((uint64) (val).xlogid << 32 | (val).xrecoff)
+#define PageXLogRecPtrSet(ptr, lsn) \
+	((ptr).xlogid = (uint32) ((lsn) >> 32),	(ptr).xrecoff = (uint32) (lsn))
+
+/*
  * disk page organization
  *
  * space management information generic to any page
@@ -119,10 +134,11 @@ typedef uint16 LocationIndex;
  * On the high end, we can only support pages up to 32KB because lp_off/lp_len
  * are 15 bits.
  */
+
 typedef struct PageHeaderData
 {
 	/* XXX LSN is member of *any* block, not only page-organized ones */
-	XLogRecPtr	pd_lsn;			/* LSN: next byte after last byte of xlog
+	PageXLogRecPtr	pd_lsn;			/* LSN: next byte after last byte of xlog
 								 * record for last change to this page */
 	uint16		pd_tli;			/* least significant bits of the TimeLineID
 								 * containing the LSN */
@@ -311,12 +327,13 @@ typedef PageHeaderData *PageHeader;
 	  / sizeof(ItemIdData)))
 
 /*
- * Additional macros for access to page headers
+ * Additional macros for access to page headers. (Beware multiple evaluation
+ * of the arguments!)
  */
 #define PageGetLSN(page) \
-	(((PageHeader) (page))->pd_lsn)
+	PageXLogRecPtrGet(((PageHeader) (page))->pd_lsn)
 #define PageSetLSN(page, lsn) \
-	(((PageHeader) (page))->pd_lsn = (lsn))
+	PageXLogRecPtrSet(((PageHeader) (page))->pd_lsn, lsn)
 
 /* NOTE: only the 16 least significant bits are stored */
 #define PageGetTLI(page) \

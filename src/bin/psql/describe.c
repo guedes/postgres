@@ -6,13 +6,15 @@
  * with servers of versions 7.4 and up.  It's okay to omit irrelevant
  * information for an old server, but not to fail outright.
  *
- * Copyright (c) 2000-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2013, PostgreSQL Global Development Group
  *
  * src/bin/psql/describe.c
  */
 #include "postgres_fe.h"
 
 #include <ctype.h>
+
+#include "catalog/pg_default_acl.h"
 
 #include "common.h"
 #include "describe.h"
@@ -132,7 +134,7 @@ describeTablespaces(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80000)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support tablespaces.\n"),
+		psql_error("The server (version %d.%d) does not support tablespaces.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -142,15 +144,15 @@ describeTablespaces(const char *pattern, bool verbose)
 	if (pset.sversion >= 90200)
 		printfPQExpBuffer(&buf,
 						  "SELECT spcname AS \"%s\",\n"
-						  "  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
-						  "  pg_catalog.pg_tablespace_location(oid) AS \"%s\"",
+						"  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
+						"  pg_catalog.pg_tablespace_location(oid) AS \"%s\"",
 						  gettext_noop("Name"),
 						  gettext_noop("Owner"),
 						  gettext_noop("Location"));
 	else
 		printfPQExpBuffer(&buf,
 						  "SELECT spcname AS \"%s\",\n"
-						  "  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
+						"  pg_catalog.pg_get_userbyid(spcowner) AS \"%s\",\n"
 						  "  spclocation AS \"%s\"",
 						  gettext_noop("Name"),
 						  gettext_noop("Owner"),
@@ -219,13 +221,13 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 
 	if (strlen(functypes) != strspn(functypes, "antwS+"))
 	{
-		fprintf(stderr, _("\\df only takes [antwS+] as options\n"));
+		psql_error("\\df only takes [antwS+] as options\n");
 		return true;
 	}
 
 	if (showWindow && pset.sversion < 80400)
 	{
-		fprintf(stderr, _("\\df does not take a \"w\" option with server version %d.%d\n"),
+		psql_error("\\df does not take a \"w\" option with server version %d.%d\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -254,7 +256,7 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 						  "  WHEN p.proiswindow THEN '%s'\n"
 						  "  WHEN p.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype THEN '%s'\n"
 						  "  ELSE '%s'\n"
-						  "END as \"%s\"",
+						  " END as \"%s\"",
 						  gettext_noop("Result data type"),
 						  gettext_noop("Argument data types"),
 		/* translator: "agg" is short for "aggregate" */
@@ -328,15 +330,19 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 
 	if (verbose)
 		appendPQExpBuffer(&buf,
+						  ",\n CASE WHEN prosecdef THEN '%s' ELSE '%s' END AS \"%s\""
 						  ",\n CASE\n"
 						  "  WHEN p.provolatile = 'i' THEN '%s'\n"
 						  "  WHEN p.provolatile = 's' THEN '%s'\n"
 						  "  WHEN p.provolatile = 'v' THEN '%s'\n"
-						  "END as \"%s\""
+						  " END as \"%s\""
 				   ",\n  pg_catalog.pg_get_userbyid(p.proowner) as \"%s\",\n"
 						  "  l.lanname as \"%s\",\n"
 						  "  p.prosrc as \"%s\",\n"
 				  "  pg_catalog.obj_description(p.oid, 'pg_proc') as \"%s\"",
+						  gettext_noop("definer"),
+						  gettext_noop("invoker"),
+						  gettext_noop("Security"),
 						  gettext_noop("immutable"),
 						  gettext_noop("stable"),
 						  gettext_noop("volatile"),
@@ -774,7 +780,7 @@ permissionsList(const char *pattern)
 /*
  * \ddp
  *
- * List DefaultACLs.  The pattern can match either schema or role name.
+ * List Default ACLs.  The pattern can match either schema or role name.
  */
 bool
 listDefaultACLs(const char *pattern)
@@ -786,7 +792,7 @@ listDefaultACLs(const char *pattern)
 
 	if (pset.sversion < 90000)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support altering default privileges.\n"),
+		psql_error("The server (version %d.%d) does not support altering default privileges.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -796,13 +802,18 @@ listDefaultACLs(const char *pattern)
 	printfPQExpBuffer(&buf,
 			   "SELECT pg_catalog.pg_get_userbyid(d.defaclrole) AS \"%s\",\n"
 					  "  n.nspname AS \"%s\",\n"
-					  "  CASE d.defaclobjtype WHEN 'r' THEN '%s' WHEN 'S' THEN '%s' WHEN 'f' THEN '%s' END AS \"%s\",\n"
+					  "  CASE d.defaclobjtype WHEN '%c' THEN '%s' WHEN '%c' THEN '%s' WHEN '%c' THEN '%s' WHEN '%c' THEN '%s' END AS \"%s\",\n"
 					  "  ",
 					  gettext_noop("Owner"),
 					  gettext_noop("Schema"),
+					  DEFACLOBJ_RELATION,
 					  gettext_noop("table"),
+					  DEFACLOBJ_SEQUENCE,
 					  gettext_noop("sequence"),
+					  DEFACLOBJ_FUNCTION,
 					  gettext_noop("function"),
+					  DEFACLOBJ_TYPE,
+					  gettext_noop("type"),
 					  gettext_noop("Type"));
 
 	printACLColumn(&buf, "d.defaclacl");
@@ -910,7 +921,7 @@ objectDescription(const char *pattern, bool showSystem)
 
 		if (!showSystem && !pattern)
 			appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							  "      AND n.nspname <> 'information_schema'\n");
+							"      AND n.nspname <> 'information_schema'\n");
 
 		processSQLNamePattern(pset.db, &buf, pattern, true, false,
 							  "n.nspname", "o.opcname", NULL,
@@ -926,7 +937,7 @@ objectDescription(const char *pattern, bool showSystem)
 		/* Operator family descriptions */
 		appendPQExpBuffer(&buf,
 						  "UNION ALL\n"
-						  "  SELECT opf.oid as oid, opf.tableoid as tableoid,\n"
+					   "  SELECT opf.oid as oid, opf.tableoid as tableoid,\n"
 						  "  n.nspname as nspname,\n"
 						  "  CAST(opf.opfname AS pg_catalog.text) AS name,\n"
 						  "  CAST('%s' AS pg_catalog.text) as object\n"
@@ -939,7 +950,7 @@ objectDescription(const char *pattern, bool showSystem)
 
 		if (!showSystem && !pattern)
 			appendPQExpBuffer(&buf, "      AND n.nspname <> 'pg_catalog'\n"
-							  "      AND n.nspname <> 'information_schema'\n");
+							"      AND n.nspname <> 'information_schema'\n");
 
 		processSQLNamePattern(pset.db, &buf, pattern, true, false,
 							  "n.nspname", "opf.opfname", NULL,
@@ -1052,7 +1063,7 @@ describeTableDetails(const char *pattern, bool verbose, bool showSystem)
 	if (PQntuples(res) == 0)
 	{
 		if (!pset.quiet)
-			fprintf(stderr, _("Did not find any relation named \"%s\".\n"),
+			psql_error("Did not find any relation named \"%s\".\n",
 					pattern);
 		PQclear(res);
 		return false;
@@ -1104,7 +1115,7 @@ describeOneTableDetails(const char *schemaname,
 	bool		printTableInitialized = false;
 	int			i;
 	char	   *view_def = NULL;
-	char	   *headers[6];
+	char	   *headers[9];
 	char	  **seq_values = NULL;
 	char	  **modifiers = NULL;
 	char	  **ptr;
@@ -1130,6 +1141,7 @@ describeOneTableDetails(const char *schemaname,
 
 	retval = false;
 
+	myopt.default_footer = false;
 	/* This output looks confusing in expanded mode. */
 	myopt.expanded = false;
 
@@ -1224,8 +1236,7 @@ describeOneTableDetails(const char *schemaname,
 	if (PQntuples(res) == 0)
 	{
 		if (!pset.quiet)
-			fprintf(stderr, _("Did not find any relation with OID %s.\n"),
-					oid);
+			psql_error("Did not find any relation with OID %s.\n", oid);
 		goto error_return;
 	}
 
@@ -1236,13 +1247,14 @@ describeOneTableDetails(const char *schemaname,
 	tableinfo.hastriggers = strcmp(PQgetvalue(res, 0, 4), "t") == 0;
 	tableinfo.hasoids = strcmp(PQgetvalue(res, 0, 5), "t") == 0;
 	tableinfo.reloptions = (pset.sversion >= 80200) ?
-		strdup(PQgetvalue(res, 0, 6)) : 0;
+		pg_strdup(PQgetvalue(res, 0, 6)) : NULL;
 	tableinfo.tablespace = (pset.sversion >= 80000) ?
 		atooid(PQgetvalue(res, 0, 7)) : 0;
-	tableinfo.reloftype = (pset.sversion >= 90000 && strcmp(PQgetvalue(res, 0, 8), "") != 0) ?
-		strdup(PQgetvalue(res, 0, 8)) : 0;
-	tableinfo.relpersistence = (pset.sversion >= 90100 && strcmp(PQgetvalue(res, 0, 9), "") != 0) ?
-		PQgetvalue(res, 0, 9)[0] : 0;
+	tableinfo.reloftype = (pset.sversion >= 90000 &&
+						   strcmp(PQgetvalue(res, 0, 8), "") != 0) ?
+		pg_strdup(PQgetvalue(res, 0, 8)) : NULL;
+	tableinfo.relpersistence = (pset.sversion >= 90100) ?
+		*(PQgetvalue(res, 0, 9)) : 0;
 	PQclear(res);
 	res = NULL;
 
@@ -1293,14 +1305,15 @@ describeOneTableDetails(const char *schemaname,
 		appendPQExpBuffer(&buf, ",\n  NULL AS indexdef");
 	if (tableinfo.relkind == 'f' && pset.sversion >= 90200)
 		appendPQExpBuffer(&buf, ",\n  CASE WHEN attfdwoptions IS NULL THEN '' ELSE "
-								"  '(' || array_to_string(ARRAY(SELECT quote_ident(option_name) ||  ' ' || quote_literal(option_value)  FROM "
-								"  pg_options_to_table(attfdwoptions)), ', ') || ')' END AS attfdwoptions");
+						  "  '(' || array_to_string(ARRAY(SELECT quote_ident(option_name) ||  ' ' || quote_literal(option_value)  FROM "
+						  "  pg_options_to_table(attfdwoptions)), ', ') || ')' END AS attfdwoptions");
 	else
 		appendPQExpBuffer(&buf, ",\n  NULL AS attfdwoptions");
 	if (verbose)
 	{
 		appendPQExpBuffer(&buf, ",\n  a.attstorage");
 		appendPQExpBuffer(&buf, ",\n  CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget");
+
 		/*
 		 * In 9.0+, we have column comments for: relations, views, composite
 		 * types, and foreign tables (c.f. CommentObject() in comment.c).
@@ -1380,7 +1393,7 @@ describeOneTableDetails(const char *schemaname,
 	{
 		show_modifiers = true;
 		headers[cols++] = gettext_noop("Modifiers");
-		modifiers = pg_malloc_zero((numrows + 1) * sizeof(*modifiers));
+		modifiers = pg_malloc0((numrows + 1) * sizeof(*modifiers));
 	}
 
 	if (tableinfo.relkind == 'S')
@@ -1395,7 +1408,7 @@ describeOneTableDetails(const char *schemaname,
 	if (verbose)
 	{
 		headers[cols++] = gettext_noop("Storage");
-		if (tableinfo.relkind == 'r')
+		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'f')
 			headers[cols++] = gettext_noop("Stats target");
 		/* Column comments, if the relkind supports this feature. */
 		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
@@ -1415,7 +1428,7 @@ describeOneTableDetails(const char *schemaname,
 		PGresult   *result;
 
 		printfPQExpBuffer(&buf,
-			  "SELECT pg_catalog.pg_get_viewdef('%s'::pg_catalog.oid, true);",
+			 "SELECT pg_catalog.pg_get_viewdef('%s'::pg_catalog.oid, true);",
 						  oid);
 		result = PSQLexec(buf.data, false);
 		if (!result)
@@ -1498,7 +1511,7 @@ describeOneTableDetails(const char *schemaname,
 							  false, false);
 
 			/* Statistics target, if the relkind supports this feature */
-			if (tableinfo.relkind == 'r')
+			if (tableinfo.relkind == 'r' || tableinfo.relkind == 'f')
 			{
 				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 1),
 								  false, false);
@@ -1650,13 +1663,13 @@ describeOneTableDetails(const char *schemaname,
 						  "\n   pg_catalog.quote_ident(relname) || '.' ||"
 						  "\n   pg_catalog.quote_ident(attname)"
 						  "\nFROM pg_catalog.pg_class c"
-						  "\nINNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid"
-						  "\nINNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace"
+					"\nINNER JOIN pg_catalog.pg_depend d ON c.oid=d.refobjid"
+			 "\nINNER JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace"
 						  "\nINNER JOIN pg_catalog.pg_attribute a ON ("
 						  "\n a.attrelid=c.oid AND"
 						  "\n a.attnum=d.refobjsubid)"
-						  "\nWHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass"
-						  "\n AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass"
+			   "\nWHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass"
+			 "\n AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass"
 						  "\n AND d.objid=%s"
 						  "\n AND d.deptype='a'",
 						  oid);
@@ -1670,10 +1683,11 @@ describeOneTableDetails(const char *schemaname,
 							  PQgetvalue(result, 0, 0));
 			printTableAddFooter(&cont, buf.data);
 		}
+
 		/*
-		 * If we get no rows back, don't show anything (obviously).
-		 * We should never get more than one row back, but if we do,
-		 * just ignore it and don't print anything.
+		 * If we get no rows back, don't show anything (obviously). We should
+		 * never get more than one row back, but if we do, just ignore it and
+		 * don't print anything.
 		 */
 		PQclear(result);
 	}
@@ -1710,7 +1724,7 @@ describeOneTableDetails(const char *schemaname,
 								  "  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))\n");
 			appendPQExpBuffer(&buf,
 							  "WHERE c.oid = '%s' AND c.oid = i.indrelid AND i.indexrelid = c2.oid\n"
-			  "ORDER BY i.indisprimary DESC, i.indisunique DESC, c2.relname;",
+			 "ORDER BY i.indisprimary DESC, i.indisunique DESC, c2.relname;",
 							  oid);
 			result = PSQLexec(buf.data, false);
 			if (!result)
@@ -1786,20 +1800,13 @@ describeOneTableDetails(const char *schemaname,
 		/* print table (and column) check constraints */
 		if (tableinfo.checks)
 		{
-			char *is_only;
-
-			if (pset.sversion >= 90200)
-				is_only = "r.conisonly";
-			else
-				is_only = "false AS conisonly";
-
 			printfPQExpBuffer(&buf,
-							  "SELECT r.conname, %s, "
+							  "SELECT r.conname, "
 							  "pg_catalog.pg_get_constraintdef(r.oid, true)\n"
 							  "FROM pg_catalog.pg_constraint r\n"
-				   "WHERE r.conrelid = '%s' AND r.contype = 'c'\n"
-				   			  "ORDER BY 2 DESC, 1;",
-							  is_only, oid);
+							  "WHERE r.conrelid = '%s' AND r.contype = 'c'\n"
+							  "ORDER BY 1;",
+							  oid);
 			result = PSQLexec(buf.data, false);
 			if (!result)
 				goto error_return;
@@ -1812,10 +1819,9 @@ describeOneTableDetails(const char *schemaname,
 				for (i = 0; i < tuples; i++)
 				{
 					/* untranslated contraint name and def */
-					printfPQExpBuffer(&buf, "    \"%s\"%s%s",
+					printfPQExpBuffer(&buf, "    \"%s\" %s",
 									  PQgetvalue(result, i, 0),
-									  (strcmp(PQgetvalue(result, i, 1), "t") == 0) ? " (ONLY) ":" ",
-									  PQgetvalue(result, i, 2));
+									  PQgetvalue(result, i, 1));
 
 					printTableAddFooter(&cont, buf.data);
 				}
@@ -1830,7 +1836,7 @@ describeOneTableDetails(const char *schemaname,
 							  "SELECT conname,\n"
 				 "  pg_catalog.pg_get_constraintdef(r.oid, true) as condef\n"
 							  "FROM pg_catalog.pg_constraint r\n"
-					"WHERE r.conrelid = '%s' AND r.contype = 'f' ORDER BY 1;",
+				   "WHERE r.conrelid = '%s' AND r.contype = 'f' ORDER BY 1;",
 							  oid);
 			result = PSQLexec(buf.data, false);
 			if (!result)
@@ -1861,7 +1867,7 @@ describeOneTableDetails(const char *schemaname,
 						   "SELECT conname, conrelid::pg_catalog.regclass,\n"
 				 "  pg_catalog.pg_get_constraintdef(c.oid, true) as condef\n"
 							  "FROM pg_catalog.pg_constraint c\n"
-				   "WHERE c.confrelid = '%s' AND c.contype = 'f' ORDER BY 1;",
+				  "WHERE c.confrelid = '%s' AND c.contype = 'f' ORDER BY 1;",
 							  oid);
 			result = PSQLexec(buf.data, false);
 			if (!result)
@@ -2112,7 +2118,7 @@ describeOneTableDetails(const char *schemaname,
 		/* print foreign server name */
 		if (tableinfo.relkind == 'f')
 		{
-			char *ftoptions;
+			char	   *ftoptions;
 
 			/* Footer information about foreign table */
 			printfPQExpBuffer(&buf,
@@ -2120,7 +2126,7 @@ describeOneTableDetails(const char *schemaname,
 							  "       array_to_string(ARRAY(SELECT "
 							  "       quote_ident(option_name) ||  ' ' || "
 							  "       quote_literal(option_value)  FROM "
-							  "       pg_options_to_table(ftoptions)),  ', ') "
+							"       pg_options_to_table(ftoptions)),  ', ') "
 							  "FROM pg_catalog.pg_foreign_table f,\n"
 							  "     pg_catalog.pg_foreign_server s\n"
 							  "WHERE f.ftrelid = %s AND s.oid = f.ftserver;",
@@ -2229,7 +2235,7 @@ describeOneTableDetails(const char *schemaname,
 			printTableAddFooter(&cont, buf.data);
 		}
 
-		/* OIDs and options */
+		/* OIDs, if verbose */
 		if (verbose)
 		{
 			const char *s = _("Has OIDs");
@@ -2237,23 +2243,21 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&buf, "%s: %s", s,
 							  (tableinfo.hasoids ? _("yes") : _("no")));
 			printTableAddFooter(&cont, buf.data);
-
-			/* print reloptions */
-			if (pset.sversion >= 80200)
-			{
-				if (tableinfo.reloptions && tableinfo.reloptions[0] != '\0')
-				{
-					const char *t = _("Options");
-
-					printfPQExpBuffer(&buf, "%s: %s", t,
-									  tableinfo.reloptions);
-					printTableAddFooter(&cont, buf.data);
-				}
-			}
 		}
 
+		/* Tablespace info */
 		add_tablespace_footer(&cont, tableinfo.relkind, tableinfo.tablespace,
 							  true);
+	}
+
+	/* reloptions, if verbose */
+	if (verbose &&
+		tableinfo.reloptions && tableinfo.reloptions[0] != '\0')
+	{
+		const char *t = _("Options");
+
+		printfPQExpBuffer(&buf, "%s: %s", t, tableinfo.reloptions);
+		printTableAddFooter(&cont, buf.data);
 	}
 
 	printTable(&cont, pset.queryFout, pset.logfile);
@@ -2371,6 +2375,8 @@ describeRoles(const char *pattern, bool verbose)
 	const char	align = 'l';
 	char	  **attr;
 
+	myopt.default_footer = false;
+
 	initPQExpBuffer(&buf);
 
 	if (pset.sversion >= 80100)
@@ -2378,7 +2384,7 @@ describeRoles(const char *pattern, bool verbose)
 		printfPQExpBuffer(&buf,
 						  "SELECT r.rolname, r.rolsuper, r.rolinherit,\n"
 						  "  r.rolcreaterole, r.rolcreatedb, r.rolcanlogin,\n"
-						  "  r.rolconnlimit,\n"
+						  "  r.rolconnlimit, r.rolvaliduntil,\n"
 						  "  ARRAY(SELECT b.rolname\n"
 						  "        FROM pg_catalog.pg_auth_members m\n"
 				 "        JOIN pg_catalog.pg_roles b ON (m.roleid = b.oid)\n"
@@ -2406,7 +2412,8 @@ describeRoles(const char *pattern, bool verbose)
 						  "  u.usesuper AS rolsuper,\n"
 						  "  true AS rolinherit, false AS rolcreaterole,\n"
 					 "  u.usecreatedb AS rolcreatedb, true AS rolcanlogin,\n"
-						  "  -1 AS rolconnlimit,\n"
+						  "  -1 AS rolconnlimit,"
+						  "  u.valuntil as rolvaliduntil,\n"
 						  "  ARRAY(SELECT g.groname FROM pg_catalog.pg_group g WHERE u.usesysid = ANY(g.grolist)) as memberof"
 						  "\nFROM pg_catalog.pg_user u\n");
 
@@ -2421,7 +2428,7 @@ describeRoles(const char *pattern, bool verbose)
 		return false;
 
 	nrows = PQntuples(res);
-	attr = pg_malloc_zero((nrows + 1) * sizeof(*attr));
+	attr = pg_malloc0((nrows + 1) * sizeof(*attr));
 
 	printTableInit(&cont, &myopt, _("List of roles"), ncols, nrows);
 
@@ -2453,7 +2460,7 @@ describeRoles(const char *pattern, bool verbose)
 			add_role_attribute(&buf, _("Cannot login"));
 
 		if (pset.sversion >= 90100)
-			if (strcmp(PQgetvalue(res, i, (verbose ? 9 : 8)), "t") == 0)
+			if (strcmp(PQgetvalue(res, i, (verbose ? 10 : 9)), "t") == 0)
 				add_role_attribute(&buf, _("Replication"));
 
 		conns = atoi(PQgetvalue(res, i, 6));
@@ -2471,14 +2478,22 @@ describeRoles(const char *pattern, bool verbose)
 								  conns);
 		}
 
+		if (strcmp(PQgetvalue(res, i, 7), "") != 0)
+		{
+			if (buf.len > 0)
+				appendPQExpBufferStr(&buf, "\n");
+			appendPQExpBufferStr(&buf, _("Password valid until "));
+			appendPQExpBufferStr(&buf, PQgetvalue(res, i, 7));
+		}
+
 		attr[i] = pg_strdup(buf.data);
 
 		printTableAddCell(&cont, attr[i], false, false);
 
-		printTableAddCell(&cont, PQgetvalue(res, i, 7), false, false);
+		printTableAddCell(&cont, PQgetvalue(res, i, 8), false, false);
 
 		if (verbose && pset.sversion >= 80200)
-			printTableAddCell(&cont, PQgetvalue(res, i, 8), false, false);
+			printTableAddCell(&cont, PQgetvalue(res, i, 9), false, false);
 	}
 	termPQExpBuffer(&buf);
 
@@ -2518,16 +2533,19 @@ listDbRoleSettings(const char *pattern, const char *pattern2)
 	{
 		bool		havewhere;
 
-		printfPQExpBuffer(&buf, "SELECT rolname AS role, datname AS database,\n"
-				"pg_catalog.array_to_string(setconfig, E'\\n') AS settings\n"
+		printfPQExpBuffer(&buf, "SELECT rolname AS \"%s\", datname AS \"%s\",\n"
+				"pg_catalog.array_to_string(setconfig, E'\\n') AS \"%s\"\n"
 						  "FROM pg_db_role_setting AS s\n"
 				   "LEFT JOIN pg_database ON pg_database.oid = setdatabase\n"
-						  "LEFT JOIN pg_roles ON pg_roles.oid = setrole\n");
+						  "LEFT JOIN pg_roles ON pg_roles.oid = setrole\n",
+						  gettext_noop("Role"),
+						  gettext_noop("Database"),
+						  gettext_noop("Settings"));
 		havewhere = processSQLNamePattern(pset.db, &buf, pattern, false, false,
 									   NULL, "pg_roles.rolname", NULL, NULL);
 		processSQLNamePattern(pset.db, &buf, pattern2, havewhere, false,
 							  NULL, "pg_database.datname", NULL, NULL);
-		appendPQExpBufferStr(&buf, "ORDER BY role, database;");
+		appendPQExpBufferStr(&buf, "ORDER BY 1, 2;");
 	}
 	else
 	{
@@ -2837,7 +2855,7 @@ listDomains(const char *pattern, bool verbose, bool showSystem)
 
 	appendPQExpBuffer(&buf,
 					  "\nFROM pg_catalog.pg_type t\n"
-	   "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
+	 "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace\n");
 
 	if (verbose)
 		appendPQExpBuffer(&buf,
@@ -2937,6 +2955,67 @@ listConversions(const char *pattern, bool verbose, bool showSystem)
 
 	myopt.nullPrint = NULL;
 	myopt.title = _("List of conversions");
+	myopt.translate_header = true;
+	myopt.translate_columns = translate_columns;
+
+	printQuery(res, &myopt, pset.queryFout, pset.logfile);
+
+	PQclear(res);
+	return true;
+}
+
+/*
+ * \dy
+ *
+ * Describes Event Triggers.
+ */
+bool
+listEventTriggers(const char *pattern, bool verbose)
+{
+	PQExpBufferData buf;
+	PGresult   *res;
+	printQueryOpt myopt = pset.popt;
+	static const bool translate_columns[] =
+		{false, false, false, true, false, false, false};
+
+	initPQExpBuffer(&buf);
+
+	printfPQExpBuffer(&buf,
+					  "select evtname as \"%s\", "
+					  "evtevent as  \"%s\", "
+					  "pg_catalog.pg_get_userbyid(e.evtowner) AS \"%s\", "
+					  "case evtenabled when 'O' then 'enabled' "
+					  "  when 'R' then 'replica' "
+					  "  when 'A' then 'always' "
+					  "  when 'D' then 'disabled' end as  \"%s\", "
+					  "e.evtfoid::regproc as \"%s\", "
+					  "array_to_string(array(select x "
+					  "      from unnest(evttags) as t(x)), ', ') as  \"%s\" ",
+					  gettext_noop("Name"),
+					  gettext_noop("Event"),
+					  gettext_noop("Owner"),
+					  gettext_noop("Enabled"),
+					  gettext_noop("Procedure"),
+					  gettext_noop("Tags"));
+	if (verbose)
+		appendPQExpBuffer(&buf,
+						  ",\npg_catalog.obj_description(e.oid, 'pg_event_trigger') as \"%s\"",
+						  gettext_noop("Description"));
+	appendPQExpBuffer(&buf,
+					  "\nFROM pg_event_trigger e ");
+
+	processSQLNamePattern(pset.db, &buf, pattern, false, false,
+						  NULL, "evtname", NULL, NULL);
+
+	appendPQExpBuffer(&buf, "ORDER BY 1");
+
+	res = PSQLexec(buf.data, false);
+	termPQExpBuffer(&buf);
+	if (!res)
+		return false;
+
+	myopt.nullPrint = NULL;
+	myopt.title = _("List of event triggers");
 	myopt.translate_header = true;
 	myopt.translate_columns = translate_columns;
 
@@ -3056,6 +3135,13 @@ listCollations(const char *pattern, bool verbose, bool showSystem)
 	PGresult   *res;
 	printQueryOpt myopt = pset.popt;
 	static const bool translate_columns[] = {false, false, false, false, false};
+
+	if (pset.sversion < 90100)
+	{
+		psql_error("The server (version %d.%d) does not support collations.\n",
+				pset.sversion / 10000, (pset.sversion / 100) % 100);
+		return true;
+	}
 
 	initPQExpBuffer(&buf);
 
@@ -3183,7 +3269,7 @@ listTSParsers(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80300)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support full text search.\n"),
+		psql_error("The server (version %d.%d) does not support full text search.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3260,7 +3346,7 @@ listTSParsersVerbose(const char *pattern)
 	if (PQntuples(res) == 0)
 	{
 		if (!pset.quiet)
-			fprintf(stderr, _("Did not find any text search parser named \"%s\".\n"),
+			psql_error("Did not find any text search parser named \"%s\".\n",
 					pattern);
 		PQclear(res);
 		return false;
@@ -3361,7 +3447,7 @@ describeOneTSParser(const char *oid, const char *nspname, const char *prsname)
 		sprintf(title, _("Text search parser \"%s\""), prsname);
 	myopt.title = title;
 	myopt.footers = NULL;
-	myopt.default_footer = false;
+	myopt.topt.default_footer = false;
 	myopt.translate_header = true;
 	myopt.translate_columns = translate_columns;
 
@@ -3392,7 +3478,7 @@ describeOneTSParser(const char *oid, const char *nspname, const char *prsname)
 		sprintf(title, _("Token types for parser \"%s\""), prsname);
 	myopt.title = title;
 	myopt.footers = NULL;
-	myopt.default_footer = true;
+	myopt.topt.default_footer = true;
 	myopt.translate_header = true;
 	myopt.translate_columns = NULL;
 
@@ -3416,7 +3502,7 @@ listTSDictionaries(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80300)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support full text search.\n"),
+		psql_error("The server (version %d.%d) does not support full text search.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3484,7 +3570,7 @@ listTSTemplates(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80300)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support full text search.\n"),
+		psql_error("The server (version %d.%d) does not support full text search.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3552,7 +3638,7 @@ listTSConfigs(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80300)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support full text search.\n"),
+		psql_error("The server (version %d.%d) does not support full text search.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3630,7 +3716,7 @@ listTSConfigsVerbose(const char *pattern)
 	if (PQntuples(res) == 0)
 	{
 		if (!pset.quiet)
-			fprintf(stderr, _("Did not find any text search configuration named \"%s\".\n"),
+			psql_error("Did not find any text search configuration named \"%s\".\n",
 					pattern);
 		PQclear(res);
 		return false;
@@ -3724,7 +3810,7 @@ describeOneTSConfig(const char *oid, const char *nspname, const char *cfgname,
 	myopt.nullPrint = NULL;
 	myopt.title = title.data;
 	myopt.footers = NULL;
-	myopt.default_footer = false;
+	myopt.topt.default_footer = false;
 	myopt.translate_header = true;
 
 	printQuery(res, &myopt, pset.queryFout, pset.logfile);
@@ -3750,7 +3836,7 @@ listForeignDataWrappers(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80400)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support foreign-data wrappers.\n"),
+		psql_error("The server (version %d.%d) does not support foreign-data wrappers.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3758,7 +3844,7 @@ listForeignDataWrappers(const char *pattern, bool verbose)
 	initPQExpBuffer(&buf);
 	printfPQExpBuffer(&buf,
 					  "SELECT fdw.fdwname AS \"%s\",\n"
-					  "  pg_catalog.pg_get_userbyid(fdw.fdwowner) AS \"%s\",\n",
+				   "  pg_catalog.pg_get_userbyid(fdw.fdwowner) AS \"%s\",\n",
 					  gettext_noop("Name"),
 					  gettext_noop("Owner"));
 	if (pset.sversion >= 90100)
@@ -3830,7 +3916,7 @@ listForeignServers(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80400)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support foreign servers.\n"),
+		psql_error("The server (version %d.%d) does not support foreign servers.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3909,7 +3995,7 @@ listUserMappings(const char *pattern, bool verbose)
 
 	if (pset.sversion < 80400)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support user mappings.\n"),
+		psql_error("The server (version %d.%d) does not support user mappings.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -3967,7 +4053,7 @@ listForeignTables(const char *pattern, bool verbose)
 
 	if (pset.sversion < 90100)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support foreign tables.\n"),
+		psql_error("The server (version %d.%d) does not support foreign tables.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -4041,7 +4127,7 @@ listExtensions(const char *pattern)
 
 	if (pset.sversion < 90100)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support extensions.\n"),
+		psql_error("The server (version %d.%d) does not support extensions.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -4095,7 +4181,7 @@ listExtensionContents(const char *pattern)
 
 	if (pset.sversion < 90100)
 	{
-		fprintf(stderr, _("The server (version %d.%d) does not support extensions.\n"),
+		psql_error("The server (version %d.%d) does not support extensions.\n",
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
 	}
@@ -4122,10 +4208,10 @@ listExtensionContents(const char *pattern)
 		if (!pset.quiet)
 		{
 			if (pattern)
-				fprintf(stderr, _("Did not find any extension named \"%s\".\n"),
+				psql_error("Did not find any extension named \"%s\".\n",
 						pattern);
 			else
-				fprintf(stderr, _("Did not find any extensions.\n"));
+				psql_error("Did not find any extensions.\n");
 		}
 		PQclear(res);
 		return false;

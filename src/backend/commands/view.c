@@ -3,7 +3,7 @@
  * view.c
  *	  use rewrite rules to construct views
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -204,8 +204,8 @@ DefineVirtualRelation(RangeVar *relation, List *tlist, bool replace,
 		checkViewTupleDesc(descriptor, rel->rd_att);
 
 		/*
-		 * The new options list replaces the existing options list, even
-		 * if it's empty.
+		 * The new options list replaces the existing options list, even if
+		 * it's empty.
 		 */
 		atcmd = makeNode(AlterTableCmd);
 		atcmd->subtype = AT_ReplaceRelOptions;
@@ -420,7 +420,7 @@ UpdateRangeTableOfViewParse(Oid viewOid, Query *viewParse)
  * DefineView
  *		Execute a CREATE VIEW command.
  */
-void
+Oid
 DefineView(ViewStmt *stmt, const char *queryString)
 {
 	Query	   *viewParse;
@@ -439,9 +439,17 @@ DefineView(ViewStmt *stmt, const char *queryString)
 
 	/*
 	 * The grammar should ensure that the result is a single SELECT Query.
+	 * However, it doesn't forbid SELECT INTO, so we have to check for that.
 	 */
-	if (!IsA(viewParse, Query) ||
-		viewParse->commandType != CMD_SELECT)
+	if (!IsA(viewParse, Query))
+		elog(ERROR, "unexpected parse analysis result");
+	if (viewParse->utilityStmt != NULL &&
+		IsA(viewParse->utilityStmt, CreateTableAsStmt))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("views must not contain SELECT INTO")));
+	if (viewParse->commandType != CMD_SELECT ||
+		viewParse->utilityStmt != NULL)
 		elog(ERROR, "unexpected parse analysis result");
 
 	/*
@@ -449,10 +457,6 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	 * DefineQueryRewrite(), but that function will complain about a bogus ON
 	 * SELECT rule, and we'd rather the message complain about a view.
 	 */
-	if (viewParse->intoClause != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("views must not contain SELECT INTO")));
 	if (viewParse->hasModifyingCTE)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -500,7 +504,7 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	 * long as the CREATE command is consistent with that --- no explicit
 	 * schema name.
 	 */
-	view = copyObject(stmt->view);  /* don't corrupt original command */
+	view = copyObject(stmt->view);		/* don't corrupt original command */
 	if (view->relpersistence == RELPERSISTENCE_PERMANENT
 		&& isViewOnTempTable(viewParse))
 	{
@@ -536,4 +540,6 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	 * Now create the rules associated with the view.
 	 */
 	DefineViewRules(viewOid, viewParse, stmt->replace);
+
+	return viewOid;
 }

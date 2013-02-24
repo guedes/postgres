@@ -3,7 +3,7 @@
  * unaccent.c
  *	  Text search unaccent dictionary
  *
- * Copyright (c) 2009-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2009-2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/unaccent/unaccent.c
@@ -281,7 +281,7 @@ unaccent_lexize(PG_FUNCTION_ARGS)
 		{
 			if (!res)
 			{
-				/* allocate res only it it's needed */
+				/* allocate res only if it's needed */
 				res = palloc0(sizeof(TSLexeme) * 2);
 				res->lexeme = trgchar = palloc(len * pg_database_encoding_max_length() + 1 /* \0 */ );
 				res->flags = TSL_FILTER;

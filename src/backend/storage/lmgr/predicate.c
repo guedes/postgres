@@ -125,7 +125,7 @@
  *		- Protects both PredXact and SerializableXidHash.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -183,6 +183,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/slru.h"
 #include "access/subtrans.h"
 #include "access/transam.h"
@@ -193,6 +194,7 @@
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
 #include "storage/predicate_internals.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -1234,7 +1236,7 @@ InitPredicateLocks(void)
 	 * that this will prevent resource exhaustion in even the most pessimal
 	 * loads up to max_connections = 200 with all 200 connections pounding the
 	 * database with serializable transactions.  Beyond that, there may be
-	 * occassional transactions canceled when trying to flag conflicts. That's
+	 * occasional transactions canceled when trying to flag conflicts. That's
 	 * probably OK.
 	 */
 	max_table_size *= 5;
@@ -1509,7 +1511,7 @@ GetSafeSnapshot(Snapshot origSnapshot)
 		 * one passed to it, but we avoid assuming that here.
 		 */
 		snapshot = GetSerializableTransactionSnapshotInt(origSnapshot,
-														 InvalidTransactionId);
+													   InvalidTransactionId);
 
 		if (MySerializableXact == InvalidSerializableXact)
 			return snapshot;	/* no concurrent r/w xacts; it's safe */
@@ -1571,6 +1573,19 @@ GetSerializableTransactionSnapshot(Snapshot snapshot)
 	Assert(IsolationIsSerializable());
 
 	/*
+	 * Can't use serializable mode while recovery is still active, as it is,
+	 * for example, on a hot standby.  We could get here despite the check
+	 * in check_XactIsoLevel() if default_transaction_isolation is set to
+	 * serializable, so phrase the hint accordingly.
+	 */
+	if (RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot use serializable mode in a hot standby"),
+				 errdetail("\"default_transaction_isolation\" is set to \"serializable\"."),
+				 errhint("You can use \"SET default_transaction_isolation = 'repeatable read'\" to change the default.")));
+
+	/*
 	 * A special optimization is available for SERIALIZABLE READ ONLY
 	 * DEFERRABLE transactions -- we can wait for a suitable snapshot and
 	 * thereby avoid all SSI overhead once it's running.
@@ -1600,9 +1615,9 @@ SetSerializableTransactionSnapshot(Snapshot snapshot,
 
 	/*
 	 * We do not allow SERIALIZABLE READ ONLY DEFERRABLE transactions to
-	 * import snapshots, since there's no way to wait for a safe snapshot
-	 * when we're using the snap we're told to.  (XXX instead of throwing
-	 * an error, we could just ignore the XactDeferrable flag?)
+	 * import snapshots, since there's no way to wait for a safe snapshot when
+	 * we're using the snap we're told to.	(XXX instead of throwing an error,
+	 * we could just ignore the XactDeferrable flag?)
 	 */
 	if (XactReadOnly && XactDeferrable)
 		ereport(ERROR,
@@ -1646,11 +1661,11 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 	 *
 	 * We must hold SerializableXactHashLock when taking/checking the snapshot
 	 * to avoid race conditions, for much the same reasons that
-	 * GetSnapshotData takes the ProcArrayLock.  Since we might have to release
-	 * SerializableXactHashLock to call SummarizeOldestCommittedSxact, this
-	 * means we have to create the sxact first, which is a bit annoying (in
-	 * particular, an elog(ERROR) in procarray.c would cause us to leak the
-	 * sxact).  Consider refactoring to avoid this.
+	 * GetSnapshotData takes the ProcArrayLock.  Since we might have to
+	 * release SerializableXactHashLock to call SummarizeOldestCommittedSxact,
+	 * this means we have to create the sxact first, which is a bit annoying
+	 * (in particular, an elog(ERROR) in procarray.c would cause us to leak
+	 * the sxact).	Consider refactoring to avoid this.
 	 */
 #ifdef TEST_OLDSERXID
 	SummarizeOldestCommittedSxact();
@@ -1678,8 +1693,8 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("could not import the requested snapshot"),
-				 errdetail("The source transaction %u is not running anymore.",
-						   sourcexid)));
+			   errdetail("The source transaction %u is not running anymore.",
+						 sourcexid)));
 	}
 
 	/*
@@ -2013,7 +2028,7 @@ RestoreScratchTarget(bool lockheld)
 static void
 RemoveTargetIfNoLongerUsed(PREDICATELOCKTARGET *target, uint32 targettaghash)
 {
-	PREDICATELOCKTARGET *rmtarget;
+	PREDICATELOCKTARGET *rmtarget PG_USED_FOR_ASSERTS_ONLY;
 
 	Assert(LWLockHeldByMe(SerializablePredicateLockListLock));
 
@@ -2074,7 +2089,7 @@ DeleteChildTargetLocks(const PREDICATELOCKTARGETTAG *newtargettag)
 		{
 			uint32		oldtargettaghash;
 			LWLockId	partitionLock;
-			PREDICATELOCK *rmpredlock;
+			PREDICATELOCK *rmpredlock PG_USED_FOR_ASSERTS_ONLY;
 
 			oldtargettaghash = PredicateLockTargetTagHashCode(&oldtargettag);
 			partitionLock = PredicateLockHashPartitionLock(oldtargettaghash);
@@ -2227,7 +2242,7 @@ DecrementParentLocks(const PREDICATELOCKTARGETTAG *targettag)
 	{
 		uint32		targettaghash;
 		LOCALPREDICATELOCK *parentlock,
-				   *rmlock;
+				   *rmlock PG_USED_FOR_ASSERTS_ONLY;
 
 		parenttag = nexttag;
 		targettaghash = PredicateLockTargetTagHashCode(&parenttag);
@@ -2704,8 +2719,8 @@ TransferPredicateLocksToNewTarget(PREDICATELOCKTARGETTAG oldtargettag,
 			newpredlock = (PREDICATELOCK *)
 				hash_search_with_hash_value(PredicateLockHash,
 											&newpredlocktag,
-											PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
-																					newtargettaghash),
+					 PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
+														   newtargettaghash),
 											HASH_ENTER_NULL,
 											&found);
 			if (!newpredlock)
@@ -2945,8 +2960,8 @@ DropAllPredicateLocksFromTable(Relation relation, bool transfer)
 				newpredlock = (PREDICATELOCK *)
 					hash_search_with_hash_value(PredicateLockHash,
 												&newpredlocktag,
-												PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
-																						heaptargettaghash),
+					 PredicateLockHashCodeFromTargetHashCode(&newpredlocktag,
+														  heaptargettaghash),
 												HASH_ENTER,
 												&found);
 				if (!found)
@@ -3253,6 +3268,7 @@ ReleasePredicateLocks(bool isCommit)
 		 */
 		MySerializableXact->flags |= SXACT_FLAG_DOOMED;
 		MySerializableXact->flags |= SXACT_FLAG_ROLLED_BACK;
+
 		/*
 		 * If the transaction was previously prepared, but is now failing due
 		 * to a ROLLBACK PREPARED or (hopefully very rare) error after the
@@ -3544,9 +3560,9 @@ ClearOldPredicateLocks(void)
 			else
 			{
 				/*
-				 * A read-write transaction can only be partially
-				 * cleared. We need to keep the SERIALIZABLEXACT but
-				 * can release the SIREAD locks and conflicts in.
+				 * A read-write transaction can only be partially cleared. We
+				 * need to keep the SERIALIZABLEXACT but can release the
+				 * SIREAD locks and conflicts in.
 				 */
 				ReleaseOneSerializableXact(finishedSxact, true, false);
 			}
@@ -3889,10 +3905,10 @@ CheckForSerializableConflictOut(bool visible, Relation relation,
 		case HEAPTUPLE_RECENTLY_DEAD:
 			if (!visible)
 				return;
-			xid = HeapTupleHeaderGetXmax(tuple->t_data);
+			xid = HeapTupleHeaderGetUpdateXid(tuple->t_data);
 			break;
 		case HEAPTUPLE_DELETE_IN_PROGRESS:
-			xid = HeapTupleHeaderGetXmax(tuple->t_data);
+			xid = HeapTupleHeaderGetUpdateXid(tuple->t_data);
 			break;
 		case HEAPTUPLE_INSERT_IN_PROGRESS:
 			xid = HeapTupleHeaderGetXmin(tuple->t_data);
@@ -4003,7 +4019,7 @@ CheckForSerializableConflictOut(bool visible, Relation relation,
 			ereport(ERROR,
 					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 					 errmsg("could not serialize access due to read/write dependencies among transactions"),
-				errdetail_internal("Reason code: Canceled on conflict out to old pivot."),
+					 errdetail_internal("Reason code: Canceled on conflict out to old pivot."),
 					 errhint("The transaction might succeed if retried.")));
 		}
 	}
@@ -4507,7 +4523,7 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 				&& (!SxactIsCommitted(writer)
 					|| t2->prepareSeqNo <= writer->commitSeqNo)
 				&& (!SxactIsReadOnly(reader)
-			   || t2->prepareSeqNo <= reader->SeqNo.lastCommitBeforeSnapshot))
+			  || t2->prepareSeqNo <= reader->SeqNo.lastCommitBeforeSnapshot))
 			{
 				failure = true;
 				break;
@@ -4552,7 +4568,7 @@ OnConflict_CheckForSerializationFailure(const SERIALIZABLEXACT *reader,
 				&& (!SxactIsCommitted(t0)
 					|| t0->commitSeqNo >= writer->prepareSeqNo)
 				&& (!SxactIsReadOnly(t0)
-			   || t0->SeqNo.lastCommitBeforeSnapshot >= writer->prepareSeqNo))
+			  || t0->SeqNo.lastCommitBeforeSnapshot >= writer->prepareSeqNo))
 			{
 				failure = true;
 				break;
@@ -4730,10 +4746,10 @@ AtPrepare_PredicateLocks(void)
 	xactRecord->flags = MySerializableXact->flags;
 
 	/*
-	 * Note that we don't include the list of conflicts in our out in
-	 * the statefile, because new conflicts can be added even after the
-	 * transaction prepares. We'll just make a conservative assumption
-	 * during recovery instead.
+	 * Note that we don't include the list of conflicts in our out in the
+	 * statefile, because new conflicts can be added even after the
+	 * transaction prepares. We'll just make a conservative assumption during
+	 * recovery instead.
 	 */
 
 	RegisterTwoPhaseRecord(TWOPHASE_RM_PREDICATELOCK_ID, 0,
@@ -4891,10 +4907,9 @@ predicatelock_twophase_recover(TransactionId xid, uint16 info,
 		}
 
 		/*
-		 * We don't know whether the transaction had any conflicts or
-		 * not, so we'll conservatively assume that it had both a
-		 * conflict in and a conflict out, and represent that with the
-		 * summary conflict flags.
+		 * We don't know whether the transaction had any conflicts or not, so
+		 * we'll conservatively assume that it had both a conflict in and a
+		 * conflict out, and represent that with the summary conflict flags.
 		 */
 		SHMQueueInit(&(sxact->outConflicts));
 		SHMQueueInit(&(sxact->inConflicts));

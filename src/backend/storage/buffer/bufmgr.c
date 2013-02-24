@@ -3,7 +3,7 @@
  * bufmgr.c
  *	  buffer manager interface routines
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "catalog/catalog.h"
+#include "common/relpath.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
@@ -46,7 +47,7 @@
 #include "storage/smgr.h"
 #include "storage/standby.h"
 #include "utils/rel.h"
-#include "utils/resowner.h"
+#include "utils/resowner_private.h"
 #include "utils/timestamp.h"
 
 
@@ -62,11 +63,13 @@
 #define BUF_WRITTEN				0x01
 #define BUF_REUSABLE			0x02
 
+#define DROP_RELS_BSEARCH_THRESHOLD		20
 
 /* GUC variables */
 bool		zero_damaged_pages = false;
 int			bgwriter_lru_maxpages = 100;
 double		bgwriter_lru_multiplier = 2.0;
+bool		track_io_timing = false;
 
 /*
  * How many buffers PrefetchBuffer callers should try to stay ahead of their
@@ -106,6 +109,7 @@ static volatile BufferDesc *BufferAlloc(SMgrRelation smgr,
 			bool *foundPtr);
 static void FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln);
 static void AtProcExit_Buffers(int code, Datum arg);
+static int rnode_comparator(const void *p1, const void *p2);
 
 
 /*
@@ -269,6 +273,8 @@ ReadBufferWithoutRelcache(RelFileNode rnode, ForkNumber forkNum,
 	bool		hit;
 
 	SMgrRelation smgr = smgropen(rnode, InvalidBackendId);
+
+	Assert(InRecovery);
 
 	return ReadBuffer_common(smgr, RELPERSISTENCE_PERMANENT, forkNum, blockNum,
 							 mode, strategy, &hit);
@@ -437,7 +443,21 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			MemSet((char *) bufBlock, 0, BLCKSZ);
 		else
 		{
+			instr_time	io_start,
+						io_time;
+
+			if (track_io_timing)
+				INSTR_TIME_SET_CURRENT(io_start);
+
 			smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
+
+			if (track_io_timing)
+			{
+				INSTR_TIME_SET_CURRENT(io_time);
+				INSTR_TIME_SUBTRACT(io_time, io_start);
+				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+			}
 
 			/* check for garbage data */
 			if (!PageHeaderIsValid((PageHeader) bufBlock))
@@ -953,7 +973,6 @@ void
 MarkBufferDirty(Buffer buffer)
 {
 	volatile BufferDesc *bufHdr;
-	bool	dirtied = false;
 
 	if (!BufferIsValid(buffer))
 		elog(ERROR, "bad buffer ID: %d", buffer);
@@ -974,26 +993,20 @@ MarkBufferDirty(Buffer buffer)
 
 	Assert(bufHdr->refcount > 0);
 
-	if (!(bufHdr->flags & BM_DIRTY))
-		dirtied = true;
-
-	bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
-
-	UnlockBufHdr(bufHdr);
-
 	/*
-	 * If the buffer was not dirty already, do vacuum accounting, and
-	 * nudge bgwriter.
+	 * If the buffer was not dirty already, do vacuum accounting.
 	 */
-	if (dirtied)
+	if (!(bufHdr->flags & BM_DIRTY))
 	{
 		VacuumPageDirty++;
 		pgBufferUsage.shared_blks_dirtied++;
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
-		if (ProcGlobal->bgwriterLatch)
-			SetLatch(ProcGlobal->bgwriterLatch);
 	}
+
+	bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
+
+	UnlockBufHdr(bufHdr);
 }
 
 /*
@@ -1196,9 +1209,9 @@ BufferSync(int flags)
 
 	/*
 	 * Unless this is a shutdown checkpoint, we write only permanent, dirty
-	 * buffers.  But at shutdown time, we write all dirty buffers.
+	 * buffers.  But at shutdown or end of recovery, we write all dirty buffers.
 	 */
-	if (!(flags & CHECKPOINT_IS_SHUTDOWN))
+	if (!((flags & CHECKPOINT_IS_SHUTDOWN) || (flags & CHECKPOINT_END_OF_RECOVERY)))
 		mask |= BM_PERMANENT;
 
 	/*
@@ -1316,9 +1329,11 @@ BufferSync(int flags)
  *
  * This is called periodically by the background writer process.
  *
- * Returns true if the clocksweep has been "lapped", so that there's nothing
- * to do. Also returns true if there's nothing to do because bgwriter was
- * effectively disabled by setting bgwriter_lru_maxpages to 0.
+ * Returns true if it's appropriate for the bgwriter process to go into
+ * low-power hibernation mode.	(This happens if the strategy clock sweep
+ * has been "lapped" and no buffer allocations have occurred recently,
+ * or if the bgwriter has been effectively disabled by setting
+ * bgwriter_lru_maxpages to 0.)
  */
 bool
 BgBufferSync(void)
@@ -1359,6 +1374,10 @@ BgBufferSync(void)
 	int			num_to_scan;
 	int			num_written;
 	int			reusable_buffers;
+
+	/* Variables for final smoothed_density update */
+	long		new_strategy_delta;
+	uint32		new_recent_alloc;
 
 	/*
 	 * Find out where the freelist clock sweep currently is, and how many
@@ -1496,8 +1515,8 @@ BgBufferSync(void)
 	/*
 	 * If recent_alloc remains at zero for many cycles, smoothed_alloc will
 	 * eventually underflow to zero, and the underflows produce annoying
-	 * kernel warnings on some platforms.  Once upcoming_alloc_est has gone
-	 * to zero, there's no point in tracking smaller and smaller values of
+	 * kernel warnings on some platforms.  Once upcoming_alloc_est has gone to
+	 * zero, there's no point in tracking smaller and smaller values of
 	 * smoothed_alloc, so just reset it to exactly zero to avoid this
 	 * syndrome.  It will pop back up as soon as recent_alloc increases.
 	 */
@@ -1583,21 +1602,23 @@ BgBufferSync(void)
 	 * which is helpful because a long memory isn't as desirable on the
 	 * density estimates.
 	 */
-	strategy_delta = bufs_to_lap - num_to_scan;
-	recent_alloc = reusable_buffers - reusable_buffers_est;
-	if (strategy_delta > 0 && recent_alloc > 0)
+	new_strategy_delta = bufs_to_lap - num_to_scan;
+	new_recent_alloc = reusable_buffers - reusable_buffers_est;
+	if (new_strategy_delta > 0 && new_recent_alloc > 0)
 	{
-		scans_per_alloc = (float) strategy_delta / (float) recent_alloc;
+		scans_per_alloc = (float) new_strategy_delta / (float) new_recent_alloc;
 		smoothed_density += (scans_per_alloc - smoothed_density) /
 			smoothing_samples;
 
 #ifdef BGW_DEBUG
 		elog(DEBUG2, "bgwriter: cleaner density alloc=%u scan=%ld density=%.2f new smoothed=%.2f",
-			 recent_alloc, strategy_delta, scans_per_alloc, smoothed_density);
+			 new_recent_alloc, new_strategy_delta,
+			 scans_per_alloc, smoothed_density);
 #endif
 	}
 
-	return (bufs_to_lap == 0);
+	/* Return true if OK to hibernate */
+	return (bufs_to_lap == 0 && recent_alloc == 0);
 }
 
 /*
@@ -1864,16 +1885,15 @@ BufferGetTag(Buffer buffer, RelFileNode *rnode, ForkNumber *forknum,
  * written.)
  *
  * If the caller has an smgr reference for the buffer's relation, pass it
- * as the second parameter.  If not, pass NULL.  In the latter case, the
- * relation will be marked as "transient" so that the corresponding
- * kernel-level file descriptors are closed when the current transaction ends,
- * if any.
+ * as the second parameter.  If not, pass NULL.
  */
 static void
 FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 {
 	XLogRecPtr	recptr;
-	ErrorContextCallback errcontext;
+	ErrorContextCallback errcallback;
+	instr_time	io_start,
+				io_time;
 
 	/*
 	 * Acquire the buffer's io_in_progress lock.  If StartBufferIO returns
@@ -1884,17 +1904,14 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 		return;
 
 	/* Setup error traceback support for ereport() */
-	errcontext.callback = shared_buffer_write_error_callback;
-	errcontext.arg = (void *) buf;
-	errcontext.previous = error_context_stack;
-	error_context_stack = &errcontext;
+	errcallback.callback = shared_buffer_write_error_callback;
+	errcallback.arg = (void *) buf;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
-	/* Find smgr relation for buffer, and mark it as transient */
+	/* Find smgr relation for buffer */
 	if (reln == NULL)
-	{
 		reln = smgropen(buf->tag.rnode, InvalidBackendId);
-		smgrsettransient(reln);
-	}
 
 	TRACE_POSTGRESQL_BUFFER_FLUSH_START(buf->tag.forkNum,
 										buf->tag.blockNum,
@@ -1906,9 +1923,24 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 	 * Force XLOG flush up to buffer's LSN.  This implements the basic WAL
 	 * rule that log updates must hit disk before any of the data-file changes
 	 * they describe do.
+	 *
+	 * However, this rule does not apply to unlogged relations, which will be
+	 * lost after a crash anyway.  Most unlogged relation pages do not bear
+	 * LSNs since we never emit WAL records for them, and therefore flushing
+	 * up through the buffer LSN would be useless, but harmless.  However, GiST
+	 * indexes use LSNs internally to track page-splits, and therefore unlogged
+	 * GiST pages bear "fake" LSNs generated by GetFakeLSNForUnloggedRel.  It
+	 * is unlikely but possible that the fake LSN counter could advance past
+	 * the WAL insertion point; and if it did happen, attempting to flush WAL
+	 * through that location would fail, with disastrous system-wide
+	 * consequences.  To make sure that can't happen, skip the flush if the
+	 * buffer isn't permanent.
 	 */
-	recptr = BufferGetLSN(buf);
-	XLogFlush(recptr);
+	if (buf->flags & BM_PERMANENT)
+	{
+		recptr = BufferGetLSN(buf);
+		XLogFlush(recptr);
+	}
 
 	/*
 	 * Now it's safe to write buffer to disk. Note that no one else should
@@ -1921,11 +1953,22 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 	buf->flags &= ~BM_JUST_DIRTIED;
 	UnlockBufHdr(buf);
 
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
+
 	smgrwrite(reln,
 			  buf->tag.forkNum,
 			  buf->tag.blockNum,
 			  (char *) BufHdrGetBlock(buf),
 			  false);
+
+	if (track_io_timing)
+	{
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+	}
 
 	pgBufferUsage.shared_blks_written++;
 
@@ -1942,7 +1985,7 @@ FlushBuffer(volatile BufferDesc *buf, SMgrRelation reln)
 									   reln->smgr_rnode.node.relNode);
 
 	/* Pop the error context stack */
-	error_context_stack = errcontext.previous;
+	error_context_stack = errcallback.previous;
 }
 
 /*
@@ -1977,11 +2020,11 @@ BufferIsPermanent(Buffer buffer)
 	Assert(BufferIsPinned(buffer));
 
 	/*
-	 * BM_PERMANENT can't be changed while we hold a pin on the buffer, so
-	 * we need not bother with the buffer header spinlock.  Even if someone
-	 * else changes the buffer header flags while we're doing this, we assume
-	 * that changing an aligned 2-byte BufFlags value is atomic, so we'll read
-	 * the old value or the new value, but not random garbage.
+	 * BM_PERMANENT can't be changed while we hold a pin on the buffer, so we
+	 * need not bother with the buffer header spinlock.  Even if someone else
+	 * changes the buffer header flags while we're doing this, we assume that
+	 * changing an aligned 2-byte BufFlags value is atomic, so we'll read the
+	 * old value or the new value, but not random garbage.
 	 */
 	bufHdr = &BufferDescriptors[buffer - 1];
 	return (bufHdr->flags & BM_PERMANENT) != 0;
@@ -1991,7 +2034,7 @@ BufferIsPermanent(Buffer buffer)
  *		DropRelFileNodeBuffers
  *
  *		This function removes from the buffer pool all the pages of the
- *		specified relation that have block numbers >= firstDelBlock.
+ *		specified relation fork that have block numbers >= firstDelBlock.
  *		(In particular, with firstDelBlock = 0, all pages are removed.)
  *		Dirty pages are simply dropped, without bothering to write them
  *		out first.	Therefore, this is NOT rollback-able, and so should be
@@ -2019,7 +2062,8 @@ DropRelFileNodeBuffers(RelFileNodeBackend rnode, ForkNumber forkNum,
 {
 	int			i;
 
-	if (rnode.backend != InvalidBackendId)
+	/* If it's a local relation, it's localbuf.c's problem. */
+	if (RelFileNodeBackendIsTemp(rnode))
 	{
 		if (rnode.backend == MyBackendId)
 			DropRelFileNodeLocalBuffers(rnode.node, forkNum, firstDelBlock);
@@ -2030,6 +2074,25 @@ DropRelFileNodeBuffers(RelFileNodeBackend rnode, ForkNumber forkNum,
 	{
 		volatile BufferDesc *bufHdr = &BufferDescriptors[i];
 
+		/*
+		 * We can make this a tad faster by prechecking the buffer tag before
+		 * we attempt to lock the buffer; this saves a lot of lock
+		 * acquisitions in typical cases.  It should be safe because the
+		 * caller must have AccessExclusiveLock on the relation, or some other
+		 * reason to be certain that no one is loading new pages of the rel
+		 * into the buffer pool.  (Otherwise we might well miss such pages
+		 * entirely.)  Therefore, while the tag might be changing while we
+		 * look at it, it can't be changing *to* a value we care about, only
+		 * *away* from such a value.  So false negatives are impossible, and
+		 * false positives are safe because we'll recheck after getting the
+		 * buffer lock.
+		 *
+		 * We could check forkNum and blockNum as well as the rnode, but the
+		 * incremental win from doing so seems small.
+		 */
+		if (!RelFileNodeEquals(bufHdr->tag.rnode, rnode.node))
+			continue;
+
 		LockBufHdr(bufHdr);
 		if (RelFileNodeEquals(bufHdr->tag.rnode, rnode.node) &&
 			bufHdr->tag.forkNum == forkNum &&
@@ -2038,6 +2101,106 @@ DropRelFileNodeBuffers(RelFileNodeBackend rnode, ForkNumber forkNum,
 		else
 			UnlockBufHdr(bufHdr);
 	}
+}
+
+/* ---------------------------------------------------------------------
+ *		DropRelFileNodesAllBuffers
+ *
+ *		This function removes from the buffer pool all the pages of all
+ *		forks of the specified relations.  It's equivalent to calling
+ *		DropRelFileNodeBuffers once per fork per relation with
+ *		firstDelBlock = 0.
+ * --------------------------------------------------------------------
+ */
+void
+DropRelFileNodesAllBuffers(RelFileNodeBackend *rnodes, int nnodes)
+{
+	int         i,
+				n = 0;
+	RelFileNode *nodes;
+	bool		use_bsearch;
+
+	if (nnodes == 0)
+		return;
+
+	nodes = palloc(sizeof(RelFileNode) * nnodes); /* non-local relations */
+
+	/* If it's a local relation, it's localbuf.c's problem. */
+	for (i = 0; i < nnodes; i++)
+	{
+		if (RelFileNodeBackendIsTemp(rnodes[i]))
+		{
+			if (rnodes[i].backend == MyBackendId)
+				DropRelFileNodeAllLocalBuffers(rnodes[i].node);
+		}
+		else
+			nodes[n++] = rnodes[i].node;
+	}
+
+	/*
+	 * If there are no non-local relations, then we're done. Release the memory
+	 * and return.
+	 */
+	if (n == 0)
+	{
+		pfree(nodes);
+		return;
+	}
+
+	/*
+	 * For low number of relations to drop just use a simple walk through, to
+	 * save the bsearch overhead. The threshold to use is rather a guess than a
+	 * exactly determined value, as it depends on many factors (CPU and RAM
+	 * speeds, amount of shared buffers etc.).
+	 */
+	use_bsearch = n > DROP_RELS_BSEARCH_THRESHOLD;
+
+	/* sort the list of rnodes if necessary */
+	if (use_bsearch)
+		pg_qsort(nodes, n, sizeof(RelFileNode), rnode_comparator);
+
+	for (i = 0; i < NBuffers; i++)
+	{
+		RelFileNode *rnode = NULL;
+		volatile BufferDesc *bufHdr = &BufferDescriptors[i];
+
+		/*
+		 * As in DropRelFileNodeBuffers, an unlocked precheck should be safe
+		 * and saves some cycles.
+		 */
+
+		if (!use_bsearch)
+		{
+			int		j;
+
+			for (j = 0; j < n; j++)
+			{
+				if (RelFileNodeEquals(bufHdr->tag.rnode, nodes[j]))
+				{
+					rnode = &nodes[j];
+					break;
+				}
+			}
+		}
+		else
+		{
+			rnode = bsearch((const void *) &(bufHdr->tag.rnode),
+							nodes, n, sizeof(RelFileNode),
+							rnode_comparator);
+		}
+
+		/* buffer doesn't belong to any of the given relfilenodes; skip it */
+		if (rnode == NULL)
+			continue;
+
+		LockBufHdr(bufHdr);
+		if (RelFileNodeEquals(bufHdr->tag.rnode, (*rnode)))
+			InvalidateBuffer(bufHdr);	/* releases spinlock */
+		else
+			UnlockBufHdr(bufHdr);
+	}
+
+	pfree(nodes);
 }
 
 /* ---------------------------------------------------------------------
@@ -2055,7 +2218,6 @@ void
 DropDatabaseBuffers(Oid dbid)
 {
 	int			i;
-	volatile BufferDesc *bufHdr;
 
 	/*
 	 * We needn't consider local buffers, since by assumption the target
@@ -2064,7 +2226,15 @@ DropDatabaseBuffers(Oid dbid)
 
 	for (i = 0; i < NBuffers; i++)
 	{
-		bufHdr = &BufferDescriptors[i];
+		volatile BufferDesc *bufHdr = &BufferDescriptors[i];
+
+		/*
+		 * As in DropRelFileNodeBuffers, an unlocked precheck should be safe
+		 * and saves some cycles.
+		 */
+		if (bufHdr->tag.rnode.dbNode != dbid)
+			continue;
+
 		LockBufHdr(bufHdr);
 		if (bufHdr->tag.rnode.dbNode == dbid)
 			InvalidateBuffer(bufHdr);	/* releases spinlock */
@@ -2161,13 +2331,13 @@ FlushRelationBuffers(Relation rel)
 			if (RelFileNodeEquals(bufHdr->tag.rnode, rel->rd_node) &&
 				(bufHdr->flags & BM_VALID) && (bufHdr->flags & BM_DIRTY))
 			{
-				ErrorContextCallback errcontext;
+				ErrorContextCallback errcallback;
 
 				/* Setup error traceback support for ereport() */
-				errcontext.callback = local_buffer_write_error_callback;
-				errcontext.arg = (void *) bufHdr;
-				errcontext.previous = error_context_stack;
-				error_context_stack = &errcontext;
+				errcallback.callback = local_buffer_write_error_callback;
+				errcallback.arg = (void *) bufHdr;
+				errcallback.previous = error_context_stack;
+				error_context_stack = &errcallback;
 
 				smgrwrite(rel->rd_smgr,
 						  bufHdr->tag.forkNum,
@@ -2178,7 +2348,7 @@ FlushRelationBuffers(Relation rel)
 				bufHdr->flags &= ~(BM_DIRTY | BM_JUST_DIRTIED);
 
 				/* Pop the error context stack */
-				error_context_stack = errcontext.previous;
+				error_context_stack = errcallback.previous;
 			}
 		}
 
@@ -2191,6 +2361,14 @@ FlushRelationBuffers(Relation rel)
 	for (i = 0; i < NBuffers; i++)
 	{
 		bufHdr = &BufferDescriptors[i];
+
+		/*
+		 * As in DropRelFileNodeBuffers, an unlocked precheck should be safe
+		 * and saves some cycles.
+		 */
+		if (!RelFileNodeEquals(bufHdr->tag.rnode, rel->rd_node))
+			continue;
+
 		LockBufHdr(bufHdr);
 		if (RelFileNodeEquals(bufHdr->tag.rnode, rel->rd_node) &&
 			(bufHdr->flags & BM_VALID) && (bufHdr->flags & BM_DIRTY))
@@ -2233,6 +2411,14 @@ FlushDatabaseBuffers(Oid dbid)
 	for (i = 0; i < NBuffers; i++)
 	{
 		bufHdr = &BufferDescriptors[i];
+
+		/*
+		 * As in DropRelFileNodeBuffers, an unlocked precheck should be safe
+		 * and saves some cycles.
+		 */
+		if (bufHdr->tag.rnode.dbNode != dbid)
+			continue;
+
 		LockBufHdr(bufHdr);
 		if (bufHdr->tag.rnode.dbNode == dbid &&
 			(bufHdr->flags & BM_VALID) && (bufHdr->flags & BM_DIRTY))
@@ -2348,31 +2534,26 @@ SetBufferCommitInfoNeedsSave(Buffer buffer)
 	 * making the first scan after commit of an xact that added/deleted many
 	 * tuples.	So, be as quick as we can if the buffer is already dirty.  We
 	 * do this by not acquiring spinlock if it looks like the status bits are
-	 * already OK.	(Note it is okay if someone else clears BM_JUST_DIRTIED
-	 * immediately after we look, because the buffer content update is already
-	 * done and will be reflected in the I/O.)
+	 * already.  Since we make this test unlocked, there's a chance we might
+	 * fail to notice that the flags have just been cleared, and failed to
+	 * reset them, due to memory-ordering issues.  But since this function is
+	 * only intended to be used in cases where failing to write out the data
+	 * would be harmless anyway, it doesn't really matter.
 	 */
 	if ((bufHdr->flags & (BM_DIRTY | BM_JUST_DIRTIED)) !=
 		(BM_DIRTY | BM_JUST_DIRTIED))
 	{
-		bool		dirtied = false;
-
 		LockBufHdr(bufHdr);
 		Assert(bufHdr->refcount > 0);
 		if (!(bufHdr->flags & BM_DIRTY))
-			dirtied = true;
-		bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
-		UnlockBufHdr(bufHdr);
-
-		if (dirtied)
 		{
+			/* Do vacuum cost accounting */
 			VacuumPageDirty++;
 			if (VacuumCostActive)
 				VacuumCostBalance += VacuumCostPageDirty;
-			/* The bgwriter may need to be woken. */
-			if (ProcGlobal->bgwriterLatch)
-				SetLatch(ProcGlobal->bgwriterLatch);
 		}
+		bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
+		UnlockBufHdr(bufHdr);
 	}
 }
 
@@ -2849,4 +3030,31 @@ local_buffer_write_error_callback(void *arg)
 				   bufHdr->tag.blockNum, path);
 		pfree(path);
 	}
+}
+
+/*
+ * RelFileNode qsort/bsearch comparator; see RelFileNodeEquals.
+ */
+static int
+rnode_comparator(const void *p1, const void *p2)
+{
+	RelFileNode n1 = *(RelFileNode *) p1;
+	RelFileNode n2 = *(RelFileNode *) p2;
+
+	if (n1.relNode < n2.relNode)
+		return -1;
+	else if (n1.relNode > n2.relNode)
+		return 1;
+
+	if (n1.dbNode < n2.dbNode)
+		return -1;
+	else if (n1.dbNode > n2.dbNode)
+		return 1;
+
+	if (n1.spcNode < n2.spcNode)
+		return -1;
+	else if (n1.spcNode > n2.spcNode)
+		return 1;
+	else
+		return 0;
 }

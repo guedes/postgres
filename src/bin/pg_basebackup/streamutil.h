@@ -15,8 +15,4 @@ extern PGconn *conn;
 	exit(code);									\
 	}
 
-
-char	   *xstrdup(const char *s);
-void	   *xmalloc0(int size);
-
-PGconn	   *GetConnection(void);
+extern PGconn *GetConnection(void);

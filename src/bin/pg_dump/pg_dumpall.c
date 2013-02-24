@@ -2,9 +2,11 @@
  *
  * pg_dumpall.c
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
+ * pg_dumpall forces all pg_dump output to be text, since it also outputs
+ * text into the same output stream.
  *
  * src/bin/pg_dump/pg_dumpall.c
  *
@@ -23,7 +25,6 @@
 #include "getopt_long.h"
 
 #include "dumputils.h"
-#include "dumpmem.h"
 #include "pg_backup.h"
 
 /* version string we expect back from pg_dump */
@@ -49,11 +50,12 @@ static void makeAlterConfigCommand(PGconn *conn, const char *arrayitem,
 static void dumpDatabases(PGconn *conn);
 static void dumpTimestamp(char *msg);
 static void doShellQuoting(PQExpBuffer buf, const char *str);
+static void doConnStrQuoting(PQExpBuffer buf, const char *str);
 
 static int	runPgDump(const char *dbname);
 static void buildShSecLabels(PGconn *conn, const char *catalog_name,
-							 uint32 objectId, PQExpBuffer buffer,
-							 const char *target, const char *objname);
+				 uint32 objectId, PQExpBuffer buffer,
+				 const char *target, const char *objname);
 static PGconn *connectDatabase(const char *dbname, const char *pghost, const char *pgport,
 	  const char *pguser, enum trivalue prompt_password, bool fail_on_error);
 static PGresult *executeQuery(PGconn *conn, const char *query);
@@ -82,24 +84,6 @@ static char *filename = NULL;
 int
 main(int argc, char *argv[])
 {
-	char	   *pghost = NULL;
-	char	   *pgport = NULL;
-	char	   *pguser = NULL;
-	char	   *pgdb = NULL;
-	char	   *use_role = NULL;
-	enum trivalue prompt_password = TRI_DEFAULT;
-	bool		data_only = false;
-	bool		globals_only = false;
-	bool		output_clean = false;
-	bool		roles_only = false;
-	bool		tablespaces_only = false;
-	PGconn	   *conn;
-	int			encoding;
-	const char *std_strings;
-	int			c,
-				ret;
-	int			optindex;
-
 	static struct option long_options[] = {
 		{"data-only", no_argument, NULL, 'a'},
 		{"clean", no_argument, NULL, 'c'},
@@ -141,6 +125,24 @@ main(int argc, char *argv[])
 
 		{NULL, 0, NULL, 0}
 	};
+
+	char	   *pghost = NULL;
+	char	   *pgport = NULL;
+	char	   *pguser = NULL;
+	char	   *pgdb = NULL;
+	char	   *use_role = NULL;
+	enum trivalue prompt_password = TRI_DEFAULT;
+	bool		data_only = false;
+	bool		globals_only = false;
+	bool		output_clean = false;
+	bool		roles_only = false;
+	bool		tablespaces_only = false;
+	PGconn	   *conn;
+	int			encoding;
+	const char *std_strings;
+	int			c,
+				ret;
+	int			optindex;
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_dump"));
 
@@ -200,7 +202,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'f':
-				filename = optarg;
+				filename = pg_strdup(optarg);
 				appendPQExpBuffer(pgdumpopts, " -f ");
 				doShellQuoting(pgdumpopts, filename);
 				break;
@@ -210,7 +212,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'h':
-				pghost = optarg;
+				pghost = pg_strdup(optarg);
 				appendPQExpBuffer(pgdumpopts, " -h ");
 				doShellQuoting(pgdumpopts, pghost);
 				break;
@@ -220,7 +222,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'l':
-				pgdb = optarg;
+				pgdb = pg_strdup(optarg);
 				break;
 
 			case 'o':
@@ -232,7 +234,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'p':
-				pgport = optarg;
+				pgport = pg_strdup(optarg);
 				appendPQExpBuffer(pgdumpopts, " -p ");
 				doShellQuoting(pgdumpopts, pgport);
 				break;
@@ -255,7 +257,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'U':
-				pguser = optarg;
+				pguser = pg_strdup(optarg);
 				appendPQExpBuffer(pgdumpopts, " -U ");
 				doShellQuoting(pgdumpopts, pguser);
 				break;
@@ -289,7 +291,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 3:
-				use_role = optarg;
+				use_role = pg_strdup(optarg);
 				appendPQExpBuffer(pgdumpopts, " --role ");
 				doShellQuoting(pgdumpopts, use_role);
 				break;
@@ -502,7 +504,7 @@ main(int argc, char *argv[])
 		}
 
 		/* Dump CREATE DATABASE commands */
-		if (!globals_only && !roles_only && !tablespaces_only)
+		if (binary_upgrade || (!globals_only && !roles_only && !tablespaces_only))
 			dumpCreateDB(conn);
 
 		/* Dump role/database settings */
@@ -537,33 +539,33 @@ help(void)
 	printf(_("  %s [OPTION]...\n"), progname);
 
 	printf(_("\nGeneral options:\n"));
-	printf(_("  -f, --file=FILENAME         output file name\n"));
-	printf(_("  --lock-wait-timeout=TIMEOUT fail after waiting TIMEOUT for a table lock\n"));
-	printf(_("  --help                      show this help, then exit\n"));
-	printf(_("  --version                   output version information, then exit\n"));
+	printf(_("  -f, --file=FILENAME          output file name\n"));
+	printf(_("  -V, --version                output version information, then exit\n"));
+	printf(_("  --lock-wait-timeout=TIMEOUT  fail after waiting TIMEOUT for a table lock\n"));
+	printf(_("  -?, --help                   show this help, then exit\n"));
 	printf(_("\nOptions controlling the output content:\n"));
-	printf(_("  -a, --data-only             dump only the data, not the schema\n"));
-	printf(_("  -c, --clean                 clean (drop) databases before recreating\n"));
-	printf(_("  -g, --globals-only          dump only global objects, no databases\n"));
-	printf(_("  -o, --oids                  include OIDs in dump\n"));
-	printf(_("  -O, --no-owner              skip restoration of object ownership\n"));
-	printf(_("  -r, --roles-only            dump only roles, no databases or tablespaces\n"));
-	printf(_("  -s, --schema-only           dump only the schema, no data\n"));
-	printf(_("  -S, --superuser=NAME        superuser user name to use in the dump\n"));
-	printf(_("  -t, --tablespaces-only      dump only tablespaces, no databases or roles\n"));
-	printf(_("  -x, --no-privileges         do not dump privileges (grant/revoke)\n"));
-	printf(_("  --binary-upgrade            for use by upgrade utilities only\n"));
-	printf(_("  --column-inserts            dump data as INSERT commands with column names\n"));
-	printf(_("  --disable-dollar-quoting    disable dollar quoting, use SQL standard quoting\n"));
-	printf(_("  --disable-triggers          disable triggers during data-only restore\n"));
-	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
-	printf(_("  --no-security-labels        do not dump security label assignments\n"));
-	printf(_("  --no-tablespaces            do not dump tablespace assignments\n"));
-	printf(_("  --no-unlogged-table-data    do not dump unlogged table data\n"));
-	printf(_("  --quote-all-identifiers     quote all identifiers, even if not key words\n"));
+	printf(_("  -a, --data-only              dump only the data, not the schema\n"));
+	printf(_("  -c, --clean                  clean (drop) databases before recreating\n"));
+	printf(_("  -g, --globals-only           dump only global objects, no databases\n"));
+	printf(_("  -o, --oids                   include OIDs in dump\n"));
+	printf(_("  -O, --no-owner               skip restoration of object ownership\n"));
+	printf(_("  -r, --roles-only             dump only roles, no databases or tablespaces\n"));
+	printf(_("  -s, --schema-only            dump only the schema, no data\n"));
+	printf(_("  -S, --superuser=NAME         superuser user name to use in the dump\n"));
+	printf(_("  -t, --tablespaces-only       dump only tablespaces, no databases or roles\n"));
+	printf(_("  -x, --no-privileges          do not dump privileges (grant/revoke)\n"));
+	printf(_("  --binary-upgrade             for use by upgrade utilities only\n"));
+	printf(_("  --column-inserts             dump data as INSERT commands with column names\n"));
+	printf(_("  --disable-dollar-quoting     disable dollar quoting, use SQL standard quoting\n"));
+	printf(_("  --disable-triggers           disable triggers during data-only restore\n"));
+	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
+	printf(_("  --no-security-labels         do not dump security label assignments\n"));
+	printf(_("  --no-tablespaces             do not dump tablespace assignments\n"));
+	printf(_("  --no-unlogged-table-data     do not dump unlogged table data\n"));
+	printf(_("  --quote-all-identifiers      quote all identifiers, even if not key words\n"));
 	printf(_("  --use-set-session-authorization\n"
-			 "                              use SET SESSION AUTHORIZATION commands instead of\n"
-	"                              ALTER OWNER commands to set ownership\n"));
+			 "                               use SET SESSION AUTHORIZATION commands instead of\n"
+			 "                               ALTER OWNER commands to set ownership\n"));
 
 	printf(_("\nConnection options:\n"));
 	printf(_("  -h, --host=HOSTNAME      database server host or socket directory\n"));
@@ -642,7 +644,8 @@ dumpRoles(PGconn *conn)
 				i_rolpassword,
 				i_rolvaliduntil,
 				i_rolreplication,
-				i_rolcomment;
+				i_rolcomment,
+				i_is_current_user;
 	int			i;
 
 	/* note: rolconfig is dumped later */
@@ -652,7 +655,8 @@ dumpRoles(PGconn *conn)
 						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, rolreplication, "
-			  "pg_catalog.shobj_description(oid, 'pg_authid') as rolcomment "
+			  "pg_catalog.shobj_description(oid, 'pg_authid') as rolcomment, "
+			  			  "rolname = current_user AS is_current_user "
 						  "FROM pg_authid "
 						  "ORDER BY 2");
 	else if (server_version >= 80200)
@@ -661,7 +665,8 @@ dumpRoles(PGconn *conn)
 						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, false as rolreplication, "
-			  "pg_catalog.shobj_description(oid, 'pg_authid') as rolcomment "
+			  "pg_catalog.shobj_description(oid, 'pg_authid') as rolcomment, "
+			  			  "rolname = current_user AS is_current_user "
 						  "FROM pg_authid "
 						  "ORDER BY 2");
 	else if (server_version >= 80100)
@@ -670,7 +675,8 @@ dumpRoles(PGconn *conn)
 						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, false as rolreplication, "
-						  "null as rolcomment "
+						  "null as rolcomment, "
+			  			  "rolname = current_user AS is_current_user "
 						  "FROM pg_authid "
 						  "ORDER BY 2");
 	else
@@ -685,7 +691,8 @@ dumpRoles(PGconn *conn)
 						  "passwd as rolpassword, "
 						  "valuntil as rolvaliduntil, "
 						  "false as rolreplication, "
-						  "null as rolcomment "
+						  "null as rolcomment, "
+			  			  "rolname = current_user AS is_current_user "
 						  "FROM pg_shadow "
 						  "UNION ALL "
 						  "SELECT 0, groname as rolname, "
@@ -698,7 +705,7 @@ dumpRoles(PGconn *conn)
 						  "null::text as rolpassword, "
 						  "null::abstime as rolvaliduntil, "
 						  "false as rolreplication, "
-						  "null as rolcomment "
+						  "null as rolcomment, false "
 						  "FROM pg_group "
 						  "WHERE NOT EXISTS (SELECT 1 FROM pg_shadow "
 						  " WHERE usename = groname) "
@@ -718,6 +725,7 @@ dumpRoles(PGconn *conn)
 	i_rolvaliduntil = PQfnumber(res, "rolvaliduntil");
 	i_rolreplication = PQfnumber(res, "rolreplication");
 	i_rolcomment = PQfnumber(res, "rolcomment");
+	i_is_current_user = PQfnumber(res, "is_current_user");
 
 	if (PQntuples(res) > 0)
 		fprintf(OPF, "--\n-- Roles\n--\n\n");
@@ -745,9 +753,12 @@ dumpRoles(PGconn *conn)
 		 * will acquire the right properties even if it already exists (ie, it
 		 * won't hurt for the CREATE to fail).  This is particularly important
 		 * for the role we are connected as, since even with --clean we will
-		 * have failed to drop it.
+		 * have failed to drop it.  binary_upgrade cannot generate any errors,
+		 * so we assume the current role is already created.
 		 */
-		appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
+		if (!binary_upgrade ||
+			strcmp(PQgetvalue(res, i, i_is_current_user), "f") == 0)
+			appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
 		appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
 
 		if (strcmp(PQgetvalue(res, i, i_rolsuper), "t") == 0)
@@ -1619,6 +1630,7 @@ dumpDatabases(PGconn *conn)
 static int
 runPgDump(const char *dbname)
 {
+	PQExpBuffer connstr = createPQExpBuffer();
 	PQExpBuffer cmd = createPQExpBuffer();
 	int			ret;
 
@@ -1634,7 +1646,17 @@ runPgDump(const char *dbname)
 	else
 		appendPQExpBuffer(cmd, " -Fp ");
 
-	doShellQuoting(cmd, dbname);
+	/*
+	 * Construct a connection string from the database name, like
+	 * dbname='<database name>'. pg_dump would usually also accept the
+	 * database name as is, but if it contains any = characters, it would
+	 * incorrectly treat it as a connection string.
+	 */
+	appendPQExpBuffer(connstr, "dbname='");
+	doConnStrQuoting(connstr, dbname);
+	appendPQExpBuffer(connstr, "'");
+
+	doShellQuoting(cmd, connstr->data);
 
 	appendPQExpBuffer(cmd, "%s", SYSTEMQUOTE);
 
@@ -1647,6 +1669,7 @@ runPgDump(const char *dbname)
 	ret = system(cmd->data);
 
 	destroyPQExpBuffer(cmd);
+	destroyPQExpBuffer(connstr);
 
 	return ret;
 }
@@ -1663,7 +1686,7 @@ static void
 buildShSecLabels(PGconn *conn, const char *catalog_name, uint32 objectId,
 				 PQExpBuffer buffer, const char *target, const char *objname)
 {
-	PQExpBuffer	sql = createPQExpBuffer();
+	PQExpBuffer sql = createPQExpBuffer();
 	PGresult   *res;
 
 	buildShSecLabelQuery(conn, catalog_name, objectId, sql);
@@ -1885,6 +1908,25 @@ dumpTimestamp(char *msg)
 		fprintf(OPF, "-- %s %s\n\n", msg, buf);
 }
 
+
+/*
+ * Append the given string to the buffer, with suitable quoting for passing
+ * the string as a value, in a keyword/pair value in a libpq connection
+ * string
+ */
+static void
+doConnStrQuoting(PQExpBuffer buf, const char *str)
+{
+	while (*str)
+	{
+		/* ' and \ must be escaped by to \' and \\ */
+		if (*str == '\'' || *str == '\\')
+			appendPQExpBufferChar(buf, '\\');
+
+		appendPQExpBufferChar(buf, *str);
+		str++;
+	}
+}
 
 /*
  * Append the given string to the shell command being built in the buffer,

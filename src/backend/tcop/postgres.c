@@ -3,7 +3,7 @@
  * postgres.c
  *	  POSTGRES C Backend Interface
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -72,6 +72,7 @@
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
+#include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "mb/pg_wchar.h"
 
@@ -115,8 +116,10 @@ int			PostAuthDelay = 0;
 static long max_stack_depth_bytes = 100 * 1024L;
 
 /*
- * Stack base pointer -- initialized by PostgresMain. This is not static
- * so that PL/Java can modify it.
+ * Stack base pointer -- initialized by PostmasterMain and inherited by
+ * subprocesses. This is not static because old versions of PL/Java modify
+ * it directly. Newer versions use set_stack_base(), but we want to stay
+ * binary-compatible for the time being.
  */
 char	   *stack_base_ptr = NULL;
 
@@ -189,6 +192,7 @@ static int	InteractiveBackend(StringInfo inBuf);
 static int	interactive_getc(void);
 static int	SocketBackend(StringInfo inBuf);
 static int	ReadCommand(StringInfo inBuf);
+static void forbidden_in_wal_sender(char firstchar);
 static List *pg_rewrite_query(Query *query);
 static bool check_log_statement(List *stmt_list);
 static int	errdetail_execute(List *raw_parsetree_list);
@@ -341,9 +345,22 @@ SocketBackend(StringInfo inBuf)
 
 	if (qtype == EOF)			/* frontend disconnected */
 	{
-		ereport(COMMERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("unexpected EOF on client connection")));
+		if (IsTransactionState())
+			ereport(COMMERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("unexpected EOF on client connection with an open transaction")));
+		else
+		{
+			/*
+			 * Can't send DEBUG log messages to client at this point. Since
+			 * we're disconnecting right away, we don't need to restore
+			 * whereToSendOutput.
+			 */
+			whereToSendOutput = DestNone;
+			ereport(DEBUG1,
+					(errcode(ERRCODE_CONNECTION_DOES_NOT_EXIST),
+					 errmsg("unexpected EOF on client connection")));
+		}
 		return qtype;
 	}
 
@@ -364,9 +381,22 @@ SocketBackend(StringInfo inBuf)
 				/* old style without length word; convert */
 				if (pq_getstring(inBuf))
 				{
-					ereport(COMMERROR,
-							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					if (IsTransactionState())
+						ereport(COMMERROR,
+								(errcode(ERRCODE_CONNECTION_FAILURE),
+								 errmsg("unexpected EOF on client connection with an open transaction")));
+					else
+					{
+						/*
+						 * Can't send DEBUG log messages to client at this
+						 * point.Since we're disconnecting right away, we
+						 * don't need to restore whereToSendOutput.
+						 */
+						whereToSendOutput = DestNone;
+						ereport(DEBUG1,
+								(errcode(ERRCODE_CONNECTION_DOES_NOT_EXIST),
 							 errmsg("unexpected EOF on client connection")));
+					}
 					return EOF;
 				}
 			}
@@ -624,7 +654,10 @@ pg_analyze_and_rewrite_params(Node *parsetree,
 	pstate->p_sourcetext = query_string;
 	(*parserSetup) (pstate, parserSetupArg);
 
-	query = transformStmt(pstate, parsetree);
+	query = transformTopLevelStmt(pstate, parsetree);
+
+	if (post_parse_analyze_hook)
+		(*post_parse_analyze_hook) (pstate, query);
 
 	free_parsestate(pstate);
 
@@ -943,6 +976,10 @@ exec_simple_query(const char *query_string)
 
 		plantree_list = pg_plan_queries(querytree_list, 0, NULL);
 
+		/* Done with the snapshot used for parsing/planning */
+		if (snapshot_set)
+			PopActiveSnapshot();
+
 		/* If we got a cancel signal in analysis or planning, quit */
 		CHECK_FOR_INTERRUPTS();
 
@@ -967,19 +1004,9 @@ exec_simple_query(const char *query_string)
 						  NULL);
 
 		/*
-		 * Start the portal.
-		 * 
-		 * If we took a snapshot for parsing/planning, the portal may be
-		 * able to reuse it for the execution phase.  Currently, this will only
-		 * happen in PORTAL_ONE_SELECT mode.  But even if PortalStart doesn't
-		 * end up being able to do this, keeping the parse/plan snapshot around
-		 * until after we start the portal doesn't cost much.
+		 * Start the portal.  No parameters here.
 		 */
-		PortalStart(portal, NULL, snapshot_set);
-
-		/* Done with the snapshot used for parsing/planning */
-		if (snapshot_set)
-			PopActiveSnapshot();
+		PortalStart(portal, NULL, 0, InvalidSnapshot);
 
 		/*
 		 * Select the appropriate output format: text unless we are doing a
@@ -1232,8 +1259,8 @@ exec_parse_message(const char *query_string,	/* string to execute */
 					 errdetail_abort()));
 
 		/*
-		 * Create the CachedPlanSource before we do parse analysis, since
-		 * it needs to see the unmodified raw parse tree.
+		 * Create the CachedPlanSource before we do parse analysis, since it
+		 * needs to see the unmodified raw parse tree.
 		 */
 		psrc = CreateCachedPlan(raw_parse_tree, query_string, commandTag);
 
@@ -1294,8 +1321,8 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	/*
 	 * CachedPlanSource must be a direct child of MessageContext before we
 	 * reparent unnamed_stmt_context under it, else we have a disconnected
-	 * circular subgraph.  Klugy, but less so than flipping contexts even
-	 * more above.
+	 * circular subgraph.  Klugy, but less so than flipping contexts even more
+	 * above.
 	 */
 	if (unnamed_stmt_context)
 		MemoryContextSetParent(psrc->context, MessageContext);
@@ -1518,9 +1545,9 @@ exec_bind_message(StringInfo input_message)
 	/*
 	 * Set a snapshot if we have parameters to fetch (since the input
 	 * functions might need it) or the query isn't a utility command (and
-	 * hence could require redoing parse analysis and planning).  We keep
-	 * the snapshot active till we're done, so that plancache.c doesn't have
-	 * to take new ones.
+	 * hence could require redoing parse analysis and planning).  We keep the
+	 * snapshot active till we're done, so that plancache.c doesn't have to
+	 * take new ones.
 	 */
 	if (numParams > 0 || analyze_requires_snapshot(psrc->raw_parse_tree))
 	{
@@ -1656,8 +1683,8 @@ exec_bind_message(StringInfo input_message)
 			params->params[paramno].isnull = isNull;
 
 			/*
-			 * We mark the params as CONST.  This ensures that any custom
-			 * plan makes full use of the parameter values.
+			 * We mark the params as CONST.  This ensures that any custom plan
+			 * makes full use of the parameter values.
 			 */
 			params->params[paramno].pflags = PARAM_FLAG_CONST;
 			params->params[paramno].ptype = ptype;
@@ -1702,18 +1729,14 @@ exec_bind_message(StringInfo input_message)
 					  cplan->stmt_list,
 					  cplan);
 
-	/*
-	 * And we're ready to start portal execution.
-	 *
-	 * If we took a snapshot for parsing/planning, we'll try to reuse it
-	 * for query execution (currently, reuse will only occur if
-	 * PORTAL_ONE_SELECT mode is chosen).
-	 */
-	PortalStart(portal, params, snapshot_set);
-
 	/* Done with the snapshot used for parameter I/O and parsing/planning */
 	if (snapshot_set)
 		PopActiveSnapshot();
+
+	/*
+	 * And we're ready to start portal execution.
+	 */
+	PortalStart(portal, params, 0, InvalidSnapshot);
 
 	/*
 	 * Apply the result format requests to the portal.
@@ -2365,9 +2388,9 @@ start_xact_command(void)
 		/* Set statement timeout running, if any */
 		/* NB: this mustn't be enabled until we are within an xact */
 		if (StatementTimeout > 0)
-			enable_sig_alarm(StatementTimeout, true);
+			enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);
 		else
-			cancel_from_timeout = false;
+			disable_timeout(STATEMENT_TIMEOUT, false);
 
 		xact_started = true;
 	}
@@ -2379,7 +2402,7 @@ finish_xact_command(void)
 	if (xact_started)
 	{
 		/* Cancel any active statement timeout before committing */
-		disable_sig_alarm(true);
+		disable_timeout(STATEMENT_TIMEOUT, false);
 
 		/* Now commit the command */
 		ereport(DEBUG3,
@@ -2570,7 +2593,7 @@ die(SIGNAL_ARGS)
 			/* bump holdoff count to make ProcessInterrupts() a no-op */
 			/* until we are done getting ready for it */
 			InterruptHoldoffCount++;
-			LockWaitCancel();	/* prevent CheckDeadLock from running */
+			LockErrorCleanup(); /* prevent CheckDeadLock from running */
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			InterruptHoldoffCount--;
@@ -2612,7 +2635,7 @@ StatementCancelHandler(SIGNAL_ARGS)
 			/* bump holdoff count to make ProcessInterrupts() a no-op */
 			/* until we are done getting ready for it */
 			InterruptHoldoffCount++;
-			LockWaitCancel();	/* prevent CheckDeadLock from running */
+			LockErrorCleanup(); /* prevent CheckDeadLock from running */
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			InterruptHoldoffCount--;
@@ -2771,7 +2794,7 @@ RecoveryConflictInterrupt(ProcSignalReason reason)
 			/* bump holdoff count to make ProcessInterrupts() a no-op */
 			/* until we are done getting ready for it */
 			InterruptHoldoffCount++;
-			LockWaitCancel();	/* prevent CheckDeadLock from running */
+			LockErrorCleanup(); /* prevent CheckDeadLock from running */
 			DisableNotifyInterrupt();
 			DisableCatchupInterrupt();
 			InterruptHoldoffCount--;
@@ -2860,7 +2883,7 @@ ProcessInterrupts(void)
 					(errcode(ERRCODE_QUERY_CANCELED),
 					 errmsg("canceling authentication due to timeout")));
 		}
-		if (cancel_from_timeout)
+		if (get_timeout_indicator(STATEMENT_TIMEOUT))
 		{
 			ImmediateInterruptOK = false;		/* not idle anymore */
 			DisableNotifyInterrupt();
@@ -2955,6 +2978,53 @@ ia64_get_bsp(void)
 
 
 /*
+ * set_stack_base: set up reference point for stack depth checking
+ *
+ * Returns the old reference point, if any.
+ */
+pg_stack_base_t
+set_stack_base(void)
+{
+	char		stack_base;
+	pg_stack_base_t old;
+
+#if defined(__ia64__) || defined(__ia64)
+	old.stack_base_ptr = stack_base_ptr;
+	old.register_stack_base_ptr = register_stack_base_ptr;
+#else
+	old = stack_base_ptr;
+#endif
+
+	/* Set up reference point for stack depth checking */
+	stack_base_ptr = &stack_base;
+#if defined(__ia64__) || defined(__ia64)
+	register_stack_base_ptr = ia64_get_bsp();
+#endif
+
+	return old;
+}
+
+/*
+ * restore_stack_base: restore reference point for stack depth checking
+ *
+ * This can be used after set_stack_base() to restore the old value. This
+ * is currently only used in PL/Java. When PL/Java calls a backend function
+ * from different thread, the thread's stack is at a different location than
+ * the main thread's stack, so it sets the base pointer before the call, and
+ * restores it afterwards.
+ */
+void
+restore_stack_base(pg_stack_base_t base)
+{
+#if defined(__ia64__) || defined(__ia64)
+	stack_base_ptr = base.stack_base_ptr;
+	register_stack_base_ptr = base.register_stack_base_ptr;
+#else
+	stack_base_ptr = base;
+#endif
+}
+
+/*
  * check_stack_depth: check for excessively deep recursion
  *
  * This should be called someplace in any recursive routine that might possibly
@@ -2969,7 +3039,7 @@ check_stack_depth(void)
 	long		stack_depth;
 
 	/*
-	 * Compute distance from PostgresMain's local variables to my own
+	 * Compute distance from reference point to my local variables
 	 */
 	stack_depth = (long) (stack_base_ptr - &stack_top_loc);
 
@@ -3191,9 +3261,12 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx)
 	}
 
 #ifdef HAVE_INT_OPTERR
-	/* Turn this off because it's either printed to stderr and not the log
-	 * where we'd want it, or argv[0] is now "--single", which would make for a
-	 * weird error message.  We print our own error message below. */
+
+	/*
+	 * Turn this off because it's either printed to stderr and not the log
+	 * where we'd want it, or argv[0] is now "--single", which would make for
+	 * a weird error message.  We print our own error message below.
+	 */
 	opterr = 0;
 #endif
 
@@ -3262,7 +3335,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx)
 				break;
 
 			case 'k':
-				SetConfigOption("unix_socket_directory", optarg, ctx, gucsource);
+				SetConfigOption("unix_socket_directories", optarg, ctx, gucsource);
 				break;
 
 			case 'l':
@@ -3393,7 +3466,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx)
 		if (IsUnderPostmaster)
 			ereport(FATAL,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("invalid command-line argument for server process: %s", argv[optind]),
+					 errmsg("invalid command-line argument for server process: %s", argv[optind]),
 			  errhint("Try \"%s --help\" for more information.", progname)));
 		else
 			ereport(FATAL,
@@ -3426,12 +3499,11 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx)
  * for the session.
  * ----------------------------------------------------------------
  */
-int
+void
 PostgresMain(int argc, char *argv[], const char *username)
 {
 	const char *dbname;
 	int			firstchar;
-	char		stack_base;
 	StringInfoData input_message;
 	sigjmp_buf	local_sigjmp_buf;
 	volatile bool send_ready_for_query = true;
@@ -3456,12 +3528,6 @@ PostgresMain(int argc, char *argv[], const char *username)
 		MemoryContextInit();
 
 	SetProcessingMode(InitProcessing);
-
-	/* Set up reference point for stack depth checking */
-	stack_base_ptr = &stack_base;
-#if defined(__ia64__) || defined(__ia64)
-	register_stack_base_ptr = ia64_get_bsp();
-#endif
 
 	/* Compute paths, if we didn't inherit them from postmaster */
 	if (my_exec_path[0] == '\0')
@@ -3540,7 +3606,7 @@ PostgresMain(int argc, char *argv[], const char *username)
 			pqsignal(SIGQUIT, quickdie);		/* hard crash time */
 		else
 			pqsignal(SIGQUIT, die);		/* cancel current query and exit */
-		pqsignal(SIGALRM, handle_sig_alarm);	/* timeout conditions */
+		InitializeTimeouts();		/* establishes SIGALRM handler */
 
 		/*
 		 * Ignore failure to write to frontend. Note: if frontend closes
@@ -3587,6 +3653,9 @@ PostgresMain(int argc, char *argv[], const char *username)
 		 * Create lockfile for data directory.
 		 */
 		CreateDataDirLockFile(false);
+
+		/* Initialize MaxBackends (if under postmaster, was done already) */
+		InitializeMaxBackends();
 	}
 
 	/* Early initialization */
@@ -3645,9 +3714,9 @@ PostgresMain(int argc, char *argv[], const char *username)
 	if (IsUnderPostmaster && Log_disconnections)
 		on_proc_exit(log_disconnections, 0);
 
-	/* If this is a WAL sender process, we're done with initialization. */
+	/* Perform initialization specific to a WAL sender process. */
 	if (am_walsender)
-		proc_exit(WalSenderMain());
+		InitWalSender();
 
 	/*
 	 * process any libraries that should be preloaded at backend start (this
@@ -3725,10 +3794,10 @@ PostgresMain(int argc, char *argv[], const char *username)
 
 		/*
 		 * Forget any pending QueryCancel request, since we're returning to
-		 * the idle loop anyway, and cancel the statement timer if running.
+		 * the idle loop anyway, and cancel any active timeout requests.
 		 */
 		QueryCancelPending = false;
-		disable_sig_alarm(true);
+		disable_all_timeouts(false);
 		QueryCancelPending = false;		/* again in case timeout occurred */
 
 		/*
@@ -3756,6 +3825,9 @@ PostgresMain(int argc, char *argv[], const char *username)
 		 * Abort the current transaction in order to recover.
 		 */
 		AbortCurrentTransaction();
+
+		if (am_walsender)
+			WalSndErrorCleanup();
 
 		/*
 		 * Now return to normal top-level context and clear ErrorContext for
@@ -3891,7 +3963,10 @@ PostgresMain(int argc, char *argv[], const char *username)
 					query_string = pq_getmsgstring(&input_message);
 					pq_getmsgend(&input_message);
 
-					exec_simple_query(query_string);
+					if (am_walsender)
+						exec_replication_command(query_string);
+					else
+						exec_simple_query(query_string);
 
 					send_ready_for_query = true;
 				}
@@ -3903,6 +3978,8 @@ PostgresMain(int argc, char *argv[], const char *username)
 					const char *query_string;
 					int			numParams;
 					Oid		   *paramTypes = NULL;
+
+					forbidden_in_wal_sender(firstchar);
 
 					/* Set statement_timestamp() */
 					SetCurrentStatementStartTimestamp();
@@ -3926,6 +4003,8 @@ PostgresMain(int argc, char *argv[], const char *username)
 				break;
 
 			case 'B':			/* bind */
+				forbidden_in_wal_sender(firstchar);
+
 				/* Set statement_timestamp() */
 				SetCurrentStatementStartTimestamp();
 
@@ -3941,6 +4020,8 @@ PostgresMain(int argc, char *argv[], const char *username)
 					const char *portal_name;
 					int			max_rows;
 
+					forbidden_in_wal_sender(firstchar);
+
 					/* Set statement_timestamp() */
 					SetCurrentStatementStartTimestamp();
 
@@ -3953,6 +4034,8 @@ PostgresMain(int argc, char *argv[], const char *username)
 				break;
 
 			case 'F':			/* fastpath function call */
+				forbidden_in_wal_sender(firstchar);
+
 				/* Set statement_timestamp() */
 				SetCurrentStatementStartTimestamp();
 
@@ -4000,6 +4083,8 @@ PostgresMain(int argc, char *argv[], const char *username)
 					int			close_type;
 					const char *close_target;
 
+					forbidden_in_wal_sender(firstchar);
+
 					close_type = pq_getmsgbyte(&input_message);
 					close_target = pq_getmsgstring(&input_message);
 					pq_getmsgend(&input_message);
@@ -4041,6 +4126,8 @@ PostgresMain(int argc, char *argv[], const char *username)
 				{
 					int			describe_type;
 					const char *describe_target;
+
+					forbidden_in_wal_sender(firstchar);
 
 					/* Set statement_timestamp() (needed for xact) */
 					SetCurrentStatementStartTimestamp();
@@ -4121,11 +4208,29 @@ PostgresMain(int argc, char *argv[], const char *username)
 								firstchar)));
 		}
 	}							/* end of input-reading loop */
+}
 
-	/* can't get here because the above loop never exits */
-	Assert(false);
-
-	return 1;					/* keep compiler quiet */
+/*
+ * Throw an error if we're a WAL sender process.
+ *
+ * This is used to forbid anything else than simple query protocol messages
+ * in a WAL sender process.  'firstchar' specifies what kind of a forbidden
+ * message was received, and is used to construct the error message.
+ */
+static void
+forbidden_in_wal_sender(char firstchar)
+{
+	if (am_walsender)
+	{
+		if (firstchar == 'F')
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("fastpath function calls not supported in a replication connection")));
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("extended query protocol not supported in a replication connection")));
+	}
 }
 
 

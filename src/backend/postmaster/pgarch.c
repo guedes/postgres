@@ -14,7 +14,7 @@
  *
  *	Initial author: Simon Riggs		simon@2ndquadrant.com
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -32,6 +32,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
@@ -101,7 +102,7 @@ static Latch mainloop_latch;
 static pid_t pgarch_forkexec(void);
 #endif
 
-NON_EXEC_STATIC void PgArchiverMain(int argc, char *argv[]);
+NON_EXEC_STATIC void PgArchiverMain(int argc, char *argv[]) __attribute__((noreturn));
 static void pgarch_exit(SIGNAL_ARGS);
 static void ArchSigHupHandler(SIGNAL_ARGS);
 static void ArchSigTermHandler(SIGNAL_ARGS);
@@ -234,8 +235,6 @@ PgArchiverMain(int argc, char *argv[])
 
 	MyProcPid = getpid();		/* reset MyProcPid */
 
-	InitLatch(&mainloop_latch); /* initialize latch used in main loop */
-
 	MyStartTime = time(NULL);	/* record Start Time for logging */
 
 	/*
@@ -246,6 +245,10 @@ PgArchiverMain(int argc, char *argv[])
 	if (setsid() < 0)
 		elog(FATAL, "setsid() failed: %m");
 #endif
+
+	InitializeLatchSupport();		/* needed for latch waits */
+
+	InitLatch(&mainloop_latch); /* initialize latch used in main loop */
 
 	/*
 	 * Ignore all signals usually bound to some action in the postmaster,
@@ -361,9 +364,9 @@ pgarch_MainLoop(void)
 	wakened = true;
 
 	/*
-	 * There shouldn't be anything for the archiver to do except to wait
-	 * for a signal ... however, the archiver exists to protect our data,
-	 * so she wakes up occasionally to allow herself to be proactive.
+	 * There shouldn't be anything for the archiver to do except to wait for a
+	 * signal ... however, the archiver exists to protect our data, so she
+	 * wakes up occasionally to allow herself to be proactive.
 	 */
 	do
 	{
@@ -410,18 +413,18 @@ pgarch_MainLoop(void)
 		 * PGARCH_AUTOWAKE_INTERVAL having passed since last_copy_time, or
 		 * until postmaster dies.
 		 */
-		if (!time_to_stop) /* Don't wait during last iteration */
+		if (!time_to_stop)		/* Don't wait during last iteration */
 		{
-			pg_time_t curtime = (pg_time_t) time(NULL);
-			int		timeout;
+			pg_time_t	curtime = (pg_time_t) time(NULL);
+			int			timeout;
 
 			timeout = PGARCH_AUTOWAKE_INTERVAL - (curtime - last_copy_time);
 			if (timeout > 0)
 			{
-				int		rc;
+				int			rc;
 
 				rc = WaitLatch(&mainloop_latch,
-							   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
 							   timeout * 1000L);
 				if (rc & WL_TIMEOUT)
 					wakened = true;

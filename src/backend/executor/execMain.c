@@ -26,7 +26,7 @@
  *	before ExecutorEnd.  This can be omitted only in case of EXPLAIN,
  *	which should also omit ExecutorRun.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -37,27 +37,21 @@
  */
 #include "postgres.h"
 
-#include "access/reloptions.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
 #include "access/xact.h"
-#include "catalog/heap.h"
 #include "catalog/namespace.h"
-#include "catalog/toasting.h"
-#include "commands/tablespace.h"
 #include "commands/trigger.h"
 #include "executor/execdebug.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "optimizer/clauses.h"
-#include "parser/parse_clause.h"
 #include "parser/parsetree.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
-#include "storage/smgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
-#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
@@ -87,15 +81,9 @@ static void ExecutePlan(EState *estate, PlanState *planstate,
 static bool ExecCheckRTEPerms(RangeTblEntry *rte);
 static void ExecCheckXactReadOnly(PlannedStmt *plannedstmt);
 static char *ExecBuildSlotValueDescription(TupleTableSlot *slot,
-										   int maxfieldlen);
+							  int maxfieldlen);
 static void EvalPlanQualStart(EPQState *epqstate, EState *parentestate,
 				  Plan *planTree);
-static void OpenIntoRel(QueryDesc *queryDesc);
-static void CloseIntoRel(QueryDesc *queryDesc);
-static void intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo);
-static void intorel_receive(TupleTableSlot *slot, DestReceiver *self);
-static void intorel_shutdown(DestReceiver *self);
-static void intorel_destroy(DestReceiver *self);
 
 /* end of local decls */
 
@@ -174,11 +162,10 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		case CMD_SELECT:
 
 			/*
-			 * SELECT INTO, SELECT FOR UPDATE/SHARE and modifying CTEs need to
-			 * mark tuples
+			 * SELECT FOR [KEY] UPDATE/SHARE and modifying CTEs need to mark
+			 * tuples
 			 */
-			if (queryDesc->plannedstmt->intoClause != NULL ||
-				queryDesc->plannedstmt->rowMarks != NIL ||
+			if (queryDesc->plannedstmt->rowMarks != NIL ||
 				queryDesc->plannedstmt->hasModifyingCTE)
 				estate->es_output_cid = GetCurrentCommandId(true);
 
@@ -241,7 +228,9 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
  *		we retrieve up to 'count' tuples in the specified direction.
  *
  *		Note: count = 0 is interpreted as no portal limit, i.e., run to
- *		completion.
+ *		completion.  Also note that the count limit is only applied to
+ *		retrieved tuples, not for instance to those inserted/updated/deleted
+ *		by a ModifyTable plan node.
  *
  *		There is no return value, but output tuples (if any) are sent to
  *		the destination receiver specified in the QueryDesc; and the number
@@ -308,13 +297,6 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 
 	if (sendTuples)
 		(*dest->rStartup) (dest, operation, queryDesc->tupDesc);
-
-	/*
-	 * if it's CREATE TABLE AS ... WITH NO DATA, skip plan execution
-	 */
-	if (estate->es_select_into &&
-		queryDesc->plannedstmt->intoClause->skipData)
-		direction = NoMovementScanDirection;
 
 	/*
 	 * run plan
@@ -450,12 +432,6 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
 	ExecEndPlan(queryDesc->planstate, estate);
-
-	/*
-	 * Close the SELECT INTO relation if any
-	 */
-	if (estate->es_select_into)
-		CloseIntoRel(queryDesc);
 
 	/* do away with our snapshots */
 	UnregisterSnapshot(estate->es_snapshot);
@@ -706,15 +682,6 @@ ExecCheckXactReadOnly(PlannedStmt *plannedstmt)
 {
 	ListCell   *l;
 
-	/*
-	 * CREATE TABLE AS or SELECT INTO?
-	 *
-	 * XXX should we allow this if the destination is temp?  Considering that
-	 * it would still require catalog changes, probably not.
-	 */
-	if (plannedstmt->intoClause != NULL)
-		PreventCommandIfReadOnly(CreateCommandTag((Node *) plannedstmt));
-
 	/* Fail if write permissions are requested on any non-temp table */
 	foreach(l, plannedstmt->rtable)
 	{
@@ -811,7 +778,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	}
 
 	/*
-	 * Similarly, we have to lock relations selected FOR UPDATE/FOR SHARE
+	 * Similarly, we have to lock relations selected FOR [KEY] UPDATE/SHARE
 	 * before we initialize the plan tree, else we'd be risking lock upgrades.
 	 * While we are at it, build the ExecRowMark list.
 	 */
@@ -830,7 +797,9 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		switch (rc->markType)
 		{
 			case ROW_MARK_EXCLUSIVE:
+			case ROW_MARK_NOKEYEXCLUSIVE:
 			case ROW_MARK_SHARE:
+			case ROW_MARK_KEYSHARE:
 				relid = getrelid(rc->rti, rangeTable);
 				relation = heap_open(relid, RowShareLock);
 				break;
@@ -861,18 +830,6 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		erm->noWait = rc->noWait;
 		ItemPointerSetInvalid(&(erm->curCtid));
 		estate->es_rowMarks = lappend(estate->es_rowMarks, erm);
-	}
-
-	/*
-	 * Detect whether we're doing SELECT INTO.  If so, set the es_into_oids
-	 * flag appropriately so that the plan tree will be initialized with the
-	 * correct tuple descriptors.  (Other SELECT INTO stuff comes later.)
-	 */
-	estate->es_select_into = false;
-	if (operation == CMD_SELECT && plannedstmt->intoClause != NULL)
-	{
-		estate->es_select_into = true;
-		estate->es_into_oids = interpretOidsOption(plannedstmt->intoClause->options);
 	}
 
 	/*
@@ -926,9 +883,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	planstate = ExecInitNode(plan, estate, eflags);
 
 	/*
-	 * Get the tuple descriptor describing the type of tuples to return. (this
-	 * is especially important if we are creating a relation with "SELECT
-	 * INTO")
+	 * Get the tuple descriptor describing the type of tuples to return.
 	 */
 	tupType = ExecGetResultType(planstate);
 
@@ -968,24 +923,13 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 	queryDesc->tupDesc = tupType;
 	queryDesc->planstate = planstate;
-
-	/*
-	 * If doing SELECT INTO, initialize the "into" relation.  We must wait
-	 * till now so we have the "clean" result tuple type to create the new
-	 * table from.
-	 *
-	 * If EXPLAIN, skip creating the "into" relation.
-	 */
-	if (estate->es_select_into && !(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		OpenIntoRel(queryDesc);
 }
 
 /*
  * Check that a proposed result relation is a legal target for the operation
  *
- * In most cases parser and/or planner should have noticed this already, but
- * let's make sure.  In the view case we do need a test here, because if the
- * view wasn't rewritten by a rule, it had better have an INSTEAD trigger.
+ * Generally the parser and/or planner should have noticed any such mistake
+ * already, but let's make sure.
  *
  * Note: when changing this function, you probably also need to look at
  * CheckValidRowMarkRel.
@@ -1013,6 +957,13 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 							RelationGetRelationName(resultRel))));
 			break;
 		case RELKIND_VIEW:
+			/*
+			 * Okay only if there's a suitable INSTEAD OF trigger.  Messages
+			 * here should match rewriteHandler.c's rewriteTargetView, except
+			 * that we omit errdetail because we haven't got the information
+			 * handy (and given that we really shouldn't get here anyway,
+			 * it's not worth great exertion to get).
+			 */
 			switch (operation)
 			{
 				case CMD_INSERT:
@@ -1021,7 +972,7 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						   errmsg("cannot insert into view \"%s\"",
 								  RelationGetRelationName(resultRel)),
-						   errhint("You need an unconditional ON INSERT DO INSTEAD rule or an INSTEAD OF INSERT trigger.")));
+						   errhint("To make the view insertable, provide an unconditional ON INSERT DO INSTEAD rule or an INSTEAD OF INSERT trigger.")));
 					break;
 				case CMD_UPDATE:
 					if (!trigDesc || !trigDesc->trig_update_instead_row)
@@ -1029,7 +980,7 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						   errmsg("cannot update view \"%s\"",
 								  RelationGetRelationName(resultRel)),
-						   errhint("You need an unconditional ON UPDATE DO INSTEAD rule or an INSTEAD OF UPDATE trigger.")));
+						   errhint("To make the view updatable, provide an unconditional ON UPDATE DO INSTEAD rule or an INSTEAD OF UPDATE trigger.")));
 					break;
 				case CMD_DELETE:
 					if (!trigDesc || !trigDesc->trig_delete_instead_row)
@@ -1037,7 +988,7 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 						   errmsg("cannot delete from view \"%s\"",
 								  RelationGetRelationName(resultRel)),
-						   errhint("You need an unconditional ON DELETE DO INSTEAD rule or an INSTEAD OF DELETE trigger.")));
+						   errhint("To make the view updatable, provide an unconditional ON DELETE DO INSTEAD rule or an INSTEAD OF DELETE trigger.")));
 					break;
 				default:
 					elog(ERROR, "unrecognized CmdType: %d", (int) operation);
@@ -1088,7 +1039,7 @@ CheckValidRowMarkRel(Relation rel, RowMarkType markType)
 							RelationGetRelationName(rel))));
 			break;
 		case RELKIND_VIEW:
-			/* Should not get here */
+			/* Should not get here; planner should have expanded the view */
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("cannot lock rows in view \"%s\"",
@@ -1230,7 +1181,7 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 /*
  *		ExecContextForcesOids
  *
- * This is pretty grotty: when doing INSERT, UPDATE, or SELECT INTO,
+ * This is pretty grotty: when doing INSERT, UPDATE, or CREATE TABLE AS,
  * we need to ensure that result tuples have space for an OID iff they are
  * going to be stored into a relation that has OIDs.  In other contexts
  * we are free to choose whether to leave space for OIDs in result tuples
@@ -1255,9 +1206,9 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
  * the ModifyTable node, so ModifyTable has to set es_result_relation_info
  * while initializing each subplan.
  *
- * SELECT INTO is even uglier, because we don't have the INTO relation's
- * descriptor available when this code runs; we have to look aside at a
- * flag set by InitPlan().
+ * CREATE TABLE AS is even uglier, because we don't have the target relation's
+ * descriptor available when this code runs; we have to look aside at the
+ * flags passed to ExecutorStart().
  */
 bool
 ExecContextForcesOids(PlanState *planstate, bool *hasoids)
@@ -1275,9 +1226,14 @@ ExecContextForcesOids(PlanState *planstate, bool *hasoids)
 		}
 	}
 
-	if (planstate->state->es_select_into)
+	if (planstate->state->es_top_eflags & EXEC_FLAG_WITH_OIDS)
 	{
-		*hasoids = planstate->state->es_into_oids;
+		*hasoids = true;
+		return true;
+	}
+	if (planstate->state->es_top_eflags & EXEC_FLAG_WITHOUT_OIDS)
+	{
+		*hasoids = false;
 		return true;
 	}
 
@@ -1390,7 +1346,7 @@ ExecEndPlan(PlanState *planstate, EState *estate)
 	}
 
 	/*
-	 * close any relations selected FOR UPDATE/FOR SHARE, again keeping locks
+	 * close any relations selected FOR [KEY] UPDATE/SHARE, again keeping locks
 	 */
 	foreach(l, estate->es_rowMarks)
 	{
@@ -1404,7 +1360,7 @@ ExecEndPlan(PlanState *planstate, EState *estate)
 /* ----------------------------------------------------------------
  *		ExecutePlan
  *
- *		Processes the query plan until we have processed 'numberTuples' tuples,
+ *		Processes the query plan until we have retrieved 'numberTuples' tuples,
  *		moving in the specified direction.
  *
  *		Runs to completion if numberTuples is 0
@@ -1495,6 +1451,8 @@ ExecutePlan(EState *estate,
 
 /*
  * ExecRelCheck --- check that tuple meets constraints for result relation
+ *
+ * Returns NULL if OK, else name of failed check constraint
  */
 static const char *
 ExecRelCheck(ResultRelInfo *resultRelInfo,
@@ -1576,9 +1534,10 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 				ereport(ERROR,
 						(errcode(ERRCODE_NOT_NULL_VIOLATION),
 						 errmsg("null value in column \"%s\" violates not-null constraint",
-						NameStr(rel->rd_att->attrs[attrChk - 1]->attname)),
+						  NameStr(rel->rd_att->attrs[attrChk - 1]->attname)),
 						 errdetail("Failing row contains %s.",
-								   ExecBuildSlotValueDescription(slot, 64))));
+								   ExecBuildSlotValueDescription(slot, 64)),
+						 errtablecol(rel, attrChk)));
 		}
 	}
 
@@ -1592,7 +1551,8 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 					 errmsg("new row for relation \"%s\" violates check constraint \"%s\"",
 							RelationGetRelationName(rel), failed),
 					 errdetail("Failing row contains %s.",
-							   ExecBuildSlotValueDescription(slot, 64))));
+							   ExecBuildSlotValueDescription(slot, 64)),
+					 errtableconstraint(rel, failed)));
 	}
 }
 
@@ -1743,6 +1703,7 @@ ExecBuildAuxRowMark(ExecRowMark *erm, List *targetlist)
  *	epqstate - state for EvalPlanQual rechecking
  *	relation - table containing tuple
  *	rti - rangetable index of table containing tuple
+ *	lockmode - requested tuple lock mode
  *	*tid - t_ctid from the outdated tuple (ie, next updated version)
  *	priorXmax - t_xmax from the outdated tuple
  *
@@ -1751,10 +1712,13 @@ ExecBuildAuxRowMark(ExecRowMark *erm, List *targetlist)
  *
  * Returns a slot containing the new candidate update/delete tuple, or
  * NULL if we determine we shouldn't process the row.
+ *
+ * Note: properly, lockmode should be declared as enum LockTupleMode,
+ * but we use "int" to avoid having to include heapam.h in executor.h.
  */
 TupleTableSlot *
 EvalPlanQual(EState *estate, EPQState *epqstate,
-			 Relation relation, Index rti,
+			 Relation relation, Index rti, int lockmode,
 			 ItemPointer tid, TransactionId priorXmax)
 {
 	TupleTableSlot *slot;
@@ -1765,7 +1729,7 @@ EvalPlanQual(EState *estate, EPQState *epqstate,
 	/*
 	 * Get and lock the updated version of the row; if fail, return NULL.
 	 */
-	copyTuple = EvalPlanQualFetch(estate, relation, LockTupleExclusive,
+	copyTuple = EvalPlanQualFetch(estate, relation, lockmode,
 								  tid, priorXmax);
 
 	if (copyTuple == NULL)
@@ -1857,8 +1821,7 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 		if (heap_fetch(relation, &SnapshotDirty, &tuple, &buffer, true, NULL))
 		{
 			HTSU_Result test;
-			ItemPointerData update_ctid;
-			TransactionId update_xmax;
+			HeapUpdateFailureData hufd;
 
 			/*
 			 * If xmin isn't what we're expecting, the slot must have been
@@ -1893,13 +1856,13 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 			/*
 			 * If tuple was inserted by our own transaction, we have to check
 			 * cmin against es_output_cid: cmin >= current CID means our
-			 * command cannot see the tuple, so we should ignore it.  Without
-			 * this we are open to the "Halloween problem" of indefinitely
-			 * re-updating the same tuple. (We need not check cmax because
-			 * HeapTupleSatisfiesDirty will consider a tuple deleted by our
-			 * transaction dead, regardless of cmax.)  We just checked that
-			 * priorXmax == xmin, so we can test that variable instead of
-			 * doing HeapTupleHeaderGetXmin again.
+			 * command cannot see the tuple, so we should ignore it.
+			 * Otherwise heap_lock_tuple() will throw an error, and so would
+			 * any later attempt to update or delete the tuple.  (We need not
+			 * check cmax because HeapTupleSatisfiesDirty will consider a
+			 * tuple deleted by our transaction dead, regardless of cmax.)
+			 * Wee just checked that priorXmax == xmin, so we can test that
+			 * variable instead of doing HeapTupleHeaderGetXmin again.
 			 */
 			if (TransactionIdIsCurrentTransactionId(priorXmax) &&
 				HeapTupleHeaderGetCmin(tuple.t_data) >= estate->es_output_cid)
@@ -1911,17 +1874,29 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 			/*
 			 * This is a live tuple, so now try to lock it.
 			 */
-			test = heap_lock_tuple(relation, &tuple, &buffer,
-								   &update_ctid, &update_xmax,
+			test = heap_lock_tuple(relation, &tuple,
 								   estate->es_output_cid,
-								   lockmode, false);
+								   lockmode, false /* wait */,
+								   false, &buffer, &hufd);
 			/* We now have two pins on the buffer, get rid of one */
 			ReleaseBuffer(buffer);
 
 			switch (test)
 			{
 				case HeapTupleSelfUpdated:
-					/* treat it as deleted; do not process */
+					/*
+					 * The target tuple was already updated or deleted by the
+					 * current command, or by a later command in the current
+					 * transaction.  We *must* ignore the tuple in the former
+					 * case, so as to avoid the "Halloween problem" of
+					 * repeated update attempts.  In the latter case it might
+					 * be sensible to fetch the updated tuple instead, but
+					 * doing so would require changing heap_lock_tuple as well
+					 * as heap_update and heap_delete to not complain about
+					 * updating "invisible" tuples, which seems pretty scary.
+					 * So for now, treat the tuple as deleted and do not
+					 * process.
+					 */
 					ReleaseBuffer(buffer);
 					return NULL;
 
@@ -1935,12 +1910,12 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 						ereport(ERROR,
 								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 								 errmsg("could not serialize access due to concurrent update")));
-					if (!ItemPointerEquals(&update_ctid, &tuple.t_self))
+					if (!ItemPointerEquals(&hufd.ctid, &tuple.t_self))
 					{
 						/* it was updated, so look at the updated version */
-						tuple.t_self = update_ctid;
+						tuple.t_self = hufd.ctid;
 						/* updated row should have xmin matching this xmax */
-						priorXmax = update_xmax;
+						priorXmax = hufd.xmax;
 						continue;
 					}
 					/* tuple was deleted, so give up */
@@ -2003,7 +1978,7 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 		/* updated, so look at the updated row */
 		tuple.t_self = tuple.t_data->t_ctid;
 		/* updated row should have xmin matching this xmax */
-		priorXmax = HeapTupleHeaderGetXmax(tuple.t_data);
+		priorXmax = HeapTupleHeaderGetUpdateXid(tuple.t_data);
 		ReleaseBuffer(buffer);
 		/* loop back to fetch next in chain */
 	}
@@ -2290,8 +2265,6 @@ EvalPlanQualStart(EPQState *epqstate, EState *parentestate, Plan *planTree)
 	estate->es_rowMarks = parentestate->es_rowMarks;
 	estate->es_top_eflags = parentestate->es_top_eflags;
 	estate->es_instrument = parentestate->es_instrument;
-	estate->es_select_into = parentestate->es_select_into;
-	estate->es_into_oids = parentestate->es_into_oids;
 	/* es_auxmodifytables must NOT be copied */
 
 	/*
@@ -2422,352 +2395,4 @@ EvalPlanQualEnd(EPQState *epqstate)
 	epqstate->estate = NULL;
 	epqstate->planstate = NULL;
 	epqstate->origslot = NULL;
-}
-
-
-/*
- * Support for SELECT INTO (a/k/a CREATE TABLE AS)
- *
- * We implement SELECT INTO by diverting SELECT's normal output with
- * a specialized DestReceiver type.
- */
-
-typedef struct
-{
-	DestReceiver pub;			/* publicly-known function pointers */
-	EState	   *estate;			/* EState we are working with */
-	DestReceiver *origdest;		/* QueryDesc's original receiver */
-	Relation	rel;			/* Relation to write to */
-	int			hi_options;		/* heap_insert performance options */
-	BulkInsertState bistate;	/* bulk insert state */
-} DR_intorel;
-
-/*
- * OpenIntoRel --- actually create the SELECT INTO target relation
- *
- * This also replaces QueryDesc->dest with the special DestReceiver for
- * SELECT INTO.  We assume that the correct result tuple type has already
- * been placed in queryDesc->tupDesc.
- */
-static void
-OpenIntoRel(QueryDesc *queryDesc)
-{
-	IntoClause *into = queryDesc->plannedstmt->intoClause;
-	EState	   *estate = queryDesc->estate;
-	TupleDesc	intoTupDesc = queryDesc->tupDesc;
-	Relation	intoRelationDesc;
-	char	   *intoName;
-	Oid			namespaceId;
-	Oid			tablespaceId;
-	Datum		reloptions;
-	Oid			intoRelationId;
-	DR_intorel *myState;
-	RangeTblEntry  *rte;
-	AttrNumber		attnum;
-	static char *validnsps[] = HEAP_RELOPT_NAMESPACES;
-
-	Assert(into);
-
-	/*
-	 * XXX This code needs to be kept in sync with DefineRelation(). Maybe we
-	 * should try to use that function instead.
-	 */
-
-	/*
-	 * Check consistency of arguments
-	 */
-	if (into->onCommit != ONCOMMIT_NOOP
-		&& into->rel->relpersistence != RELPERSISTENCE_TEMP)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-				 errmsg("ON COMMIT can only be used on temporary tables")));
-
-	{
-		AclResult aclresult;
-		int i;
-
-		for (i = 0; i < intoTupDesc->natts; i++)
-		{
-			Oid atttypid = intoTupDesc->attrs[i]->atttypid;
-
-			aclresult = pg_type_aclcheck(atttypid, GetUserId(), ACL_USAGE);
-			if (aclresult != ACLCHECK_OK)
-				aclcheck_error(aclresult, ACL_KIND_TYPE,
-							   format_type_be(atttypid));
-		}
-	}
-
-	/*
-	 * If a column name list was specified in CREATE TABLE AS, override the
-	 * column names derived from the query.  (Too few column names are OK, too
-	 * many are not.)  It would probably be all right to scribble directly on
-	 * the query's result tupdesc, but let's be safe and make a copy.
-	 */
-	if (into->colNames)
-	{
-		ListCell   *lc;
-
-		intoTupDesc = CreateTupleDescCopy(intoTupDesc);
-		attnum = 1;
-		foreach(lc, into->colNames)
-		{
-			char	   *colname = strVal(lfirst(lc));
-
-			if (attnum > intoTupDesc->natts)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("CREATE TABLE AS specifies too many column names")));
-			namestrcpy(&(intoTupDesc->attrs[attnum - 1]->attname), colname);
-			attnum++;
-		}
-	}
-
-	/*
-	 * Find namespace to create in, check its permissions, lock it against
-	 * concurrent drop, and mark into->rel as RELPERSISTENCE_TEMP if the
-	 * selected namespace is temporary.
-	 */
-	intoName = into->rel->relname;
-	namespaceId = RangeVarGetAndCheckCreationNamespace(into->rel, NoLock,
-													   NULL);
-
-	/*
-	 * Security check: disallow creating temp tables from security-restricted
-	 * code.  This is needed because calling code might not expect untrusted
-	 * tables to appear in pg_temp at the front of its search path.
-	 */
-	if (into->rel->relpersistence == RELPERSISTENCE_TEMP
-		&& InSecurityRestrictedOperation())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("cannot create temporary table within security-restricted operation")));
-
-	/*
-	 * Select tablespace to use.  If not specified, use default tablespace
-	 * (which may in turn default to database's default).
-	 */
-	if (into->tableSpaceName)
-	{
-		tablespaceId = get_tablespace_oid(into->tableSpaceName, false);
-	}
-	else
-	{
-		tablespaceId = GetDefaultTablespace(into->rel->relpersistence);
-		/* note InvalidOid is OK in this case */
-	}
-
-	/* Check permissions except when using the database's default space */
-	if (OidIsValid(tablespaceId) && tablespaceId != MyDatabaseTableSpace)
-	{
-		AclResult	aclresult;
-
-		aclresult = pg_tablespace_aclcheck(tablespaceId, GetUserId(),
-										   ACL_CREATE);
-
-		if (aclresult != ACLCHECK_OK)
-			aclcheck_error(aclresult, ACL_KIND_TABLESPACE,
-						   get_tablespace_name(tablespaceId));
-	}
-
-	/* Parse and validate any reloptions */
-	reloptions = transformRelOptions((Datum) 0,
-									 into->options,
-									 NULL,
-									 validnsps,
-									 true,
-									 false);
-	(void) heap_reloptions(RELKIND_RELATION, reloptions, true);
-
-	/* Now we can actually create the new relation */
-	intoRelationId = heap_create_with_catalog(intoName,
-											  namespaceId,
-											  tablespaceId,
-											  InvalidOid,
-											  InvalidOid,
-											  InvalidOid,
-											  GetUserId(),
-											  intoTupDesc,
-											  NIL,
-											  RELKIND_RELATION,
-											  into->rel->relpersistence,
-											  false,
-											  false,
-											  true,
-											  0,
-											  into->onCommit,
-											  reloptions,
-											  true,
-											  allowSystemTableMods);
-	Assert(intoRelationId != InvalidOid);
-
-	/*
-	 * Advance command counter so that the newly-created relation's catalog
-	 * tuples will be visible to heap_open.
-	 */
-	CommandCounterIncrement();
-
-	/*
-	 * If necessary, create a TOAST table for the INTO relation. Note that
-	 * AlterTableCreateToastTable ends with CommandCounterIncrement(), so that
-	 * the TOAST table will be visible for insertion.
-	 */
-	reloptions = transformRelOptions((Datum) 0,
-									 into->options,
-									 "toast",
-									 validnsps,
-									 true,
-									 false);
-
-	(void) heap_reloptions(RELKIND_TOASTVALUE, reloptions, true);
-
-	AlterTableCreateToastTable(intoRelationId, reloptions);
-
-	/*
-	 * And open the constructed table for writing.
-	 */
-	intoRelationDesc = heap_open(intoRelationId, AccessExclusiveLock);
-
-	/*
-	 * Check INSERT permission on the constructed table.
-	 */
-	rte = makeNode(RangeTblEntry);
-	rte->rtekind = RTE_RELATION;
-	rte->relid = intoRelationId;
-	rte->relkind = RELKIND_RELATION;
-	rte->requiredPerms = ACL_INSERT;
-
-	for (attnum = 1; attnum <= intoTupDesc->natts; attnum++)
-		rte->modifiedCols = bms_add_member(rte->modifiedCols,
-				attnum - FirstLowInvalidHeapAttributeNumber);
-
-	ExecCheckRTPerms(list_make1(rte), true);
-
-	/*
-	 * Now replace the query's DestReceiver with one for SELECT INTO
-	 */
-	myState = (DR_intorel *) CreateDestReceiver(DestIntoRel);
-	Assert(myState->pub.mydest == DestIntoRel);
-	myState->estate = estate;
-	myState->origdest = queryDesc->dest;
-	myState->rel = intoRelationDesc;
-
-	queryDesc->dest = (DestReceiver *) myState;
-
-	/*
-	 * We can skip WAL-logging the insertions, unless PITR or streaming
-	 * replication is in use. We can skip the FSM in any case.
-	 */
-	myState->hi_options = HEAP_INSERT_SKIP_FSM |
-		(XLogIsNeeded() ? 0 : HEAP_INSERT_SKIP_WAL);
-	myState->bistate = GetBulkInsertState();
-
-	/* Not using WAL requires smgr_targblock be initially invalid */
-	Assert(RelationGetTargetBlock(intoRelationDesc) == InvalidBlockNumber);
-}
-
-/*
- * CloseIntoRel --- clean up SELECT INTO at ExecutorEnd time
- */
-static void
-CloseIntoRel(QueryDesc *queryDesc)
-{
-	DR_intorel *myState = (DR_intorel *) queryDesc->dest;
-
-	/*
-	 * OpenIntoRel might never have gotten called, and we also want to guard
-	 * against double destruction.
-	 */
-	if (myState && myState->pub.mydest == DestIntoRel)
-	{
-		FreeBulkInsertState(myState->bistate);
-
-		/* If we skipped using WAL, must heap_sync before commit */
-		if (myState->hi_options & HEAP_INSERT_SKIP_WAL)
-			heap_sync(myState->rel);
-
-		/* close rel, but keep lock until commit */
-		heap_close(myState->rel, NoLock);
-
-		/* restore the receiver belonging to executor's caller */
-		queryDesc->dest = myState->origdest;
-
-		/* might as well invoke my destructor */
-		intorel_destroy((DestReceiver *) myState);
-	}
-}
-
-/*
- * CreateIntoRelDestReceiver -- create a suitable DestReceiver object
- */
-DestReceiver *
-CreateIntoRelDestReceiver(void)
-{
-	DR_intorel *self = (DR_intorel *) palloc0(sizeof(DR_intorel));
-
-	self->pub.receiveSlot = intorel_receive;
-	self->pub.rStartup = intorel_startup;
-	self->pub.rShutdown = intorel_shutdown;
-	self->pub.rDestroy = intorel_destroy;
-	self->pub.mydest = DestIntoRel;
-
-	/* private fields will be set by OpenIntoRel */
-
-	return (DestReceiver *) self;
-}
-
-/*
- * intorel_startup --- executor startup
- */
-static void
-intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
-{
-	/* no-op */
-}
-
-/*
- * intorel_receive --- receive one tuple
- */
-static void
-intorel_receive(TupleTableSlot *slot, DestReceiver *self)
-{
-	DR_intorel *myState = (DR_intorel *) self;
-	HeapTuple	tuple;
-
-	/*
-	 * get the heap tuple out of the tuple table slot, making sure we have a
-	 * writable copy
-	 */
-	tuple = ExecMaterializeSlot(slot);
-
-	/*
-	 * force assignment of new OID (see comments in ExecInsert)
-	 */
-	if (myState->rel->rd_rel->relhasoids)
-		HeapTupleSetOid(tuple, InvalidOid);
-
-	heap_insert(myState->rel,
-				tuple,
-				myState->estate->es_output_cid,
-				myState->hi_options,
-				myState->bistate);
-
-	/* We know this is a newly created relation, so there are no indexes */
-}
-
-/*
- * intorel_shutdown --- executor end
- */
-static void
-intorel_shutdown(DestReceiver *self)
-{
-	/* no-op */
-}
-
-/*
- * intorel_destroy --- release DestReceiver object
- */
-static void
-intorel_destroy(DestReceiver *self)
-{
-	pfree(self);
 }

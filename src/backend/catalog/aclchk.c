@@ -3,7 +3,7 @@
  * aclchk.c
  *	  Routines to check access control permissions.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,6 +19,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -29,6 +30,7 @@
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_default_acl.h"
+#include "catalog/pg_event_trigger.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
@@ -186,10 +188,10 @@ merge_acl_with_grant(Acl *old_acl, bool is_grant,
 
 	foreach(j, grantees)
 	{
-		AclItem aclitem;
+		AclItem		aclitem;
 		Acl		   *newer_acl;
 
-		aclitem.	ai_grantee = lfirst_oid(j);
+		aclitem.ai_grantee = lfirst_oid(j);
 
 		/*
 		 * Grant options can only be granted to individual roles, not PUBLIC.
@@ -202,7 +204,7 @@ merge_acl_with_grant(Acl *old_acl, bool is_grant,
 					(errcode(ERRCODE_INVALID_GRANT_OPERATION),
 					 errmsg("grant options can only be granted to roles")));
 
-		aclitem.	ai_grantor = grantorId;
+		aclitem.ai_grantor = grantorId;
 
 		/*
 		 * The asymmetry in the conditions here comes from the spec.  In
@@ -277,6 +279,10 @@ restrict_and_check_grant(bool is_grant, AclMode avail_goptions, bool all_privs,
 		case ACL_KIND_FOREIGN_SERVER:
 			whole_mask = ACL_ALL_RIGHTS_FOREIGN_SERVER;
 			break;
+		case ACL_KIND_EVENT_TRIGGER:
+			elog(ERROR, "grantable rights not supported for event triggers");
+			/* not reached, but keep compiler quiet */
+			return ACL_NO_RIGHTS;
 		case ACL_KIND_TYPE:
 			whole_mask = ACL_ALL_RIGHTS_TYPE;
 			break;
@@ -749,7 +755,7 @@ objectsInSchemaToOids(GrantObjectType objtype, List *nspnames)
 		Oid			namespaceId;
 		List	   *objs;
 
-		namespaceId = LookupExplicitNamespace(nspname);
+		namespaceId = LookupExplicitNamespace(nspname, false);
 
 		switch (objtype)
 		{
@@ -1340,10 +1346,13 @@ RemoveRoleFromObjectACL(Oid roleid, Oid classid, Oid objid)
 			case DEFACLOBJ_FUNCTION:
 				iacls.objtype = ACL_OBJECT_FUNCTION;
 				break;
+			case DEFACLOBJ_TYPE:
+				iacls.objtype = ACL_OBJECT_TYPE;
+				break;
 			default:
 				/* Shouldn't get here */
-				elog(ERROR, "unexpected default ACL type %d",
-					 pg_default_acl_tuple->defaclobjtype);
+				elog(ERROR, "unexpected default ACL type: %d",
+					 (int) pg_default_acl_tuple->defaclobjtype);
 				break;
 		}
 
@@ -3073,7 +3082,7 @@ ExecGrant_Type(InternalGrant *istmt)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_GRANT_OPERATION),
 					 errmsg("cannot set privileges of array types"),
-					 errhint("Set the privileges of the element type instead.")));
+				errhint("Set the privileges of the element type instead.")));
 
 		/* Used GRANT DOMAIN on a non-domain? */
 		if (istmt->objtype == ACL_OBJECT_DOMAIN &&
@@ -3286,6 +3295,8 @@ static const char *const no_priv_msg[MAX_ACL_KIND] =
 	gettext_noop("permission denied for foreign-data wrapper %s"),
 	/* ACL_KIND_FOREIGN_SERVER */
 	gettext_noop("permission denied for foreign server %s"),
+	/* ACL_KIND_EVENT_TRIGGER */
+	gettext_noop("permission denied for event trigger %s"),
 	/* ACL_KIND_EXTENSION */
 	gettext_noop("permission denied for extension %s"),
 };
@@ -3330,6 +3341,8 @@ static const char *const not_owner_msg[MAX_ACL_KIND] =
 	gettext_noop("must be owner of foreign-data wrapper %s"),
 	/* ACL_KIND_FOREIGN_SERVER */
 	gettext_noop("must be owner of foreign server %s"),
+	/* ACL_KIND_EVENT_TRIGGER */
+	gettext_noop("must be owner of event trigger %s"),
 	/* ACL_KIND_EXTENSION */
 	gettext_noop("must be owner of extension %s"),
 };
@@ -3389,6 +3402,19 @@ aclcheck_error_col(AclResult aclerr, AclObjectKind objectkind,
 }
 
 
+/*
+ * Special common handling for types: use element type instead of array type,
+ * and format nicely
+ */
+void
+aclcheck_error_type(AclResult aclerr, Oid typeOid)
+{
+	Oid element_type = get_element_type(typeOid);
+
+	aclcheck_error(aclerr, ACL_KIND_TYPE, format_type_be(element_type ? element_type : typeOid));
+}
+
+
 /* Check if given user has rolcatupdate privilege according to pg_authid */
 static bool
 has_rolcatupdate(Oid roleid)
@@ -3442,6 +3468,10 @@ pg_aclmask(AclObjectKind objkind, Oid table_oid, AttrNumber attnum, Oid roleid,
 			return pg_foreign_data_wrapper_aclmask(table_oid, roleid, mask, how);
 		case ACL_KIND_FOREIGN_SERVER:
 			return pg_foreign_server_aclmask(table_oid, roleid, mask, how);
+		case ACL_KIND_EVENT_TRIGGER:
+			elog(ERROR, "grantable rights not supported for event triggers");
+			/* not reached, but keep compiler quiet */
+			return ACL_NO_RIGHTS;
 		case ACL_KIND_TYPE:
 			return pg_type_aclmask(table_oid, roleid, mask, how);
 		default:
@@ -4184,7 +4214,7 @@ pg_type_aclmask(Oid type_oid, Oid roleid, AclMode mask, AclMaskHow how)
 	/* "True" array types don't manage permissions of their own */
 	if (typeForm->typelem != 0 && typeForm->typlen == -1)
 	{
-		Oid		elttype_oid = typeForm->typelem;
+		Oid			elttype_oid = typeForm->typelem;
 
 		ReleaseSysCache(tuple);
 
@@ -4856,6 +4886,33 @@ pg_foreign_server_ownercheck(Oid srv_oid, Oid roleid)
 						srv_oid)));
 
 	ownerId = ((Form_pg_foreign_server) GETSTRUCT(tuple))->srvowner;
+
+	ReleaseSysCache(tuple);
+
+	return has_privs_of_role(roleid, ownerId);
+}
+
+/*
+ * Ownership check for an event trigger (specified by OID).
+ */
+bool
+pg_event_trigger_ownercheck(Oid et_oid, Oid roleid)
+{
+	HeapTuple	tuple;
+	Oid			ownerId;
+
+	/* Superusers bypass all permission checking. */
+	if (superuser_arg(roleid))
+		return true;
+
+	tuple = SearchSysCache1(EVENTTRIGGEROID, ObjectIdGetDatum(et_oid));
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("event trigger with OID %u does not exist",
+						et_oid)));
+
+	ownerId = ((Form_pg_event_trigger) GETSTRUCT(tuple))->evtowner;
 
 	ReleaseSysCache(tuple);
 

@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -48,8 +48,7 @@
 /* And a few guys need only the pg_strtok support fields */
 #define READ_TEMP_LOCALS()	\
 	char	   *token;		\
-	int			length;		\
-	(void) token /* possibly unused */
+	int			length
 
 /* ... but most need both */
 #define READ_LOCALS(nodeTypeName)			\
@@ -113,6 +112,7 @@
 /* Read a Node field */
 #define READ_NODE_FIELD(fldname) \
 	token = pg_strtok(&length);		/* skip :fldname */ \
+	(void) token;				/* in case not used elsewhere */ \
 	local_node->fldname = nodeRead(NULL, 0)
 
 /* Read a bitmapset field */
@@ -195,10 +195,10 @@ _readQuery(void)
 
 	READ_ENUM_FIELD(commandType, CmdType);
 	READ_ENUM_FIELD(querySource, QuerySource);
+	local_node->queryId = 0;	/* not saved in output format */
 	READ_BOOL_FIELD(canSetTag);
 	READ_NODE_FIELD(utilityStmt);
 	READ_INT_FIELD(resultRelation);
-	READ_NODE_FIELD(intoClause);
 	READ_BOOL_FIELD(hasAggs);
 	READ_BOOL_FIELD(hasWindowFuncs);
 	READ_BOOL_FIELD(hasSubLinks);
@@ -301,7 +301,7 @@ _readRowMarkClause(void)
 	READ_LOCALS(RowMarkClause);
 
 	READ_UINT_FIELD(rti);
-	READ_BOOL_FIELD(forUpdate);
+	READ_ENUM_FIELD(strength, LockClauseStrength);
 	READ_BOOL_FIELD(noWait);
 	READ_BOOL_FIELD(pushedDown);
 
@@ -537,6 +537,7 @@ _readFuncExpr(void)
 	READ_OID_FIELD(funcid);
 	READ_OID_FIELD(funcresulttype);
 	READ_BOOL_FIELD(funcretset);
+	READ_BOOL_FIELD(funcvariadic);
 	READ_ENUM_FIELD(funcformat, CoercionForm);
 	READ_OID_FIELD(funccollid);
 	READ_OID_FIELD(inputcollid);
@@ -1222,6 +1223,7 @@ _readRangeTblEntry(void)
 			break;
 	}
 
+	READ_BOOL_FIELD(lateral);
 	READ_BOOL_FIELD(inh);
 	READ_BOOL_FIELD(inFromCl);
 	READ_UINT_FIELD(requiredPerms);

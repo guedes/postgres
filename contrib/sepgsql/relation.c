@@ -4,7 +4,7 @@
  *
  * Routines corresponding to relation/attribute objects
  *
- * Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
@@ -12,6 +12,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "catalog/indexing.h"
 #include "catalog/dependency.h"
@@ -20,11 +21,15 @@
 #include "catalog/pg_namespace.h"
 #include "commands/seclabel.h"
 #include "utils/fmgroids.h"
+#include "utils/catcache.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 
 #include "sepgsql.h"
+
+static void		sepgsql_index_modify(Oid indexOid);
 
 /*
  * sepgsql_attribute_post_create
@@ -44,9 +49,9 @@ sepgsql_attribute_post_create(Oid relOid, AttrNumber attnum)
 	char	   *scontext;
 	char	   *tcontext;
 	char	   *ncontext;
-	char		audit_name[2*NAMEDATALEN + 20];
+	char		audit_name[2 * NAMEDATALEN + 20];
 	ObjectAddress object;
-	Form_pg_attribute	attForm;
+	Form_pg_attribute attForm;
 
 	/*
 	 * Only attributes within regular relation have individual security
@@ -84,6 +89,7 @@ sepgsql_attribute_post_create(Oid relOid, AttrNumber attnum)
 	tcontext = sepgsql_get_label(RelationRelationId, relOid, 0);
 	ncontext = sepgsql_compute_create(scontext, tcontext,
 									  SEPG_CLASS_DB_COLUMN);
+
 	/*
 	 * check db_column:{create} permission
 	 */
@@ -118,8 +124,8 @@ sepgsql_attribute_post_create(Oid relOid, AttrNumber attnum)
 void
 sepgsql_attribute_drop(Oid relOid, AttrNumber attnum)
 {
-	ObjectAddress	object;
-	char		   *audit_name;
+	ObjectAddress object;
+	char	   *audit_name;
 
 	if (get_rel_relkind(relOid) != RELKIND_RELATION)
 		return;
@@ -151,7 +157,7 @@ sepgsql_attribute_relabel(Oid relOid, AttrNumber attnum,
 						  const char *seclabel)
 {
 	ObjectAddress object;
-	char		 *audit_name;
+	char	   *audit_name;
 
 	if (get_rel_relkind(relOid) != RELKIND_RELATION)
 		ereport(ERROR,
@@ -172,6 +178,7 @@ sepgsql_attribute_relabel(Oid relOid, AttrNumber attnum,
 							SEPG_DB_COLUMN__RELABELFROM,
 							audit_name,
 							true);
+
 	/*
 	 * check db_column:{relabelto} permission
 	 */
@@ -203,7 +210,7 @@ sepgsql_relation_post_create(Oid relOid)
 	char	   *tcontext;		/* schema */
 	char	   *rcontext;		/* relation */
 	char	   *ccontext;		/* column */
-	char		audit_name[2*NAMEDATALEN + 20];
+	char		audit_name[2 * NAMEDATALEN + 20];
 
 	/*
 	 * Fetch catalog record of the new relation. Because pg_class entry is not
@@ -225,6 +232,23 @@ sepgsql_relation_post_create(Oid relOid)
 
 	classForm = (Form_pg_class) GETSTRUCT(tuple);
 
+	/* ignore indexes on toast tables */
+	if (classForm->relkind == RELKIND_INDEX &&
+		classForm->relnamespace == PG_TOAST_NAMESPACE)
+		goto out;
+
+	/*
+	 * check db_schema:{add_name} permission of the namespace
+	 */
+	object.classId = NamespaceRelationId;
+	object.objectId = classForm->relnamespace;
+	object.objectSubId = 0;
+	sepgsql_avc_check_perms(&object,
+							SEPG_CLASS_DB_SCHEMA,
+							SEPG_DB_SCHEMA__ADD_NAME,
+							getObjectDescription(&object),
+							true);
+
 	switch (classForm->relkind)
 	{
 		case RELKIND_RELATION:
@@ -239,21 +263,15 @@ sepgsql_relation_post_create(Oid relOid)
 			tclass = SEPG_CLASS_DB_VIEW;
 			tclass_text = "view";
 			break;
+		case RELKIND_INDEX:
+			/* deal with indexes specially; no need for tclass */
+			sepgsql_index_modify(relOid);
+			goto out;
 		default:
+			/* ignore other relkinds */
 			goto out;
 	}
 
-	/*
-	 * check db_schema:{add_name} permission of the namespace
-	 */
-	object.classId = NamespaceRelationId;
-	object.objectId = classForm->relnamespace;
-	object.objectSubId = 0;
-	sepgsql_avc_check_perms(&object,
-							SEPG_CLASS_DB_SCHEMA,
-							SEPG_DB_SCHEMA__ADD_NAME,
-							getObjectDescription(&object),
-							true);
 	/*
 	 * Compute a default security label when we create a new relation object
 	 * under the specified namespace.
@@ -273,6 +291,7 @@ sepgsql_relation_post_create(Oid relOid)
 								  SEPG_DB_DATABASE__CREATE,
 								  audit_name,
 								  true);
+
 	/*
 	 * Assign the default security label on the new relation
 	 */
@@ -288,10 +307,10 @@ sepgsql_relation_post_create(Oid relOid)
 	if (classForm->relkind == RELKIND_RELATION)
 	{
 		Relation	arel;
-		ScanKeyData	akey;
-		SysScanDesc	ascan;
+		ScanKeyData akey;
+		SysScanDesc ascan;
 		HeapTuple	atup;
-		Form_pg_attribute	attForm;
+		Form_pg_attribute attForm;
 
 		arel = heap_open(AttributeRelationId, AccessShareLock);
 
@@ -315,6 +334,7 @@ sepgsql_relation_post_create(Oid relOid)
 			ccontext = sepgsql_compute_create(scontext,
 											  rcontext,
 											  SEPG_CLASS_DB_COLUMN);
+
 			/*
 			 * check db_column:{create} permission
 			 */
@@ -335,6 +355,7 @@ sepgsql_relation_post_create(Oid relOid)
 		heap_close(arel, AccessShareLock);
 	}
 	pfree(rcontext);
+
 out:
 	systable_endscan(sscan);
 	heap_close(rel, AccessShareLock);
@@ -348,20 +369,33 @@ out:
 void
 sepgsql_relation_drop(Oid relOid)
 {
-	ObjectAddress	object;
-	char		   *audit_name;
-	uint16_t		tclass = 0;
-	char			relkind;
+	ObjectAddress object;
+	char	   *audit_name;
+	uint16_t	tclass;
+	char		relkind;
 
 	relkind = get_rel_relkind(relOid);
-	if (relkind == RELKIND_RELATION)
-		tclass = SEPG_CLASS_DB_TABLE;
-	else if (relkind == RELKIND_SEQUENCE)
-		tclass = SEPG_CLASS_DB_SEQUENCE;
-	else if (relkind == RELKIND_VIEW)
-		tclass = SEPG_CLASS_DB_VIEW;
-	else
-		return;
+	switch (relkind)
+	{
+		case RELKIND_RELATION:
+			tclass = SEPG_CLASS_DB_TABLE;
+			break;
+		case RELKIND_SEQUENCE:
+			tclass = SEPG_CLASS_DB_SEQUENCE;
+			break;
+		case RELKIND_VIEW:
+			tclass = SEPG_CLASS_DB_VIEW;
+			break;
+		case RELKIND_INDEX:
+			/* ignore indexes on toast tables */
+			if (get_rel_namespace(relOid) == PG_TOAST_NAMESPACE)
+				return;
+			/* other indexes are handled specially below; no need for tclass */
+			break;
+		default:
+			/* ignore other relkinds */
+			return;
+	}
 
 	/*
 	 * check db_schema:{remove_name} permission
@@ -377,6 +411,13 @@ sepgsql_relation_drop(Oid relOid)
 							audit_name,
 							true);
 	pfree(audit_name);
+
+	/* deal with indexes specially */
+	if (relkind == RELKIND_INDEX)
+	{
+		sepgsql_index_modify(relOid);
+		return;
+	}
 
 	/*
 	 * check db_table/sequence/view:{drop} permission
@@ -398,13 +439,13 @@ sepgsql_relation_drop(Oid relOid)
 	 */
 	if (relkind == RELKIND_RELATION)
 	{
-		Form_pg_attribute	attForm;
+		Form_pg_attribute attForm;
 		CatCList   *attrList;
 		HeapTuple	atttup;
 		int			i;
 
 		attrList = SearchSysCacheList1(ATTNUM, ObjectIdGetDatum(relOid));
-		for (i=0; i < attrList->n_members; i++)
+		for (i = 0; i < attrList->n_members; i++)
 		{
 			atttup = &attrList->members[i]->tuple;
 			attForm = (Form_pg_attribute) GETSTRUCT(atttup);
@@ -436,7 +477,7 @@ sepgsql_relation_drop(Oid relOid)
 void
 sepgsql_relation_relabel(Oid relOid, const char *seclabel)
 {
-	ObjectAddress	object;
+	ObjectAddress object;
 	char	   *audit_name;
 	char		relkind;
 	uint16_t	tclass = 0;
@@ -468,6 +509,7 @@ sepgsql_relation_relabel(Oid relOid, const char *seclabel)
 							SEPG_DB_TABLE__RELABELFROM,
 							audit_name,
 							true);
+
 	/*
 	 * check db_xxx:{relabelto} permission
 	 */
@@ -477,4 +519,122 @@ sepgsql_relation_relabel(Oid relOid, const char *seclabel)
 								  audit_name,
 								  true);
 	pfree(audit_name);
+}
+
+/*
+ * sepgsql_relation_setattr
+ *
+ * It checks privileges to set attribute of the supplied relation
+ */
+void
+sepgsql_relation_setattr(Oid relOid)
+{
+	ObjectAddress object;
+	char	   *audit_name;
+	uint16_t	tclass;
+
+	switch (get_rel_relkind(relOid))
+	{
+		case RELKIND_RELATION:
+			tclass = SEPG_CLASS_DB_TABLE;
+			break;
+		case RELKIND_SEQUENCE:
+			tclass = SEPG_CLASS_DB_SEQUENCE;
+			break;
+		case RELKIND_VIEW:
+			tclass = SEPG_CLASS_DB_VIEW;
+			break;
+		case RELKIND_INDEX:
+			/* deal with indexes specially */
+			sepgsql_index_modify(relOid);
+			return;
+		default:
+			/* other relkinds don't need additional work */
+			return;
+	}
+
+	object.classId = RelationRelationId;
+	object.objectId = relOid;
+	object.objectSubId = 0;
+	audit_name = getObjectDescription(&object);
+
+	/*
+	 * XXX - we should add checks related to namespace stuff, when
+	 * object_access_hook get support for ALTER statement.  Right now, there is
+	 * no invocation path on ALTER ...  RENAME TO / SET SCHEMA.
+	 */
+
+	/*
+	 * check db_xxx:{setattr} permission
+	 */
+	sepgsql_avc_check_perms(&object,
+							tclass,
+							SEPG_DB_TABLE__SETATTR,
+							audit_name,
+							true);
+	pfree(audit_name);
+}
+
+/*
+ * sepgsql_relation_setattr_extra
+ *
+ * It checks permission of the relation being referenced by extra attributes,
+ * such as pg_index entries. Like core PostgreSQL, sepgsql also does not deal
+ * with such entries as individual "objects", thus, modification of these
+ * entries shall be considered as setting an attribute of the underlying
+ * relation.
+ */
+static void
+sepgsql_relation_setattr_extra(Relation catalog,
+							   Oid catindex_id,
+							   Oid extra_oid,
+							   AttrNumber anum_relation_id,
+							   AttrNumber anum_extra_id)
+{
+	ScanKeyData	skey;
+	SysScanDesc	sscan;
+	HeapTuple	tuple;
+	Datum		datum;
+	bool		isnull;
+
+	ScanKeyInit(&skey, anum_extra_id,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(extra_oid));
+
+	sscan = systable_beginscan(catalog, catindex_id, true,
+							   SnapshotSelf, 1, &skey);
+	tuple = systable_getnext(sscan);
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "catalog lookup failed for object %u in catalog \"%s\"",
+			 extra_oid, RelationGetRelationName(catalog));
+
+	datum = heap_getattr(tuple, anum_relation_id,
+						 RelationGetDescr(catalog), &isnull);
+	Assert(!isnull);
+
+	sepgsql_relation_setattr(DatumGetObjectId(datum));
+
+	systable_endscan(sscan);
+}
+
+/*
+ * sepgsql_index_modify
+ * 		Handle index create, update, drop
+ *
+ * Unlike other relation kinds, indexes do not have their own security labels,
+ * so instead of doing checks directly, treat them as extra attributes of their
+ * owning tables; so check 'setattr' permissions on the table.
+ */
+static void
+sepgsql_index_modify(Oid indexOid)
+{
+	Relation	catalog = heap_open(IndexRelationId, AccessShareLock);
+
+	/* check db_table:{setattr} permission of the table being indexed */
+	sepgsql_relation_setattr_extra(catalog,
+								   IndexRelidIndexId,
+								   indexOid,
+								   Anum_pg_index_indrelid,
+								   Anum_pg_index_indexrelid);
+	heap_close(catalog, AccessShareLock);
 }

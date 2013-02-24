@@ -7,7 +7,7 @@
  *	  and join trees.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/primnodes.h
@@ -125,9 +125,9 @@ typedef struct Expr
  * The code doesn't really need varnoold/varoattno, but they are very useful
  * for debugging and interpreting completed plans, so we keep them around.
  */
-#define    INNER_VAR		65000			/* reference to inner subplan */
-#define    OUTER_VAR		65001			/* reference to outer subplan */
-#define    INDEX_VAR		65002			/* reference to index column */
+#define    INNER_VAR		65000		/* reference to inner subplan */
+#define    OUTER_VAR		65001		/* reference to outer subplan */
+#define    INDEX_VAR		65002		/* reference to index column */
 
 #define IS_SPECIAL_VARNO(varno)		((varno) >= INNER_VAR)
 
@@ -316,14 +316,19 @@ typedef enum CoercionContext
 } CoercionContext;
 
 /*
- * CoercionForm - information showing how to display a function-call node
+ * CoercionForm - how to display a node that could have come from a cast
+ *
+ * NB: equal() ignores CoercionForm fields, therefore this *must* not carry
+ * any semantically significant information.  We need that behavior so that
+ * the planner will consider equivalent implicit and explicit casts to be
+ * equivalent.  In cases where those actually behave differently, the coercion
+ * function's arguments will be different.
  */
 typedef enum CoercionForm
 {
 	COERCE_EXPLICIT_CALL,		/* display as a function call */
 	COERCE_EXPLICIT_CAST,		/* display as an explicit cast */
-	COERCE_IMPLICIT_CAST,		/* implicit cast, so hide it */
-	COERCE_DONTCARE				/* special case for planner */
+	COERCE_IMPLICIT_CAST		/* implicit cast, so hide it */
 } CoercionForm;
 
 /*
@@ -335,6 +340,7 @@ typedef struct FuncExpr
 	Oid			funcid;			/* PG_PROC OID of the function */
 	Oid			funcresulttype; /* PG_TYPE OID of result value */
 	bool		funcretset;		/* true if function returns set */
+	bool		funcvariadic;	/* true if VARIADIC was used in call */
 	CoercionForm funcformat;	/* how to display this function call */
 	Oid			funccollid;		/* OID of collation of result */
 	Oid			inputcollid;	/* OID of collation that function should use */
@@ -847,13 +853,13 @@ typedef struct ArrayExpr
  * the same as the number of columns logically present in the rowtype.
  *
  * colnames provides field names in cases where the names can't easily be
- * obtained otherwise.  Names *must* be provided if row_typeid is RECORDOID.
+ * obtained otherwise.	Names *must* be provided if row_typeid is RECORDOID.
  * If row_typeid identifies a known composite type, colnames can be NIL to
  * indicate the type's cataloged field names apply.  Note that colnames can
  * be non-NIL even for a composite type, and typically is when the RowExpr
  * was created by expanding a whole-row Var.  This is so that we can retain
  * the column alias names of the RTE that the Var referenced (which would
- * otherwise be very difficult to extract from the parsetree).  Like the
+ * otherwise be very difficult to extract from the parsetree).	Like the
  * args list, colnames is one-for-one with physical fields of the rowtype.
  */
 typedef struct RowExpr
@@ -953,7 +959,8 @@ typedef struct MinMaxExpr
  *
  * Note: result type/typmod/collation are not stored, but can be deduced
  * from the XmlExprOp.	The type/typmod fields are just used for display
- * purposes, and are NOT the true result type of the node.
+ * purposes, and are NOT necessarily the true result type of the node.
+ * (We also use type == InvalidOid to mark a not-yet-parse-analyzed XmlExpr.)
  */
 typedef enum XmlExprOp
 {

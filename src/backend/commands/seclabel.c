@@ -3,7 +3,7 @@
  * seclabel.c
  *	  routines to support security label feature.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * -------------------------------------------------------------------------
@@ -12,6 +12,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_seclabel.h"
@@ -37,7 +38,7 @@ static List *label_provider_list = NIL;
  *
  * Apply a security label to a database object.
  */
-void
+Oid
 ExecSecLabelStmt(SecLabelStmt *stmt)
 {
 	LabelProvider *provider = NULL;
@@ -130,6 +131,8 @@ ExecSecLabelStmt(SecLabelStmt *stmt)
 	 */
 	if (relation != NULL)
 		relation_close(relation, NoLock);
+
+	return address.objectId;
 }
 
 /*
@@ -237,7 +240,7 @@ GetSecurityLabel(const ObjectAddress *object, const char *provider)
 	return seclabel;
 }
 
-/* 
+/*
  * SetSharedSecurityLabel is a helper function of SetSecurityLabel to
  * handle shared database objects.
  */
@@ -246,8 +249,8 @@ SetSharedSecurityLabel(const ObjectAddress *object,
 					   const char *provider, const char *label)
 {
 	Relation	pg_shseclabel;
-	ScanKeyData	keys[4];
-	SysScanDesc	scan;
+	ScanKeyData keys[4];
+	SysScanDesc scan;
 	HeapTuple	oldtup;
 	HeapTuple	newtup = NULL;
 	Datum		values[Natts_pg_shseclabel];
@@ -414,8 +417,8 @@ void
 DeleteSharedSecurityLabel(Oid objectId, Oid classId)
 {
 	Relation	pg_shseclabel;
-	ScanKeyData	skey[2];
-	SysScanDesc	scan;
+	ScanKeyData skey[2];
+	SysScanDesc scan;
 	HeapTuple	oldtup;
 
 	ScanKeyInit(&skey[0],

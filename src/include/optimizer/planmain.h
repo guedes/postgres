@@ -4,7 +4,7 @@
  *	  prototypes for various files in optimizer/plan
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/planmain.h
@@ -94,6 +94,8 @@ extern void add_base_rels_to_query(PlannerInfo *root, Node *jtnode);
 extern void build_base_rel_tlists(PlannerInfo *root, List *final_tlist);
 extern void add_vars_to_targetlist(PlannerInfo *root, List *vars,
 					   Relids where_needed, bool create_new_ph);
+extern void find_lateral_references(PlannerInfo *root);
+extern void create_lateral_join_info(PlannerInfo *root);
 extern List *deconstruct_jointree(PlannerInfo *root);
 extern void distribute_restrictinfo_to_rels(PlannerInfo *root,
 								RestrictInfo *restrictinfo);
@@ -103,13 +105,15 @@ extern void process_implied_equality(PlannerInfo *root,
 						 Expr *item1,
 						 Expr *item2,
 						 Relids qualscope,
+						 Relids nullable_relids,
 						 bool below_outer_join,
 						 bool both_const);
 extern RestrictInfo *build_implied_join_equality(Oid opno,
 							Oid collation,
 							Expr *item1,
 							Expr *item2,
-							Relids qualscope);
+							Relids qualscope,
+							Relids nullable_relids);
 
 /*
  * prototypes for plan/analyzejoins.c
@@ -120,10 +124,6 @@ extern List *remove_useless_joins(PlannerInfo *root, List *joinlist);
  * prototypes for plan/setrefs.c
  */
 extern Plan *set_plan_references(PlannerInfo *root, Plan *plan);
-extern List *set_returning_clause_references(PlannerInfo *root,
-								List *rlist,
-								Plan *topplan,
-								Index resultRelation);
 extern void fix_opfuncids(Node *node);
 extern void set_opfuncid(OpExpr *opexpr);
 extern void set_sa_opfuncid(ScalarArrayOpExpr *opexpr);

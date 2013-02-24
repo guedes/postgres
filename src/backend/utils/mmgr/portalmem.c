@@ -8,7 +8,7 @@
  * doesn't actually run the executor for them.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -487,7 +487,7 @@ PortalDrop(Portal portal, bool isTopCommit)
 	 * during transaction abort.
 	 *
 	 * Note: in most paths of control, this will have been done already in
-	 * MarkPortalDone or MarkPortalFailed.  We're just making sure.
+	 * MarkPortalDone or MarkPortalFailed.	We're just making sure.
 	 */
 	if (PointerIsValid(portal->cleanup))
 	{
@@ -1054,4 +1054,23 @@ pg_cursor(PG_FUNCTION_ARGS)
 	rsinfo->setDesc = tupdesc;
 
 	return (Datum) 0;
+}
+
+bool
+ThereAreNoReadyPortals(void)
+{
+	HASH_SEQ_STATUS status;
+	PortalHashEnt *hentry;
+
+	hash_seq_init(&status, PortalHashTable);
+
+	while ((hentry = (PortalHashEnt *) hash_seq_search(&status)) != NULL)
+	{
+		Portal		portal = hentry->portal;
+
+		if (portal->status == PORTAL_READY)
+			return false;
+	}
+
+	return true;
 }

@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_namespace.h
@@ -37,6 +37,7 @@ CATALOG(pg_namespace,2615)
 {
 	NameData	nspname;
 	Oid			nspowner;
+
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
 	aclitem		nspacl[1];
 #endif

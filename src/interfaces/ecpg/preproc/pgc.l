@@ -7,7 +7,7 @@
  * This is a modified version of src/backend/parser/scan.l
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -344,7 +344,7 @@ cppinclude_next		{space}*#{include_next}{space}*
 /* take care of cpp lines, they may also be continuated */
 /* first a general line for all commands not starting with "i" */
 /* and then the other commands starting with "i", we have to add these
- * seperately because the cppline production would match on "include" too */
+ * separately because the cppline production would match on "include" too */
 cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.*{newline}
 
 /*

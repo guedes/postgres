@@ -8,7 +8,7 @@
  * stepping on each others' toes.  Formerly we used table-level locks
  * on pg_database, but that's too coarse-grained.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "access/xlogutils.h"
 #include "catalog/catalog.h"
@@ -45,6 +46,7 @@
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
 #include "storage/copydir.h"
+#include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/ipc.h"
 #include "storage/procarray.h"
@@ -78,6 +80,7 @@ static bool get_db_info(const char *name, LOCKMODE lockmode,
 			Oid *dbIdP, Oid *ownerIdP,
 			int *encodingP, bool *dbIsTemplateP, bool *dbAllowConnP,
 			Oid *dbLastSysOidP, TransactionId *dbFrozenXidP,
+			MultiXactId *dbMinMultiP,
 			Oid *dbTablespace, char **dbCollate, char **dbCtype);
 static bool have_createdb_privilege(void);
 static void remove_dbtablespaces(Oid db_id);
@@ -88,7 +91,7 @@ static int	errdetail_busy_db(int notherbackends, int npreparedxacts);
 /*
  * CREATE DATABASE
  */
-void
+Oid
 createdb(const CreatedbStmt *stmt)
 {
 	HeapScanDesc scan;
@@ -102,6 +105,7 @@ createdb(const CreatedbStmt *stmt)
 	bool		src_allowconn;
 	Oid			src_lastsysoid;
 	TransactionId src_frozenxid;
+	MultiXactId src_minmxid;
 	Oid			src_deftablespace;
 	volatile Oid dst_deftablespace;
 	Relation	pg_database_rel;
@@ -123,11 +127,13 @@ createdb(const CreatedbStmt *stmt)
 	const char *dbtemplate = NULL;
 	char	   *dbcollate = NULL;
 	char	   *dbctype = NULL;
+	char	   *canonname;
 	int			encoding = -1;
 	int			dbconnlimit = -1;
 	int			notherbackends;
 	int			npreparedxacts;
 	createdb_failure_params fparms;
+	Snapshot	snapshot;
 
 	/* Extract options from the statement node tree */
 	foreach(option, stmt->options)
@@ -284,7 +290,7 @@ createdb(const CreatedbStmt *stmt)
 	if (!get_db_info(dbtemplate, ShareLock,
 					 &src_dboid, &src_owner, &src_encoding,
 					 &src_istemplate, &src_allowconn, &src_lastsysoid,
-					 &src_frozenxid, &src_deftablespace,
+					 &src_frozenxid, &src_minmxid, &src_deftablespace,
 					 &src_collate, &src_ctype))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
@@ -318,15 +324,17 @@ createdb(const CreatedbStmt *stmt)
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("invalid server encoding %d", encoding)));
 
-	/* Check that the chosen locales are valid */
-	if (!check_locale(LC_COLLATE, dbcollate))
+	/* Check that the chosen locales are valid, and get canonical spellings */
+	if (!check_locale(LC_COLLATE, dbcollate, &canonname))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("invalid locale name %s", dbcollate)));
-	if (!check_locale(LC_CTYPE, dbctype))
+				 errmsg("invalid locale name: \"%s\"", dbcollate)));
+	dbcollate = canonname;
+	if (!check_locale(LC_CTYPE, dbctype, &canonname))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("invalid locale name %s", dbctype)));
+				 errmsg("invalid locale name: \"%s\"", dbctype)));
+	dbctype = canonname;
 
 	check_encoding_locale_matches(encoding, dbcollate, dbctype);
 
@@ -485,6 +493,7 @@ createdb(const CreatedbStmt *stmt)
 	new_record[Anum_pg_database_datconnlimit - 1] = Int32GetDatum(dbconnlimit);
 	new_record[Anum_pg_database_datlastsysoid - 1] = ObjectIdGetDatum(src_lastsysoid);
 	new_record[Anum_pg_database_datfrozenxid - 1] = TransactionIdGetDatum(src_frozenxid);
+	new_record[Anum_pg_database_datminmxid - 1] = TransactionIdGetDatum(src_minmxid);
 	new_record[Anum_pg_database_dattablespace - 1] = ObjectIdGetDatum(dst_deftablespace);
 
 	/*
@@ -530,6 +539,29 @@ createdb(const CreatedbStmt *stmt)
 	RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT);
 
 	/*
+	 * Take an MVCC snapshot to use while scanning through pg_tablespace.  For
+	 * safety, register the snapshot (this prevents it from changing if
+	 * something else were to request a snapshot during the loop).
+	 *
+	 * Traversing pg_tablespace with an MVCC snapshot is necessary to provide
+	 * us with a consistent view of the tablespaces that exist.  Using
+	 * SnapshotNow here would risk seeing the same tablespace multiple times,
+	 * or worse not seeing a tablespace at all, if its tuple is moved around
+	 * by a concurrent update (eg an ACL change).
+	 *
+	 * Inconsistency of this sort is inherent to all SnapshotNow scans, unless
+	 * some lock is held to prevent concurrent updates of the rows being
+	 * sought.	There should be a generic fix for that, but in the meantime
+	 * it's worth fixing this case in particular because we are doing very
+	 * heavyweight operations within the scan, so that the elapsed time for
+	 * the scan is vastly longer than for most other catalog scans.  That
+	 * means there's a much wider window for concurrent updates to cause
+	 * trouble here than anywhere else.  XXX this code should be changed
+	 * whenever a generic fix is implemented.
+	 */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+
+	/*
 	 * Once we start copying subdirectories, we need to be able to clean 'em
 	 * up if we fail.  Use an ENSURE block to make sure this happens.  (This
 	 * is not a 100% solution, because of the possibility of failure during
@@ -546,7 +578,7 @@ createdb(const CreatedbStmt *stmt)
 		 * each one to the new database.
 		 */
 		rel = heap_open(TableSpaceRelationId, AccessShareLock);
-		scan = heap_beginscan(rel, SnapshotNow, 0, NULL);
+		scan = heap_beginscan(rel, snapshot, 0, NULL);
 		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 		{
 			Oid			srctablespace = HeapTupleGetOid(tuple);
@@ -650,6 +682,11 @@ createdb(const CreatedbStmt *stmt)
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(createdb_failure_callback,
 								PointerGetDatum(&fparms));
+
+	/* Free our snapshot */
+	UnregisterSnapshot(snapshot);
+
+	return dboid;
 }
 
 /*
@@ -689,11 +726,11 @@ check_encoding_locale_matches(int encoding, const char *collate, const char *cty
 		  (encoding == PG_SQL_ASCII && superuser())))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("encoding %s does not match locale %s",
+				 errmsg("encoding \"%s\" does not match locale \"%s\"",
 						pg_encoding_to_char(encoding),
 						ctype),
-			   errdetail("The chosen LC_CTYPE setting requires encoding %s.",
-						 pg_encoding_to_char(ctype_encoding))));
+		   errdetail("The chosen LC_CTYPE setting requires encoding \"%s\".",
+					 pg_encoding_to_char(ctype_encoding))));
 
 	if (!(collate_encoding == encoding ||
 		  collate_encoding == PG_SQL_ASCII ||
@@ -704,11 +741,11 @@ check_encoding_locale_matches(int encoding, const char *collate, const char *cty
 		  (encoding == PG_SQL_ASCII && superuser())))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("encoding %s does not match locale %s",
+				 errmsg("encoding \"%s\" does not match locale \"%s\"",
 						pg_encoding_to_char(encoding),
 						collate),
-			 errdetail("The chosen LC_COLLATE setting requires encoding %s.",
-					   pg_encoding_to_char(collate_encoding))));
+		 errdetail("The chosen LC_COLLATE setting requires encoding \"%s\".",
+				   pg_encoding_to_char(collate_encoding))));
 }
 
 /* Error cleanup callback for createdb */
@@ -752,7 +789,7 @@ dropdb(const char *dbname, bool missing_ok)
 	pgdbrel = heap_open(DatabaseRelationId, RowExclusiveLock);
 
 	if (!get_db_info(dbname, AccessExclusiveLock, &db_id, NULL, NULL,
-					 &db_istemplate, NULL, NULL, NULL, NULL, NULL, NULL))
+					 &db_istemplate, NULL, NULL, NULL, NULL, NULL, NULL, NULL))
 	{
 		if (!missing_ok)
 		{
@@ -781,7 +818,8 @@ dropdb(const char *dbname, bool missing_ok)
 	/* DROP hook for the database being removed */
 	if (object_access_hook)
 	{
-		ObjectAccessDrop    drop_arg;
+		ObjectAccessDrop drop_arg;
+
 		memset(&drop_arg, 0, sizeof(ObjectAccessDrop));
 		InvokeObjectAccessHook(OAT_DROP,
 							   DatabaseRelationId, db_id, 0, &drop_arg);
@@ -828,8 +866,7 @@ dropdb(const char *dbname, bool missing_ok)
 	ReleaseSysCache(tup);
 
 	/*
-	 * Delete any comments or security labels associated with
-	 * the database.
+	 * Delete any comments or security labels associated with the database.
 	 */
 	DeleteSharedComments(db_id, DatabaseRelationId);
 	DeleteSharedSecurityLabel(db_id, DatabaseRelationId);
@@ -857,18 +894,18 @@ dropdb(const char *dbname, bool missing_ok)
 	pgstat_drop_database(db_id);
 
 	/*
-	 * Tell checkpointer to forget any pending fsync and unlink requests for files
-	 * in the database; else the fsyncs will fail at next checkpoint, or
+	 * Tell checkpointer to forget any pending fsync and unlink requests for
+	 * files in the database; else the fsyncs will fail at next checkpoint, or
 	 * worse, it will delete files that belong to a newly created database
 	 * with the same OID.
 	 */
 	ForgetDatabaseFsyncRequests(db_id);
 
 	/*
-	 * Force a checkpoint to make sure the checkpointer has received the message
-	 * sent by ForgetDatabaseFsyncRequests. On Windows, this also ensures that
-	 * background procs don't hold any open files, which would cause rmdir() to
-	 * fail.
+	 * Force a checkpoint to make sure the checkpointer has received the
+	 * message sent by ForgetDatabaseFsyncRequests. On Windows, this also
+	 * ensures that background procs don't hold any open files, which would
+	 * cause rmdir() to fail.
 	 */
 	RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT);
 
@@ -895,7 +932,7 @@ dropdb(const char *dbname, bool missing_ok)
 /*
  * Rename database
  */
-void
+Oid
 RenameDatabase(const char *oldname, const char *newname)
 {
 	Oid			db_id;
@@ -911,7 +948,7 @@ RenameDatabase(const char *oldname, const char *newname)
 	rel = heap_open(DatabaseRelationId, RowExclusiveLock);
 
 	if (!get_db_info(oldname, AccessExclusiveLock, &db_id, NULL, NULL,
-					 NULL, NULL, NULL, NULL, NULL, NULL, NULL))
+					 NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
 				 errmsg("database \"%s\" does not exist", oldname)));
@@ -972,6 +1009,8 @@ RenameDatabase(const char *oldname, const char *newname)
 	 * Close pg_database, but keep lock till commit.
 	 */
 	heap_close(rel, NoLock);
+
+	return db_id;
 }
 
 
@@ -1010,7 +1049,7 @@ movedb(const char *dbname, const char *tblspcname)
 	pgdbrel = heap_open(DatabaseRelationId, RowExclusiveLock);
 
 	if (!get_db_info(dbname, AccessExclusiveLock, &db_id, NULL, NULL,
-					 NULL, NULL, NULL, NULL, &src_tblspcoid, NULL, NULL))
+					 NULL, NULL, NULL, NULL, NULL, &src_tblspcoid, NULL, NULL))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
 				 errmsg("database \"%s\" does not exist", dbname)));
@@ -1294,10 +1333,11 @@ movedb_failure_callback(int code, Datum arg)
 /*
  * ALTER DATABASE name ...
  */
-void
+Oid
 AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 {
 	Relation	rel;
+	Oid         dboid;
 	HeapTuple	tuple,
 				newtuple;
 	ScanKeyData scankey;
@@ -1343,7 +1383,7 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 		/* this case isn't allowed within a transaction block */
 		PreventTransactionChain(isTopLevel, "ALTER DATABASE SET TABLESPACE");
 		movedb(stmt->dbname, strVal(dtablespace->arg));
-		return;
+		return InvalidOid;
 	}
 
 	if (dconnlimit)
@@ -1373,6 +1413,8 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
 				 errmsg("database \"%s\" does not exist", stmt->dbname)));
 
+	dboid = HeapTupleGetOid(tuple);
+
 	if (!pg_database_ownercheck(HeapTupleGetOid(tuple), GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_DATABASE,
 					   stmt->dbname);
@@ -1401,13 +1443,15 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 
 	/* Close pg_database, but keep lock till commit */
 	heap_close(rel, NoLock);
+
+	return dboid;
 }
 
 
 /*
  * ALTER DATABASE name SET ...
  */
-void
+Oid
 AlterDatabaseSet(AlterDatabaseSetStmt *stmt)
 {
 	Oid			datid = get_database_oid(stmt->dbname, false);
@@ -1425,15 +1469,18 @@ AlterDatabaseSet(AlterDatabaseSetStmt *stmt)
 	AlterSetting(datid, InvalidOid, stmt->setstmt);
 
 	UnlockSharedObject(DatabaseRelationId, datid, 0, AccessShareLock);
+
+	return datid;
 }
 
 
 /*
  * ALTER DATABASE name OWNER TO newowner
  */
-void
+Oid
 AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 {
+	Oid			db_id;
 	HeapTuple	tuple;
 	Relation	rel;
 	ScanKeyData scankey;
@@ -1458,6 +1505,7 @@ AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 				(errcode(ERRCODE_UNDEFINED_DATABASE),
 				 errmsg("database \"%s\" does not exist", dbname)));
 
+	db_id = HeapTupleGetOid(tuple);
 	datForm = (Form_pg_database) GETSTRUCT(tuple);
 
 	/*
@@ -1534,6 +1582,8 @@ AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 
 	/* Close pg_database, but keep lock till commit */
 	heap_close(rel, NoLock);
+
+	return db_id;
 }
 
 
@@ -1552,6 +1602,7 @@ get_db_info(const char *name, LOCKMODE lockmode,
 			Oid *dbIdP, Oid *ownerIdP,
 			int *encodingP, bool *dbIsTemplateP, bool *dbAllowConnP,
 			Oid *dbLastSysOidP, TransactionId *dbFrozenXidP,
+			MultiXactId *dbMinMultiP,
 			Oid *dbTablespace, char **dbCollate, char **dbCtype)
 {
 	bool		result = false;
@@ -1638,6 +1689,9 @@ get_db_info(const char *name, LOCKMODE lockmode,
 				/* limit of frozen XIDs */
 				if (dbFrozenXidP)
 					*dbFrozenXidP = dbform->datfrozenxid;
+				/* limit of frozen Multixacts */
+				if (dbMinMultiP)
+					*dbMinMultiP = dbform->datminmxid;
 				/* default tablespace for this database */
 				if (dbTablespace)
 					*dbTablespace = dbform->dattablespace;
@@ -1695,9 +1749,20 @@ remove_dbtablespaces(Oid db_id)
 	Relation	rel;
 	HeapScanDesc scan;
 	HeapTuple	tuple;
+	Snapshot	snapshot;
+
+	/*
+	 * As in createdb(), we'd better use an MVCC snapshot here, since this
+	 * scan can run for a long time.  Duplicate visits to tablespaces would be
+	 * harmless, but missing a tablespace could result in permanently leaked
+	 * files.
+	 *
+	 * XXX change this when a generic fix for SnapshotNow races is implemented
+	 */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
 
 	rel = heap_open(TableSpaceRelationId, AccessShareLock);
-	scan = heap_beginscan(rel, SnapshotNow, 0, NULL);
+	scan = heap_beginscan(rel, snapshot, 0, NULL);
 	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
 		Oid			dsttablespace = HeapTupleGetOid(tuple);
@@ -1743,6 +1808,7 @@ remove_dbtablespaces(Oid db_id)
 
 	heap_endscan(scan);
 	heap_close(rel, AccessShareLock);
+	UnregisterSnapshot(snapshot);
 }
 
 /*
@@ -1764,9 +1830,19 @@ check_db_file_conflict(Oid db_id)
 	Relation	rel;
 	HeapScanDesc scan;
 	HeapTuple	tuple;
+	Snapshot	snapshot;
+
+	/*
+	 * As in createdb(), we'd better use an MVCC snapshot here; missing a
+	 * tablespace could result in falsely reporting the OID is unique, with
+	 * disastrous future consequences per the comment above.
+	 *
+	 * XXX change this when a generic fix for SnapshotNow races is implemented
+	 */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
 
 	rel = heap_open(TableSpaceRelationId, AccessShareLock);
-	scan = heap_beginscan(rel, SnapshotNow, 0, NULL);
+	scan = heap_beginscan(rel, snapshot, 0, NULL);
 	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
 		Oid			dsttablespace = HeapTupleGetOid(tuple);
@@ -1792,6 +1868,8 @@ check_db_file_conflict(Oid db_id)
 
 	heap_endscan(scan);
 	heap_close(rel, AccessShareLock);
+	UnregisterSnapshot(snapshot);
+
 	return result;
 }
 
@@ -1801,20 +1879,21 @@ check_db_file_conflict(Oid db_id)
 static int
 errdetail_busy_db(int notherbackends, int npreparedxacts)
 {
-	/*
-	 * We don't worry about singular versus plural here, since the English
-	 * rules for that don't translate very well.  But we can at least avoid
-	 * the case of zero items.
-	 */
 	if (notherbackends > 0 && npreparedxacts > 0)
+		/* We don't deal with singular versus plural here, since gettext
+		 * doesn't support multiple plurals in one string. */
 		errdetail("There are %d other session(s) and %d prepared transaction(s) using the database.",
 				  notherbackends, npreparedxacts);
 	else if (notherbackends > 0)
-		errdetail("There are %d other session(s) using the database.",
-				  notherbackends);
+		errdetail_plural("There is %d other session using the database.",
+						 "There are %d other sessions using the database.",
+						 notherbackends,
+						 notherbackends);
 	else
-		errdetail("There are %d prepared transaction(s) using the database.",
-				  npreparedxacts);
+		errdetail_plural("There is %d prepared transaction using the database.",
+						 "There are %d prepared transactions using the database.",
+						 npreparedxacts,
+						 npreparedxacts);
 	return 0;					/* just to keep ereport macro happy */
 }
 
@@ -1985,28 +2064,4 @@ dbase_redo(XLogRecPtr lsn, XLogRecord *record)
 	}
 	else
 		elog(PANIC, "dbase_redo: unknown op code %u", info);
-}
-
-void
-dbase_desc(StringInfo buf, uint8 xl_info, char *rec)
-{
-	uint8		info = xl_info & ~XLR_INFO_MASK;
-
-	if (info == XLOG_DBASE_CREATE)
-	{
-		xl_dbase_create_rec *xlrec = (xl_dbase_create_rec *) rec;
-
-		appendStringInfo(buf, "create db: copy dir %u/%u to %u/%u",
-						 xlrec->src_db_id, xlrec->src_tablespace_id,
-						 xlrec->db_id, xlrec->tablespace_id);
-	}
-	else if (info == XLOG_DBASE_DROP)
-	{
-		xl_dbase_drop_rec *xlrec = (xl_dbase_drop_rec *) rec;
-
-		appendStringInfo(buf, "drop db: dir %u/%u",
-						 xlrec->db_id, xlrec->tablespace_id);
-	}
-	else
-		appendStringInfo(buf, "UNKNOWN");
 }

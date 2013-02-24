@@ -6,6 +6,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/transam.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -38,6 +39,7 @@ static PyObject *PLyFloat_FromNumeric(PLyDatumToOb *arg, Datum d);
 static PyObject *PLyInt_FromInt16(PLyDatumToOb *arg, Datum d);
 static PyObject *PLyInt_FromInt32(PLyDatumToOb *arg, Datum d);
 static PyObject *PLyLong_FromInt64(PLyDatumToOb *arg, Datum d);
+static PyObject *PLyLong_FromOid(PLyDatumToOb *arg, Datum d);
 static PyObject *PLyBytes_FromBytea(PLyDatumToOb *arg, Datum d);
 static PyObject *PLyString_FromDatum(PLyDatumToOb *arg, Datum d);
 static PyObject *PLyList_FromArray(PLyDatumToOb *arg, Datum d);
@@ -49,10 +51,11 @@ static Datum PLyObject_ToComposite(PLyObToDatum *arg, int32 typmod, PyObject *pl
 static Datum PLyObject_ToDatum(PLyObToDatum *arg, int32 typmod, PyObject *plrv);
 static Datum PLySequence_ToArray(PLyObToDatum *arg, int32 typmod, PyObject *plrv);
 
-/* conversion from Python objects to heap tuples (used by triggers and SRFs) */
-static HeapTuple PLyMapping_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping);
-static HeapTuple PLySequence_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence);
-static HeapTuple PLyGenericObject_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *object);
+/* conversion from Python objects to composite Datums (used by triggers and SRFs) */
+static Datum PLyString_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *string);
+static Datum PLyMapping_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping);
+static Datum PLySequence_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence);
+static Datum PLyGenericObject_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *object);
 
 /* make allocations in the TopMemoryContext */
 static void perm_fmgr_info(Oid functionId, FmgrInfo *finfo);
@@ -266,7 +269,7 @@ PLy_output_record_funcs(PLyTypeInfo *arg, TupleDesc desc)
 
 	/*
 	 * it should change is_rowtype to 1, so we won't go through this again
-	 * unless the the output record description changes
+	 * unless the output record description changes
 	 */
 	Assert(arg->is_rowtype == 1);
 }
@@ -292,8 +295,8 @@ PLyDict_FromTuple(PLyTypeInfo *info, HeapTuple tuple, TupleDesc desc)
 	PG_TRY();
 	{
 		/*
-		 * Do the work in the scratch context to avoid leaking memory from
-		 * the datatype output function calls.
+		 * Do the work in the scratch context to avoid leaking memory from the
+		 * datatype output function calls.
 		 */
 		MemoryContextSwitchTo(exec_ctx->scratch_ctx);
 		for (i = 0; i < info->in.r.natts; i++)
@@ -333,26 +336,28 @@ PLyDict_FromTuple(PLyTypeInfo *info, HeapTuple tuple, TupleDesc desc)
 }
 
 /*
- *	Convert a Python object to a PostgreSQL tuple, using all supported
- *	conversion methods: tuple as a sequence, as a mapping or as an object that
- *	has __getattr__ support.
+ *	Convert a Python object to a composite Datum, using all supported
+ *	conversion methods: composite as a string, as a sequence, as a mapping or
+ *	as an object that has __getattr__ support.
  */
-HeapTuple
-PLyObject_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *plrv)
+Datum
+PLyObject_ToCompositeDatum(PLyTypeInfo *info, TupleDesc desc, PyObject *plrv)
 {
-	HeapTuple	tuple;
+	Datum		datum;
 
-	if (PySequence_Check(plrv))
+	if (PyString_Check(plrv) || PyUnicode_Check(plrv))
+		datum = PLyString_ToComposite(info, desc, plrv);
+	else if (PySequence_Check(plrv))
 		/* composite type as sequence (tuple, list etc) */
-		tuple = PLySequence_ToTuple(info, desc, plrv);
+		datum = PLySequence_ToComposite(info, desc, plrv);
 	else if (PyMapping_Check(plrv))
 		/* composite type as mapping (currently only dict) */
-		tuple = PLyMapping_ToTuple(info, desc, plrv);
+		datum = PLyMapping_ToComposite(info, desc, plrv);
 	else
 		/* returned as smth, must provide method __getattr__(name) */
-		tuple = PLyGenericObject_ToTuple(info, desc, plrv);
+		datum = PLyGenericObject_ToComposite(info, desc, plrv);
 
-	return tuple;
+	return datum;
 }
 
 static void
@@ -456,6 +461,9 @@ PLy_input_datum_func2(PLyDatumToOb *arg, Oid typeOid, HeapTuple typeTup)
 		case INT8OID:
 			arg->func = PLyLong_FromInt64;
 			break;
+		case OIDOID:
+			arg->func = PLyLong_FromOid;
+			break;
 		case BYTEAOID:
 			arg->func = PLyBytes_FromBytea;
 			break;
@@ -487,7 +495,7 @@ PLyBool_FromBool(PLyDatumToOb *arg, Datum d)
 	/*
 	 * We would like to use Py_RETURN_TRUE and Py_RETURN_FALSE here for
 	 * generating SQL from trigger functions, but those are only supported in
-	 * Python >= 2.3, and we support older versions.
+	 * Python >= 2.4, and we support older versions.
 	 * http://docs.python.org/api/boolObjects.html
 	 */
 	if (DatumGetBool(d))
@@ -540,6 +548,12 @@ PLyLong_FromInt64(PLyDatumToOb *arg, Datum d)
 		return PyLong_FromLongLong(DatumGetInt64(d));
 	else
 		return PyLong_FromLong(DatumGetInt64(d));
+}
+
+static PyObject *
+PLyLong_FromOid(PLyDatumToOb *arg, Datum d)
+{
+	return PyLong_FromUnsignedLong(DatumGetObjectId(d));
 }
 
 static PyObject *
@@ -681,7 +695,6 @@ PLyObject_ToBytea(PLyObToDatum *arg, int32 typmod, PyObject *plrv)
 static Datum
 PLyObject_ToComposite(PLyObToDatum *arg, int32 typmod, PyObject *plrv)
 {
-	HeapTuple	tuple = NULL;
 	Datum		rv;
 	PLyTypeInfo info;
 	TupleDesc	desc;
@@ -703,14 +716,9 @@ PLyObject_ToComposite(PLyObToDatum *arg, int32 typmod, PyObject *plrv)
 	 * that info instead of looking it up every time a tuple is returned from
 	 * the function.
 	 */
-	tuple = PLyObject_ToTuple(&info, desc, plrv);
+	rv = PLyObject_ToCompositeDatum(&info, desc, plrv);
 
 	PLy_typeinfo_dealloc(&info);
-
-	if (tuple != NULL)
-		rv = HeapTupleGetDatum(tuple);
-	else
-		rv = (Datum) NULL;
 
 	return rv;
 }
@@ -818,8 +826,27 @@ PLySequence_ToArray(PLyObToDatum *arg, int32 typmod, PyObject *plrv)
 	return PointerGetDatum(array);
 }
 
-static HeapTuple
-PLyMapping_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping)
+
+static Datum
+PLyString_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *string)
+{
+	HeapTuple	typeTup;
+
+	typeTup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(desc->tdtypeid));
+	if (!HeapTupleIsValid(typeTup))
+		elog(ERROR, "cache lookup failed for type %u", desc->tdtypeid);
+
+	PLy_output_datum_func2(&info->out.d, typeTup);
+
+	ReleaseSysCache(typeTup);
+	ReleaseTupleDesc(desc);
+
+	return PLyObject_ToDatum(&info->out.d, info->out.d.typmod, string);
+}
+
+
+static Datum
+PLyMapping_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping)
 {
 	HeapTuple	tuple;
 	Datum	   *values;
@@ -887,12 +914,12 @@ PLyMapping_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *mapping)
 	pfree(values);
 	pfree(nulls);
 
-	return tuple;
+	return HeapTupleGetDatum(tuple);
 }
 
 
-static HeapTuple
-PLySequence_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence)
+static Datum
+PLySequence_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence)
 {
 	HeapTuple	tuple;
 	Datum	   *values;
@@ -973,12 +1000,12 @@ PLySequence_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *sequence)
 	pfree(values);
 	pfree(nulls);
 
-	return tuple;
+	return HeapTupleGetDatum(tuple);
 }
 
 
-static HeapTuple
-PLyGenericObject_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *object)
+static Datum
+PLyGenericObject_ToComposite(PLyTypeInfo *info, TupleDesc desc, PyObject *object)
 {
 	HeapTuple	tuple;
 	Datum	   *values;
@@ -1045,7 +1072,7 @@ PLyGenericObject_ToTuple(PLyTypeInfo *info, TupleDesc desc, PyObject *object)
 	pfree(values);
 	pfree(nulls);
 
-	return tuple;
+	return HeapTupleGetDatum(tuple);
 }
 
 /*

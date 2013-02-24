@@ -32,7 +32,7 @@
  * input group.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -44,6 +44,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "executor/executor.h"
 #include "executor/nodeSetOp.h"
 #include "utils/memutils.h"
@@ -344,7 +345,7 @@ setop_fill_hash_table(SetOpState *setopstate)
 	SetOp	   *node = (SetOp *) setopstate->ps.plan;
 	PlanState  *outerPlan;
 	int			firstFlag;
-	bool		in_first_rel;
+	bool in_first_rel PG_USED_FOR_ASSERTS_ONLY;
 
 	/*
 	 * get state info from node

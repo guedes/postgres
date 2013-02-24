@@ -2,7 +2,7 @@
  *	common.h
  *		Common support routines for bin/scripts/
  *
- *	Copyright (c) 2003-2012, PostgreSQL Global Development Group
+ *	Copyright (c) 2003-2013, PostgreSQL Global Development Group
  *
  *	src/bin/scripts/common.h
  */
@@ -10,8 +10,8 @@
 #define COMMON_H
 
 #include "libpq-fe.h"
-#include "getopt_long.h"	/* pgrminclude ignore */
-#include "pqexpbuffer.h"	/* pgrminclude ignore */
+#include "getopt_long.h"		/* pgrminclude ignore */
+#include "pqexpbuffer.h"		/* pgrminclude ignore */
 
 enum trivalue
 {
@@ -34,8 +34,8 @@ extern PGconn *connectDatabase(const char *dbname, const char *pghost,
 				bool fail_ok);
 
 extern PGconn *connectMaintenanceDatabase(const char *maintenance_db,
-				const char *pghost, const char *pgport, const char *pguser,
-				enum trivalue prompt_password, const char *progname);
+				  const char *pghost, const char *pgport, const char *pguser,
+						enum trivalue prompt_password, const char *progname);
 
 extern PGresult *executeQuery(PGconn *conn, const char *query,
 			 const char *progname, bool echo);
@@ -49,7 +49,5 @@ extern bool executeMaintenanceCommand(PGconn *conn, const char *query,
 extern bool yesno_prompt(const char *question);
 
 extern void setup_cancel_handler(void);
-
-extern char *pg_strdup(const char *string);
 
 #endif   /* COMMON_H */

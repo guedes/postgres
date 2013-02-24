@@ -4,7 +4,7 @@
  *
  * Routines corresponding to database objects
  *
- * Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
@@ -12,6 +12,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "catalog/dependency.h"
 #include "catalog/pg_database.h"
@@ -32,19 +33,19 @@ void
 sepgsql_database_post_create(Oid databaseId, const char *dtemplate)
 {
 	Relation	rel;
-	ScanKeyData	skey;
-	SysScanDesc	sscan;
+	ScanKeyData skey;
+	SysScanDesc sscan;
 	HeapTuple	tuple;
 	char	   *tcontext;
 	char	   *ncontext;
 	char		audit_name[NAMEDATALEN + 20];
-	ObjectAddress		object;
-	Form_pg_database	datForm;
+	ObjectAddress object;
+	Form_pg_database datForm;
 
 	/*
-	 * Oid of the source database is not saved in pg_database catalog,
-	 * so we collect its identifier using contextual information.
-	 * If NULL, its default is "template1" according to createdb().
+	 * Oid of the source database is not saved in pg_database catalog, so we
+	 * collect its identifier using contextual information. If NULL, its
+	 * default is "template1" according to createdb().
 	 */
 	if (!dtemplate)
 		dtemplate = "template1";
@@ -56,6 +57,7 @@ sepgsql_database_post_create(Oid databaseId, const char *dtemplate)
 	tcontext = sepgsql_get_label(object.classId,
 								 object.objectId,
 								 object.objectSubId);
+
 	/*
 	 * check db_database:{getattr} permission
 	 */
@@ -67,11 +69,11 @@ sepgsql_database_post_create(Oid databaseId, const char *dtemplate)
 								  true);
 
 	/*
-	 * Compute a default security label of the newly created database
-	 * based on a pair of security label of client and source database.
+	 * Compute a default security label of the newly created database based on
+	 * a pair of security label of client and source database.
 	 *
-	 * XXX - uncoming version of libselinux supports to take object
-	 * name to handle special treatment on default security label.
+	 * XXX - uncoming version of libselinux supports to take object name to
+	 * handle special treatment on default security label.
 	 */
 	rel = heap_open(DatabaseRelationId, AccessShareLock);
 
@@ -91,6 +93,7 @@ sepgsql_database_post_create(Oid databaseId, const char *dtemplate)
 	ncontext = sepgsql_compute_create(sepgsql_get_client_label(),
 									  tcontext,
 									  SEPG_CLASS_DB_DATABASE);
+
 	/*
 	 * check db_database:{create} permission
 	 */
@@ -126,8 +129,8 @@ sepgsql_database_post_create(Oid databaseId, const char *dtemplate)
 void
 sepgsql_database_drop(Oid databaseId)
 {
-	ObjectAddress	object;
-	char		   *audit_name;
+	ObjectAddress object;
+	char	   *audit_name;
 
 	/*
 	 * check db_database:{drop} permission
@@ -153,8 +156,8 @@ sepgsql_database_drop(Oid databaseId)
 void
 sepgsql_database_relabel(Oid databaseId, const char *seclabel)
 {
-	ObjectAddress	object;
-	char		   *audit_name;
+	ObjectAddress object;
+	char	   *audit_name;
 
 	object.classId = DatabaseRelationId;
 	object.objectId = databaseId;
@@ -170,6 +173,7 @@ sepgsql_database_relabel(Oid databaseId, const char *seclabel)
 							SEPG_DB_DATABASE__RELABELFROM,
 							audit_name,
 							true);
+
 	/*
 	 * check db_database:{relabelto} permission
 	 */

@@ -3,7 +3,7 @@
  * functions.c
  *	  Execution of SQL-language functions
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -128,11 +129,11 @@ typedef struct SQLFunctionParseInfo
 /* non-export function prototypes */
 static Node *sql_fn_param_ref(ParseState *pstate, ParamRef *pref);
 static Node *sql_fn_post_column_ref(ParseState *pstate,
-									ColumnRef *cref, Node *var);
+					   ColumnRef *cref, Node *var);
 static Node *sql_fn_make_param(SQLFunctionParseInfoPtr pinfo,
-							   int paramno, int location);
+				  int paramno, int location);
 static Node *sql_fn_resolve_param_name(SQLFunctionParseInfoPtr pinfo,
-									   const char *paramname, int location);
+						  const char *paramname, int location);
 static List *init_execution_state(List *queryTree_list,
 					 SQLFunctionCachePtr fcache,
 					 bool lazyEvalOK);
@@ -227,13 +228,13 @@ prepare_sql_fn_parse_info(HeapTuple procedureTuple,
 									  Anum_pg_proc_proargnames,
 									  &isNull);
 		if (isNull)
-			proargnames = PointerGetDatum(NULL);	/* just to be sure */
+			proargnames = PointerGetDatum(NULL);		/* just to be sure */
 
 		proargmodes = SysCacheGetAttr(PROCNAMEARGSNSP, procedureTuple,
 									  Anum_pg_proc_proargmodes,
 									  &isNull);
 		if (isNull)
-			proargmodes = PointerGetDatum(NULL);	/* just to be sure */
+			proargmodes = PointerGetDatum(NULL);		/* just to be sure */
 
 		n_arg_names = get_func_input_arg_names(proargnames, proargmodes,
 											   &pinfo->argnames);
@@ -422,7 +423,7 @@ static Node *
 sql_fn_resolve_param_name(SQLFunctionParseInfoPtr pinfo,
 						  const char *paramname, int location)
 {
-	int		i;
+	int			i;
 
 	if (pinfo->argnames == NULL)
 		return NULL;
@@ -535,7 +536,6 @@ init_execution_state(List *queryTree_list,
 
 			if (ps->commandType == CMD_SELECT &&
 				ps->utilityStmt == NULL &&
-				ps->intoClause == NULL &&
 				!ps->hasModifyingCTE)
 				fcache->lazyEval = lasttages->lazyEval = true;
 		}
@@ -784,9 +784,9 @@ postquel_getnext(execution_state *es, SQLFunctionCachePtr fcache)
 						es->qd->utilitystmt),
 					   fcache->src,
 					   es->qd->params,
-					   false,	/* not top level */
 					   es->qd->dest,
-					   NULL);
+					   NULL,
+					   PROCESS_UTILITY_QUERY);
 		result = true;			/* never stops early */
 	}
 	else
@@ -1493,8 +1493,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 	 */
 	if (parse &&
 		parse->commandType == CMD_SELECT &&
-		parse->utilityStmt == NULL &&
-		parse->intoClause == NULL)
+		parse->utilityStmt == NULL)
 	{
 		tlist_ptr = &parse->targetList;
 		tlist = parse->targetList;
@@ -1573,7 +1572,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 												 rettype,
 												 -1,
 												 get_typcollation(rettype),
-												 COERCE_DONTCARE);
+												 COERCE_IMPLICIT_CAST);
 			/* Relabel is dangerous if TLE is a sort/group or setop column */
 			if (tle->ressortgroupref != 0 || parse->setOperations)
 				*modifyTargetList = true;
@@ -1619,7 +1618,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 														 rettype,
 														 -1,
 												   get_typcollation(rettype),
-														 COERCE_DONTCARE);
+														 COERCE_IMPLICIT_CAST);
 					/* Relabel is dangerous if sort/group or setop column */
 					if (tle->ressortgroupref != 0 || parse->setOperations)
 						*modifyTargetList = true;
@@ -1723,7 +1722,7 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 														 atttype,
 														 -1,
 												   get_typcollation(atttype),
-														 COERCE_DONTCARE);
+														 COERCE_IMPLICIT_CAST);
 					/* Relabel is dangerous if sort/group or setop column */
 					if (tle->ressortgroupref != 0 || parse->setOperations)
 						*modifyTargetList = true;

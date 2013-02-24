@@ -3,7 +3,7 @@
  * date.c
  *	  implements DATE and TIME data types specified in SQL-92 standard
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -337,7 +337,7 @@ date_fastcmp(Datum x, Datum y, SortSupport ssup)
 Datum
 date_sortsupport(PG_FUNCTION_ARGS)
 {
-	SortSupport	ssup = (SortSupport) PG_GETARG_POINTER(0);
+	SortSupport ssup = (SortSupport) PG_GETARG_POINTER(0);
 
 	ssup->comparator = date_fastcmp;
 	PG_RETURN_VOID();
@@ -1957,9 +1957,8 @@ timetz_recv(PG_FUNCTION_ARGS)
 
 	result->zone = pq_getmsgint(buf, sizeof(result->zone));
 
-	/* we allow GMT displacements up to 14:59:59, cf DecodeTimezone() */
-	if (result->zone <= -15 * SECS_PER_HOUR ||
-		result->zone >= 15 * SECS_PER_HOUR)
+	/* Check for sane GMT displacement; see notes in datatype/timestamp.h */
+	if (result->zone <= -TZDISP_LIMIT || result->zone >= TZDISP_LIMIT)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE),
 				 errmsg("time zone displacement out of range")));
@@ -2698,10 +2697,10 @@ timetz_izone(PG_FUNCTION_ARGS)
 	TimeTzADT  *result;
 	int			tz;
 
-	if (zone->month != 0)
+	if (zone->month != 0 || zone->day != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"interval\" time zone \"%s\" not valid",
+				 errmsg("interval time zone \"%s\" must not include months or days",
 						DatumGetCString(DirectFunctionCall1(interval_out,
 												  PointerGetDatum(zone))))));
 

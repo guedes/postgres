@@ -21,7 +21,7 @@
  * Postgres 9.2, this check is made automatically by the Makefile.)
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -42,7 +42,13 @@
 
 /* Avoid exit() on fatal scanner errors (a bit ugly -- see yy_fatal_error) */
 #undef fprintf
-#define fprintf(file, fmt, msg)  ereport(ERROR, (errmsg_internal("%s", msg)))
+#define fprintf(file, fmt, msg)  fprintf_to_ereport(fmt, msg)
+
+static void
+fprintf_to_ereport(const char *fmt, const char *msg)
+{
+	ereport(ERROR, (errmsg_internal("%s", msg)));
+}
 
 /*
  * GUC variables.  This is a DIRECT violation of the warning given at the

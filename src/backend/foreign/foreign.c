@@ -3,7 +3,7 @@
  * foreign.c
  *		  support for foreign-data wrappers, servers and user mappings.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/backend/foreign/foreign.c
@@ -12,6 +12,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
@@ -19,6 +20,7 @@
 #include "catalog/pg_user_mapping.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/syscache.h"
@@ -483,11 +485,15 @@ is_conninfo_option(const char *option, Oid context)
 
 /*
  * Validate the generic option given to SERVER or USER MAPPING.
- * Raise an ERROR if the option or its value is considered
- * invalid.
+ * Raise an ERROR if the option or its value is considered invalid.
  *
  * Valid server options are all libpq conninfo options except
  * user and password -- these may only appear in USER MAPPING options.
+ *
+ * Caution: this function is deprecated, and is now meant only for testing
+ * purposes, because the list of options it knows about doesn't necessarily
+ * square with those known to whichever libpq instance you might be using.
+ * Inquire of libpq itself, instead.
  */
 Datum
 postgresql_fdw_validator(PG_FUNCTION_ARGS)

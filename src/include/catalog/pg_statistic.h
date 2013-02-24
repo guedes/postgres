@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_statistic.h
@@ -32,7 +32,7 @@ CATALOG(pg_statistic,2619) BKI_WITHOUT_OIDS
 {
 	/* These fields form the unique key for the entry: */
 	Oid			starelid;		/* relation containing attribute */
-	int2		staattnum;		/* attribute (column) stats are for */
+	int16		staattnum;		/* attribute (column) stats are for */
 	bool		stainherit;		/* true if inheritance children are included */
 
 	/* the fraction of the column's entries that are NULL: */
@@ -48,7 +48,7 @@ CATALOG(pg_statistic,2619) BKI_WITHOUT_OIDS
 	 * the statistic, which is to estimate sizes of in-memory hash tables of
 	 * tuples.
 	 */
-	int4		stawidth;
+	int32		stawidth;
 
 	/* ----------------
 	 * stadistinct indicates the (approximate) number of distinct non-null
@@ -84,11 +84,11 @@ CATALOG(pg_statistic,2619) BKI_WITHOUT_OIDS
 	 * ----------------
 	 */
 
-	int2		stakind1;
-	int2		stakind2;
-	int2		stakind3;
-	int2		stakind4;
-	int2		stakind5;
+	int16		stakind1;
+	int16		stakind2;
+	int16		stakind3;
+	int16		stakind4;
+	int16		stakind5;
 
 	Oid			staop1;
 	Oid			staop2;
@@ -105,7 +105,7 @@ CATALOG(pg_statistic,2619) BKI_WITHOUT_OIDS
 
 	/*
 	 * Values in these arrays are values of the column's data type, or of some
-	 * related type such as an array element type.  We presently have to cheat
+	 * related type such as an array element type.	We presently have to cheat
 	 * quite a bit to allow polymorphic arrays of this kind, but perhaps
 	 * someday it'll be a less bogus facility.
 	 */
@@ -258,7 +258,7 @@ typedef FormData_pg_statistic *Form_pg_statistic;
 /*
  * A "distinct elements count histogram" slot describes the distribution of
  * the number of distinct element values present in each row of an array-type
- * column.  Only non-null rows are considered, and only non-null elements.
+ * column.	Only non-null rows are considered, and only non-null elements.
  * staop contains the equality operator appropriate to the element type.
  * stavalues is not used and should be NULL.  The last member of stanumbers is
  * the average count of distinct element values over all non-null rows.  The
@@ -266,6 +266,24 @@ typedef FormData_pg_statistic *Form_pg_statistic;
  * distinct-elements counts into M-1 bins of approximately equal population.
  * The first of these is the minimum observed count, and the last the maximum.
  */
-#define STATISTIC_KIND_DECHIST  5
+#define STATISTIC_KIND_DECHIST	5
+
+/*
+ * An "empty frac" slot describes the fraction of empty ranges in a range-type
+ * column.  stavalues is not used and should be NULL.  stanumbers contains a
+ * single entry, the fraction of empty ranges (0.0 to 1.0).
+ */
+#define STATISTIC_KIND_RANGE_EMPTY_FRAC  6
+
+/*
+ * A "bounds histogram" slot is similar to STATISTIC_KIND_HISTOGRAM, but for
+ * a range-type column.  stavalues contains M (>=2) range values that divide
+ * the column data values into M-1 bins of approximately equal population.
+ * Unlike a regular scalar histogram, this is actually two histograms combined
+ * into a single array, with the lower bounds of each value forming a
+ * histogram of lower bounds, and the upper bounds a histogram of upper
+ * bounds.  Only non-NULL, non-empty ranges are included.
+ */
+#define STATISTIC_KIND_BOUNDS_HISTOGRAM  7
 
 #endif   /* PG_STATISTIC_H */

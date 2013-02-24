@@ -19,3 +19,18 @@ select 'abc abc abd' ~ '^(\w+)( \1)+$' as f;
 select 'abc abc abc' ~ '^(.+)( \1)+$' as t;
 select 'abc abd abc' ~ '^(.+)( \1)+$' as f;
 select 'abc abc abd' ~ '^(.+)( \1)+$' as f;
+
+-- Test some cases that crashed in 9.2beta1 due to pmatch[] array overrun
+select substring('asd TO foo' from ' TO (([a-z0-9._]+|"([^"]+|"")+")+)');
+select substring('a' from '((a))+');
+select substring('a' from '((a)+)');
+
+-- Test conversion of regex patterns to indexable conditions
+explain (costs off) select * from pg_proc where proname ~ 'abc';
+explain (costs off) select * from pg_proc where proname ~ '^abc';
+explain (costs off) select * from pg_proc where proname ~ '^abc$';
+explain (costs off) select * from pg_proc where proname ~ '^abcd*e';
+explain (costs off) select * from pg_proc where proname ~ '^abc+d';
+explain (costs off) select * from pg_proc where proname ~ '^(abc)(def)';
+explain (costs off) select * from pg_proc where proname ~ '^(abc)$';
+explain (costs off) select * from pg_proc where proname ~ '^(abc)?d';

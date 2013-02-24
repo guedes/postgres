@@ -3,7 +3,7 @@
  * acl.c
  *	  Basic access control list data structures manipulation routines.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
 
 #include <ctype.h>
 
+#include "access/htup_details.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_auth_members.h"
@@ -29,6 +30,7 @@
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/catcache.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -821,7 +823,7 @@ acldefault(GrantObjectType objtype, Oid ownerId)
 	 * owner's ordinary privileges are self-granted; this lets him revoke
 	 * them.  We implement the owner's grant options without any explicit
 	 * "_SYSTEM"-like ACL entry, by internally special-casing the owner
-	 * whereever we are testing grant options.
+	 * wherever we are testing grant options.
 	 */
 	if (owner_default != ACL_NO_RIGHTS)
 	{
@@ -835,15 +837,15 @@ acldefault(GrantObjectType objtype, Oid ownerId)
 
 
 /*
- * SQL-accessible version of acldefault().  Hackish mapping from "char" type to
+ * SQL-accessible version of acldefault().	Hackish mapping from "char" type to
  * ACL_OBJECT_* values, but it's only used in the information schema, not
  * documented for general use.
  */
 Datum
 acldefault_sql(PG_FUNCTION_ARGS)
 {
-	char	objtypec = PG_GETARG_CHAR(0);
-	Oid		owner = PG_GETARG_OID(1);
+	char		objtypec = PG_GETARG_CHAR(0);
+	Oid			owner = PG_GETARG_OID(1);
 	GrantObjectType objtype = 0;
 
 	switch (objtypec)
@@ -1230,11 +1232,11 @@ recursive_revoke(Acl *acl,
 	if (grantee == ownerId)
 		return acl;
 
-	/* The grantee might still have the privileges via another grantor */
+	/* The grantee might still have some grant options via another grantor */
 	still_has = aclmask(acl, grantee, ownerId,
 						ACL_GRANT_OPTION_FOR(revoke_privs),
 						ACLMASK_ALL);
-	revoke_privs &= ~still_has;
+	revoke_privs &= ~ACL_OPTION_TO_PRIVS(still_has);
 	if (revoke_privs == ACL_NO_RIGHTS)
 		return acl;
 

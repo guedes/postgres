@@ -24,9 +24,11 @@ PostgreSQL documentation
    <command>initdb</command>
    <arg rep="repeat"><replaceable>option</replaceable></arg>
    <group choice="plain">
-    <arg>--pgdata</arg>
-    <arg>-D </arg>
-    <replaceable>directory</replaceable>
+    <group choice="opt">
+     <arg choice="plain"><option>--pgdata</option></arg>
+     <arg choice="plain"><option>-D</option></arg>
+    </group>
+    <replaceable> directory</replaceable>
    </group>
   </cmdsynopsis>
  </refsynopsisdiv>
@@ -218,6 +220,21 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>-N</option></term>
+      <term><option>--nosync</option></term>
+      <listitem>
+       <para>
+        By default, <command>initdb</command> will wait for all files to be
+        written safely to disk.  This option causes <command>initdb</command>
+        to return without waiting, which is faster, but means that a
+        subsequent operating system crash can leave the data directory
+        corrupt.  Generally, this option is useful for testing, but should not
+        be used when creating a production installation.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--pwfile=<replaceable>filename</></option></term>
       <listitem>
        <para>
@@ -228,6 +245,18 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>-S</option></term>
+      <term><option>--sync-only</option></term>
+      <listitem>
+       <para>
+        Safely write all database files to disk and exit.  This does not
+        perform any of the normal <application>initdb</> operations.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-T <replaceable>CFG</></option></term>
       <term><option>--text-search-config=<replaceable>CFG</></option></term>
       <listitem>
        <para>
@@ -281,7 +310,7 @@ PostgreSQL documentation
    </para>
 
    <para>
-    Other, less commonly used, parameters are also available:
+    Other, less commonly used, options are also available:
 
     <variablelist>
      <varlistentry>
@@ -323,7 +352,13 @@ PostgreSQL documentation
        </para>
       </listitem>
      </varlistentry>
+    </variablelist>
+   </para>
 
+   <para>
+    Other options:
+
+    <variablelist>
      <varlistentry>
        <term><option>-V</></term>
        <term><option>--version</></term>

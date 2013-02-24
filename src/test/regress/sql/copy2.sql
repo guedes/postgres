@@ -164,6 +164,114 @@ c\.d
 
 COPY testeoc TO stdout CSV;
 
+-- test handling of nonstandard null marker that violates escaping rules
+
+CREATE TEMP TABLE testnull(a int, b text);
+INSERT INTO testnull VALUES (1, E'\\0'), (NULL, NULL);
+
+COPY testnull TO stdout WITH NULL AS E'\\0';
+
+COPY testnull FROM stdin WITH NULL AS E'\\0';
+42	\\0
+\0	\0
+\.
+
+SELECT * FROM testnull;
+
+BEGIN;
+CREATE TABLE vistest (LIKE testeoc);
+COPY vistest FROM stdin CSV;
+a0
+b
+\.
+COMMIT;
+SELECT * FROM vistest;
+BEGIN;
+TRUNCATE vistest;
+COPY vistest FROM stdin CSV;
+a1
+b
+\.
+SELECT * FROM vistest;
+SAVEPOINT s1;
+TRUNCATE vistest;
+COPY vistest FROM stdin CSV;
+d1
+e
+\.
+SELECT * FROM vistest;
+COMMIT;
+SELECT * FROM vistest;
+
+BEGIN;
+TRUNCATE vistest;
+COPY vistest FROM stdin CSV FREEZE;
+a2
+b
+\.
+SELECT * FROM vistest;
+SAVEPOINT s1;
+TRUNCATE vistest;
+COPY vistest FROM stdin CSV FREEZE;
+d2
+e
+\.
+SELECT * FROM vistest;
+COMMIT;
+SELECT * FROM vistest;
+
+BEGIN;
+TRUNCATE vistest;
+COPY vistest FROM stdin CSV FREEZE;
+x
+y
+\.
+SELECT * FROM vistest;
+COMMIT;
+TRUNCATE vistest;
+COPY vistest FROM stdin CSV FREEZE;
+p
+g
+\.
+BEGIN;
+TRUNCATE vistest;
+SAVEPOINT s1;
+COPY vistest FROM stdin CSV FREEZE;
+m
+k
+\.
+COMMIT;
+BEGIN;
+INSERT INTO vistest VALUES ('z');
+SAVEPOINT s1;
+TRUNCATE vistest;
+ROLLBACK TO SAVEPOINT s1;
+COPY vistest FROM stdin CSV FREEZE;
+d3
+e
+\.
+COMMIT;
+CREATE FUNCTION truncate_in_subxact() RETURNS VOID AS
+$$
+BEGIN
+	TRUNCATE vistest;
+EXCEPTION
+  WHEN OTHERS THEN
+	INSERT INTO vistest VALUES ('subxact failure');
+END;
+$$ language plpgsql;
+BEGIN;
+INSERT INTO vistest VALUES ('z');
+SELECT truncate_in_subxact();
+COPY vistest FROM stdin CSV FREEZE;
+d4
+e
+\.
+SELECT * FROM vistest;
+COMMIT;
+SELECT * FROM vistest;
+DROP TABLE vistest;
+DROP FUNCTION truncate_in_subxact();
 DROP TABLE x, y;
 DROP FUNCTION fn_x_before();
 DROP FUNCTION fn_x_after();

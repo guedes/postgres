@@ -35,6 +35,7 @@ SUBDIRS = \
 		pg_standby	\
 		pg_stat_statements \
 		pg_test_fsync	\
+		pg_test_timing	\
 		pg_trgm		\
 		pg_upgrade	\
 		pg_upgrade_support \
@@ -42,6 +43,8 @@ SUBDIRS = \
 		pgcrypto	\
 		pgrowlocks	\
 		pgstattuple	\
+		pg_xlogdump	\
+		postgres_fdw	\
 		seg		\
 		spi		\
 		tablefunc	\
@@ -49,7 +52,8 @@ SUBDIRS = \
 		test_parser	\
 		tsearch2	\
 		unaccent	\
-		vacuumlo
+		vacuumlo	\
+		worker_spi
 
 ifeq ($(with_openssl),yes)
 SUBDIRS += sslinfo

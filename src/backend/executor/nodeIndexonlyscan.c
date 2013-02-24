@@ -3,7 +3,7 @@
  * nodeIndexonlyscan.c
  *	  Routines to support index-only scans
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -30,6 +30,7 @@
 #include "executor/nodeIndexonlyscan.h"
 #include "executor/nodeIndexscan.h"
 #include "storage/bufmgr.h"
+#include "storage/predicate.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -52,7 +53,6 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	ExprContext *econtext;
 	ScanDirection direction;
 	IndexScanDesc scandesc;
-	HeapTuple	tuple;
 	TupleTableSlot *slot;
 	ItemPointer tid;
 
@@ -78,10 +78,25 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	 */
 	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
+		HeapTuple	tuple = NULL;
+
 		/*
 		 * We can skip the heap fetch if the TID references a heap page on
 		 * which all tuples are known visible to everybody.  In any case,
 		 * we'll use the index tuple not the heap tuple as the data source.
+		 *
+		 * Note on Memory Ordering Effects: visibilitymap_test does not lock
+		 * the visibility map buffer, and therefore the result we read here
+		 * could be slightly stale.  However, it can't be stale enough to
+		 * matter.	It suffices to show that (1) there is a read barrier
+		 * between the time we read the index TID and the time we test the
+		 * visibility map; and (2) there is a write barrier between the time
+		 * some other concurrent process clears the visibility map bit and the
+		 * time it inserts the index TID.  Since acquiring or releasing a
+		 * LWLock interposes a full barrier, this is easy to show: (1) is
+		 * satisfied by the release of the index buffer content lock after
+		 * reading the TID; and (2) is satisfied by the acquisition of the
+		 * buffer content lock in order to insert the TID.
 		 */
 		if (!visibilitymap_test(scandesc->heapRelation,
 								ItemPointerGetBlockNumber(tid),
@@ -93,12 +108,12 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			node->ioss_HeapFetches++;
 			tuple = index_fetch_heap(scandesc);
 			if (tuple == NULL)
-				continue;	/* no visible tuple, try next index entry */
+				continue;		/* no visible tuple, try next index entry */
 
 			/*
 			 * Only MVCC snapshots are supported here, so there should be no
 			 * need to keep following the HOT chain once a visible entry has
-			 * been found.  If we did want to allow that, we'd need to keep
+			 * been found.	If we did want to allow that, we'd need to keep
 			 * more state to remember not to call index_getnext_tid next time.
 			 */
 			if (scandesc->xs_continue_hot)
@@ -107,7 +122,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			/*
 			 * Note: at this point we are holding a pin on the heap page, as
 			 * recorded in scandesc->xs_cbuf.  We could release that pin now,
-			 * but it's not clear whether it's a win to do so.  The next index
+			 * but it's not clear whether it's a win to do so.	The next index
 			 * entry might require a visit to the same heap page.
 			 */
 		}
@@ -133,6 +148,18 @@ IndexOnlyNext(IndexOnlyScanState *node)
 				continue;
 			}
 		}
+
+		/*
+		 * Predicate locks for index-only scans must be acquired at the page
+		 * level when the heap is not accessed, since tuple-level predicate
+		 * locks need the tuple's xmin value.  If we had to visit the tuple
+		 * anyway, then we already have the tuple-level lock and can skip the
+		 * page lock.
+		 */
+		if (tuple == NULL)
+			PredicateLockPage(scandesc->heapRelation,
+							  ItemPointerGetBlockNumber(tid),
+							  estate->es_snapshot);
 
 		return slot;
 	}
@@ -163,8 +190,8 @@ StoreIndexTuple(TupleTableSlot *slot, IndexTuple itup, TupleDesc itupdesc)
 	 * Note: we must use the tupdesc supplied by the AM in index_getattr, not
 	 * the slot's tupdesc, in case the latter has different datatypes (this
 	 * happens for btree name_ops in particular).  They'd better have the same
-	 * number of columns though, as well as being datatype-compatible which
-	 * is something we can't so easily check.
+	 * number of columns though, as well as being datatype-compatible which is
+	 * something we can't so easily check.
 	 */
 	Assert(slot->tts_tupleDescriptor->natts == nindexatts);
 
@@ -481,10 +508,10 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	 * Initialize scan descriptor.
 	 */
 	indexstate->ioss_ScanDesc = index_beginscan(currentRelation,
-											   indexstate->ioss_RelationDesc,
-											   estate->es_snapshot,
-											   indexstate->ioss_NumScanKeys,
-											 indexstate->ioss_NumOrderByKeys);
+												indexstate->ioss_RelationDesc,
+												estate->es_snapshot,
+												indexstate->ioss_NumScanKeys,
+											indexstate->ioss_NumOrderByKeys);
 
 	/* Set it up for index-only scan */
 	indexstate->ioss_ScanDesc->xs_want_itup = true;

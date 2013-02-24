@@ -140,7 +140,7 @@ protocol to make nodes agree on a serializable transactional order.
   </varlistentry>
 
   <varlistentry>
-   <term>Warm and Hot Standby Using Point-In-Time Recovery (<acronym>PITR</>)</term>
+   <term>Transaction Log Shipping</term>
    <listitem>
 
     <para>
@@ -148,11 +148,11 @@ protocol to make nodes agree on a serializable transactional order.
      stream of write-ahead log (<acronym>WAL</>)
      records.  If the main server fails, the standby contains
      almost all of the data of the main server, and can be quickly
-     made the new master database server.  This is asynchronous and
-     can only be done for the entire database server.
+     made the new master database server.  This can be synchronous or
+     asynchronous and can only be done for the entire database server.
     </para>
     <para>
-     A PITR standby server can be implemented using file-based log shipping
+     A standby server can be implemented using file-based log shipping
      (<xref linkend="warm-standby">) or streaming replication (see
      <xref linkend="streaming-replication">), or a combination of both. For
      information on hot standby, see <xref linkend="hot-standby">.
@@ -291,7 +291,7 @@ protocol to make nodes agree on a serializable transactional order.
      <entry>Feature</entry>
      <entry>Shared Disk Failover</entry>
      <entry>File System Replication</entry>
-     <entry>Hot/Warm Standby Using PITR</entry>
+     <entry>Transaction Log Shipping</entry>
      <entry>Trigger-Based Master-Standby Replication</entry>
      <entry>Statement-Based Replication Middleware</entry>
      <entry>Asynchronous Multimaster Replication</entry>
@@ -305,7 +305,7 @@ protocol to make nodes agree on a serializable transactional order.
      <entry>Most Common Implementation</entry>
      <entry align="center">NAS</entry>
      <entry align="center">DRBD</entry>
-     <entry align="center">PITR</entry>
+     <entry align="center">Streaming Repl.</entry>
      <entry align="center">Slony</entry>
      <entry align="center">pgpool-II</entry>
      <entry align="center">Bucardo</entry>
@@ -360,7 +360,7 @@ protocol to make nodes agree on a serializable transactional order.
      <entry>No waiting for multiple servers</entry>
      <entry align="center">&bull;</entry>
      <entry align="center"></entry>
-     <entry align="center">&bull;</entry>
+     <entry align="center">with sync off</entry>
      <entry align="center">&bull;</entry>
      <entry align="center"></entry>
      <entry align="center">&bull;</entry>
@@ -371,7 +371,7 @@ protocol to make nodes agree on a serializable transactional order.
      <entry>Master failure will never lose data</entry>
      <entry align="center">&bull;</entry>
      <entry align="center">&bull;</entry>
-     <entry align="center"></entry>
+     <entry align="center">with sync on</entry>
      <entry align="center"></entry>
      <entry align="center">&bull;</entry>
      <entry align="center"></entry>
@@ -382,7 +382,7 @@ protocol to make nodes agree on a serializable transactional order.
      <entry>Standby accept read-only queries</entry>
      <entry align="center"></entry>
      <entry align="center"></entry>
-     <entry align="center">Hot only</entry>
+     <entry align="center">with hot</entry>
      <entry align="center">&bull;</entry>
      <entry align="center">&bull;</entry>
      <entry align="center">&bull;</entry>
@@ -738,13 +738,14 @@ archive_cleanup_command = 'pg_archivecleanup /path/to/archive %r'
    </para>
 
    <para>
-    Streaming replication is asynchronous, so there is still a small delay
-    between committing a transaction in the primary and for the changes to
-    become visible in the standby. The delay is however much smaller than with
-    file-based log shipping, typically under one second assuming the standby
-    is powerful enough to keep up with the load. With streaming replication,
-    <varname>archive_timeout</> is not required to reduce the data loss
-    window.
+    Streaming replication is asynchronous by default
+    (see <xref linkend="synchronous-replication">), in which case there is
+    a small delay between committing a transaction in the primary and the
+    changes becoming visible in the standby. This delay is however much
+    smaller than with file-based log shipping, typically under one second
+    assuming the standby is powerful enough to keep up with the load. With
+    streaming replication, <varname>archive_timeout</> is not required to
+    reduce the data loss window.
    </para>
 
    <para>
@@ -881,7 +882,7 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
     The cascading replication feature allows a standby server to accept replication
     connections and stream WAL records to other standbys, acting as a relay.
     This can be used to reduce the number of direct connections to the master
-    and also to minimise inter-site bandwidth overheads.
+    and also to minimize inter-site bandwidth overheads.
    </para>
 
    <para>
@@ -912,10 +913,9 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
    </para>
 
    <para>
-    Promoting a cascading standby terminates the immediate downstream replication
-    connections which it serves. This is because the timeline becomes different
-    between standbys, and they can no longer continue replication.  The
-    affected standby(s) may reconnect to reestablish streaming replication.
+    If an upstream standby server is promoted to become new master, downstream
+    servers will continue to stream from the new master if
+    <varname>recovery_target_timeline</> is set to <literal>'latest'</>.
    </para>
 
    <para>
@@ -985,11 +985,13 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
     <xref linkend="guc-synchronous-standby-names"> must be set to
     a non-empty value.  <varname>synchronous_commit</> must also be set to
     <literal>on</>, but since this is the default value, typically no change is
-    required.  This configuration will cause each commit to wait for
+    required.  (See <xref linkend="runtime-config-wal-settings"> and
+    <xref linkend="runtime-config-replication-master">.)
+    This configuration will cause each commit to wait for
     confirmation that the standby has written the commit record to durable
-    storage, even if that takes a very long time.
+    storage.
     <varname>synchronous_commit</> can be set by individual
-    users, so can be configured in the configuration file, for particular
+    users, so it can be configured in the configuration file, for particular
     users or databases, or dynamically by applications, in order to control
     the durability guarantee on a per-transaction basis.
    </para>
@@ -1011,18 +1013,22 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
    </para>
 
    <para>
-    Setting <varname>synchronous_commit</> to <literal>write</> will
+    Setting <varname>synchronous_commit</> to <literal>remote_write</> will
     cause each commit to wait for confirmation that the standby has received
-    the commit record to memory. This provides a lower level of durability
-    than <literal>on</> does. However, it's a practically useful setting
-    because it can decrease the response time for the transaction, and causes
-    no data loss unless both the primary and the standby crashes and
+    the commit record and written it out to its own operating system, but not
+    for the data to be flushed to disk on the standby.  This
+    setting provides a weaker guarantee of durability than <literal>on</>
+    does: the standby could lose the data in the event of an operating system
+    crash, though not a <productname>PostgreSQL</> crash.
+    However, it's a useful setting in practice
+    because it can decrease the response time for the transaction.
+    Data loss could only occur if both the primary and the standby crash and
     the database of the primary gets corrupted at the same time.
    </para>
 
    <para>
     Users will stop waiting if a fast shutdown is requested.  However, as
-    when using asynchronous replication, the server will does not fully
+    when using asynchronous replication, the server will not fully
     shutdown until all outstanding WAL records are transferred to the currently
     connected standby servers.
    </para>
@@ -1035,7 +1041,7 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
    <para>
     Synchronous replication usually requires carefully planned and placed
     standby servers to ensure applications perform acceptably. Waiting
-    doesn't utilise system resources, but transaction locks continue to be
+    doesn't utilize system resources, but transaction locks continue to be
     held until the transfer is confirmed. As a result, incautious use of
     synchronous replication will reduce performance for database
     applications because of increased response times and higher contention.
@@ -1075,7 +1081,7 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
 
    <para>
     Commits made when <varname>synchronous_commit</> is set to <literal>on</>
-    or <literal>write</> will wait until the synchronous standby responds. The response
+    or <literal>remote_write</> will wait until the synchronous standby responds. The response
     may never occur if the last, or only, standby should crash.
    </para>
 
@@ -1126,7 +1132,7 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
 
    <para>
     If you need to re-create a standby server while transactions are
-    waiting, make sure that the commands to run pg_start_backup() and
+    waiting, make sure that the commands pg_start_backup() and
     pg_stop_backup() are run in a session with
     <varname>synchronous_commit</> = <literal>off</>, otherwise those
     requests will wait forever for the standby to appear.
@@ -1969,13 +1975,15 @@ LOG:  database system is ready to accept read only connections
    </para>
 
    <para>
-    <function>pg_cancel_backend()</> will work on user backends, but not the
-    Startup process, which performs recovery. <structname>pg_stat_activity</structname> does not
-    show an entry for the Startup process, nor do recovering transactions
-    show as active. As a result, <structname>pg_prepared_xacts</structname> is always empty during
-    recovery. If you wish to resolve in-doubt prepared transactions,
-    view <literal>pg_prepared_xacts</> on the primary and issue commands to
-    resolve transactions there.
+    <function>pg_cancel_backend()</>
+    and <function>pg_terminate_backend()</> will work on user backends,
+    but not the Startup process, which performs
+    recovery. <structname>pg_stat_activity</structname> does not show an
+    entry for the Startup process, nor do recovering transactions show
+    as active. As a result, <structname>pg_prepared_xacts</structname>
+    is always empty during recovery. If you wish to resolve in-doubt
+    prepared transactions, view <literal>pg_prepared_xacts</> on the
+    primary and issue commands to resolve transactions there.
    </para>
 
    <para>

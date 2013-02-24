@@ -48,9 +48,6 @@
 /* Define to the default TCP port number as a string constant. */
 #undef DEF_PGPORT_STR
 
-/* Define to 1 to enable DTrace support. (--enable-dtrace) */
-#undef ENABLE_DTRACE
-
 /* Define to build with GSSAPI support. (--with-gssapi) */
 #undef ENABLE_GSS
 
@@ -148,12 +145,6 @@
 
 /* Define to 1 if you have the <editline/readline.h> header file. */
 #undef HAVE_EDITLINE_READLINE_H
-
-/* Define to 1 if you have the `ERR_set_mark' function. */
-#undef HAVE_ERR_SET_MARK
-
-/* Define to 1 if you have the `fcvt' function. */
-#undef HAVE_FCVT
 
 /* Define to 1 if you have the `fdatasync' function. */
 #undef HAVE_FDATASYNC
@@ -269,12 +260,6 @@
 /* Define to 1 if you have isinf(). */
 #undef HAVE_ISINF
 
-/* Define to 1 if you have the <kernel/image.h> header file. */
-#undef HAVE_KERNEL_IMAGE_H
-
-/* Define to 1 if you have the <kernel/OS.h> header file. */
-#undef HAVE_KERNEL_OS_H
-
 /* Define to 1 if `e_data' is member of `krb5_error'. */
 #undef HAVE_KRB5_ERROR_E_DATA
 
@@ -347,6 +332,9 @@
 
 /* Define to 1 if `long long int' works and is 64 bits. */
 #undef HAVE_LONG_LONG_INT_64
+
+/* Define to 1 if you have the `mbstowcs_l' function. */
+#undef HAVE_MBSTOWCS_L
 
 /* Define to 1 if you have the `memmove' function. */
 #undef HAVE_MEMMOVE
@@ -460,9 +448,6 @@
 /* Define to 1 if you have the <stdlib.h> header file. */
 #undef HAVE_STDLIB_H
 
-/* Define to 1 if you have the `strdup' function. */
-#undef HAVE_STRDUP
-
 /* Define to 1 if you have the `strerror' function. */
 #undef HAVE_STRERROR
 
@@ -484,17 +469,11 @@
 /* Define to 1 if you have the `strlcpy' function. */
 #undef HAVE_STRLCPY
 
-/* Define to 1 if you have the `strtol' function. */
-#undef HAVE_STRTOL
-
 /* Define to 1 if you have the `strtoll' function. */
 #undef HAVE_STRTOLL
 
 /* Define to 1 if you have the `strtoq' function. */
 #undef HAVE_STRTOQ
-
-/* Define to 1 if you have the `strtoul' function. */
-#undef HAVE_STRTOUL
 
 /* Define to 1 if you have the `strtoull' function. */
 #undef HAVE_STRTOULL
@@ -529,20 +508,14 @@
 /* Define to 1 if `__ss_len' is member of `struct sockaddr_storage'. */
 #undef HAVE_STRUCT_SOCKADDR_STORAGE___SS_LEN
 
-/* Define to 1 if the system has the type `struct sockaddr_un'. */
-#undef HAVE_STRUCT_SOCKADDR_UN
-
 /* Define to 1 if `tm_zone' is member of `struct tm'. */
 #undef HAVE_STRUCT_TM_TM_ZONE
-
-/* Define to 1 if you have the <SupportDefs.h> header file. */
-#undef HAVE_SUPPORTDEFS_H
 
 /* Define to 1 if you have the `symlink' function. */
 #undef HAVE_SYMLINK
 
-/* Define to 1 if you have the `sysconf' function. */
-#undef HAVE_SYSCONF
+/* Define to 1 if you have the `sync_file_range' function. */
+#undef HAVE_SYNC_FILE_RANGE
 
 /* Define to 1 if you have the syslog interface. */
 #undef HAVE_SYSLOG
@@ -647,9 +620,6 @@
 /* Define to 1 if you have the `vsnprintf' function. */
 #undef HAVE_VSNPRINTF
 
-/* Define to 1 if you have the `waitpid' function. */
-#undef HAVE_WAITPID
-
 /* Define to 1 if you have the <wchar.h> header file. */
 #undef HAVE_WCHAR_H
 
@@ -665,8 +635,20 @@
 /* Define to 1 if you have the <winldap.h> header file. */
 #undef HAVE_WINLDAP_H
 
-/* Define to 1 if your libxml has xmlStructuredErrorContext. */
-#undef HAVE_XMLSTRUCTUREDERRORCONTEXT
+/* Define to 1 if your compiler understands __builtin_constant_p. */
+#undef HAVE__BUILTIN_CONSTANT_P
+
+/* Define to 1 if your compiler understands __builtin_types_compatible_p. */
+#undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
+
+/* Define to 1 if your compiler understands __builtin_unreachable. */
+#undef HAVE__BUILTIN_UNREACHABLE
+
+/* Define to 1 if your compiler understands _Static_assert. */
+#undef HAVE__STATIC_ASSERT
+
+/* Define to 1 if your compiler understands __VA_ARGS__ in macros. */
+#undef HAVE__VA_ARGS
 
 /* Define to the appropriate snprintf format for 64-bit ints. */
 #undef INT64_FORMAT
@@ -698,12 +680,19 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
+/* Define to the name of a signed 64-bit integer type. */
+#undef PG_INT64_TYPE
+
 /* Define to the name of the default PostgreSQL service principal in Kerberos.
    (--with-krb-srvnam=NAME) */
 #undef PG_KRB_SRVNAM
 
 /* PostgreSQL major version as a string */
 #undef PG_MAJORVERSION
+
+/* Define to 1 if "static inline" works without unwanted warnings from
+   compilations where static inline functions are defined but not called. */
+#undef PG_USE_INLINE
 
 /* PostgreSQL version as a string */
 #undef PG_VERSION
@@ -772,10 +761,6 @@
 /* Define to 1 if you want float8, int8, etc values to be passed by value.
    (--enable-float8-byval) */
 #undef USE_FLOAT8_BYVAL
-
-/* Define to 1 if "static inline" works without unwanted warnings from
-   compilations where static inline functions are defined but not called. */
-#undef USE_INLINE
 
 /* Define to 1 if you want 64-bit integer timestamp and interval support.
    (--enable-integer-datetimes) */

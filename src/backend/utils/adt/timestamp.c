@@ -3,7 +3,7 @@
  * timestamp.c
  *	  Functions for the built-in SQL92 types "timestamp" and "interval".
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -28,7 +28,6 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
-#include "parser/parse_clause.h"
 #include "parser/scansup.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -316,10 +315,6 @@ timestamptypmodout(PG_FUNCTION_ARGS)
 Datum
 timestamp_transform(PG_FUNCTION_ARGS)
 {
-	/*
-	 * timestamp_scale throws an error when the typmod is out of range, but we
-	 * can't get there from a cast: our typmodin will have caught it already.
-	 */
 	PG_RETURN_POINTER(TemporalTransform(MAX_TIMESTAMP_PRECISION,
 										(Node *) PG_GETARG_POINTER(0)));
 }
@@ -762,7 +757,7 @@ interval_send(PG_FUNCTION_ARGS)
 
 /*
  * The interval typmod stores a "range" in its high 16 bits and a "precision"
- * in its low 16 bits.  Both contribute to defining the resolution of the
+ * in its low 16 bits.	Both contribute to defining the resolution of the
  * type.  Range addresses resolution granules larger than one second, and
  * precision specifies resolution below one second.  This representation can
  * express all SQL standard resolutions, but we implement them all in terms of
@@ -937,18 +932,17 @@ Datum
 interval_transform(PG_FUNCTION_ARGS)
 {
 	FuncExpr   *expr = (FuncExpr *) PG_GETARG_POINTER(0);
-	Node	   *typmod;
 	Node	   *ret = NULL;
+	Node	   *typmod;
 
-	if (!IsA(expr, FuncExpr))
-		PG_RETURN_POINTER(ret);
+	Assert(IsA(expr, FuncExpr));
+	Assert(list_length(expr->args) >= 2);
 
-	Assert(list_length(expr->args) == 2);
-	typmod = lsecond(expr->args);
+	typmod = (Node *) lsecond(expr->args);
 
-	if (IsA(typmod, Const))
+	if (IsA(typmod, Const) &&!((Const *) typmod)->constisnull)
 	{
-		Node	   *source = linitial(expr->args);
+		Node	   *source = (Node *) linitial(expr->args);
 		int32		old_typmod = exprTypmod(source);
 		int32		new_typmod = DatumGetInt32(((Const *) typmod)->constvalue);
 		int			old_range;
@@ -958,7 +952,7 @@ interval_transform(PG_FUNCTION_ARGS)
 		int			new_range_fls;
 		int			old_range_fls;
 
-		if (old_typmod == -1)
+		if (old_typmod < 0)
 		{
 			old_range = INTERVAL_FULL_RANGE;
 			old_precis = INTERVAL_FULL_PRECISION;
@@ -971,19 +965,17 @@ interval_transform(PG_FUNCTION_ARGS)
 
 		/*
 		 * Temporally-smaller fields occupy higher positions in the range
-		 * bitmap.  Since only the temporally-smallest bit matters for length
+		 * bitmap.	Since only the temporally-smallest bit matters for length
 		 * coercion purposes, we compare the last-set bits in the ranges.
 		 * Precision, which is to say, sub-second precision, only affects
 		 * ranges that include SECOND.
 		 */
 		new_range_fls = fls(new_range);
 		old_range_fls = fls(old_range);
-		if (new_typmod == -1 ||
-			((new_range_fls >= SECOND ||
-			  new_range_fls >= old_range_fls) &&
-			 (old_range_fls < SECOND ||
-			  new_precis >= MAX_INTERVAL_PRECISION ||
-			  new_precis >= old_precis)))
+		if (new_typmod < 0 ||
+			((new_range_fls >= SECOND || new_range_fls >= old_range_fls) &&
+		   (old_range_fls < SECOND || new_precis >= MAX_INTERVAL_PRECISION ||
+			new_precis >= old_precis)))
 			ret = relabel_to_typmod(source, new_typmod);
 	}
 
@@ -1068,7 +1060,7 @@ AdjustIntervalForTypmod(Interval *interval, int32 typmod)
 		 * can't do it consistently.  (We cannot enforce a range limit on the
 		 * highest expected field, since we do not have any equivalent of
 		 * SQL's <interval leading field precision>.)  If we ever decide to
-		 * revisit this, interval_transform will likely requite adjusting.
+		 * revisit this, interval_transform will likely require adjusting.
 		 *
 		 * Note: before PG 8.4 we interpreted a limited set of fields as
 		 * actually causing a "modulo" operation on a given value, potentially
@@ -1292,6 +1284,50 @@ GetCurrentTimestamp(void)
 
 	return result;
 }
+
+/*
+ * GetCurrentIntegerTimestamp -- get the current operating system time as int64
+ *
+ * Result is the number of milliseconds since the Postgres epoch. If compiled
+ * with --enable-integer-datetimes, this is identical to GetCurrentTimestamp(),
+ * and is implemented as a macro.
+ */
+#ifndef HAVE_INT64_TIMESTAMP
+int64
+GetCurrentIntegerTimestamp(void)
+{
+	int64 result;
+	struct timeval tp;
+
+	gettimeofday(&tp, NULL);
+
+	result = (int64) tp.tv_sec -
+		((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+
+	result = (result * USECS_PER_SEC) + tp.tv_usec;
+
+	return result;
+}
+#endif
+
+/*
+ * IntegetTimestampToTimestampTz -- convert an int64 timestamp to native format
+ *
+ * When compiled with --enable-integer-datetimes, this is implemented as a
+ * no-op macro.
+ */
+#ifndef HAVE_INT64_TIMESTAMP
+TimestampTz
+IntegerTimestampToTimestampTz(int64 timestamp)
+{
+	TimestampTz result;
+
+	result = timestamp / USECS_PER_SEC;
+	result += (timestamp % USECS_PER_SEC) / 1000000.0;
+
+	return result;
+}
+#endif
 
 /*
  * TimestampDifference -- convert the difference between two timestamps
@@ -1933,7 +1969,7 @@ timestamp_fastcmp(Datum x, Datum y, SortSupport ssup)
 Datum
 timestamp_sortsupport(PG_FUNCTION_ARGS)
 {
-	SortSupport	ssup = (SortSupport) PG_GETARG_POINTER(0);
+	SortSupport ssup = (SortSupport) PG_GETARG_POINTER(0);
 
 	ssup->comparator = timestamp_fastcmp;
 	PG_RETURN_VOID();
@@ -3724,10 +3760,17 @@ interval_trunc(PG_FUNCTION_ARGS)
 					break;
 
 				default:
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("interval units \"%s\" not supported",
-									lowunits)));
+					if (val == DTK_WEEK)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("interval units \"%s\" not supported "
+									"because months usually have fractional weeks",
+										lowunits)));
+					else
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("interval units \"%s\" not supported",
+										lowunits)));
 			}
 
 			if (tm2interval(tm, fsec, result) != 0)
@@ -3782,18 +3825,22 @@ isoweek2date(int woy, int *year, int *mon, int *mday)
 
 /* isoweekdate2date()
  *
- *	Convert an ISO 8601 week date (ISO year, ISO week and day of week) into a Gregorian date.
+ *	Convert an ISO 8601 week date (ISO year, ISO week) into a Gregorian date.
+ *	Gregorian day of week sent so weekday strings can be supplied.
  *	Populates year, mon, and mday with the correct Gregorian values.
  *	year must be passed in as the ISO year.
  */
 void
-isoweekdate2date(int isoweek, int isowday, int *year, int *mon, int *mday)
+isoweekdate2date(int isoweek, int wday, int *year, int *mon, int *mday)
 {
 	int			jday;
 
 	jday = isoweek2j(*year, isoweek);
-	jday += isowday - 1;
-
+	/* convert Gregorian week start (Sunday=1) to ISO week start (Monday=1) */
+	if (wday > 1)
+		jday += wday - 2;
+	else
+		jday += 6;
 	j2date(jday, year, mon, mday);
 }
 
@@ -4084,32 +4131,13 @@ timestamp_part(PG_FUNCTION_ARGS)
 		switch (val)
 		{
 			case DTK_EPOCH:
-				{
-					int			tz;
-					TimestampTz timestamptz;
-
-					/*
-					 * convert to timestamptz to produce consistent results
-					 */
-					if (timestamp2tm(timestamp, NULL, tm, &fsec, NULL, NULL) != 0)
-						ereport(ERROR,
-								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-								 errmsg("timestamp out of range")));
-
-					tz = DetermineTimeZoneOffset(tm, session_timezone);
-
-					if (tm2timestamp(tm, fsec, &tz, &timestamptz) != 0)
-						ereport(ERROR,
-								(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-								 errmsg("timestamp out of range")));
-
 #ifdef HAVE_INT64_TIMESTAMP
-					result = (timestamptz - SetEpochTimestamp()) / 1000000.0;
+				result = (timestamp - SetEpochTimestamp()) / 1000000.0;
 #else
-					result = timestamptz - SetEpochTimestamp();
+				result = timestamp - SetEpochTimestamp();
 #endif
-					break;
-				}
+				break;
+
 			case DTK_DOW:
 			case DTK_ISODOW:
 				if (timestamp2tm(timestamp, NULL, tm, &fsec, NULL, NULL) != 0)
@@ -4594,10 +4622,10 @@ timestamp_izone(PG_FUNCTION_ARGS)
 	if (TIMESTAMP_NOT_FINITE(timestamp))
 		PG_RETURN_TIMESTAMPTZ(timestamp);
 
-	if (zone->month != 0)
+	if (zone->month != 0 || zone->day != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("interval time zone \"%s\" must not specify month",
+				 errmsg("interval time zone \"%s\" must not include months or days",
 						DatumGetCString(DirectFunctionCall1(interval_out,
 												  PointerGetDatum(zone))))));
 
@@ -4767,10 +4795,10 @@ timestamptz_izone(PG_FUNCTION_ARGS)
 	if (TIMESTAMP_NOT_FINITE(timestamp))
 		PG_RETURN_TIMESTAMP(timestamp);
 
-	if (zone->month != 0)
+	if (zone->month != 0 || zone->day != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("interval time zone \"%s\" must not specify month",
+				 errmsg("interval time zone \"%s\" must not include months or days",
 						DatumGetCString(DirectFunctionCall1(interval_out,
 												  PointerGetDatum(zone))))));
 

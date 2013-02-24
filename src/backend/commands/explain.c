@@ -3,7 +3,7 @@
  * explain.c
  *	  Explain query execution plans
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  * IDENTIFICATION
@@ -15,6 +15,7 @@
 
 #include "access/xact.h"
 #include "catalog/pg_type.h"
+#include "commands/createas.h"
 #include "commands/defrem.h"
 #include "commands/prepare.h"
 #include "executor/hashjoin.h"
@@ -45,11 +46,15 @@ explain_get_index_name_hook_type explain_get_index_name_hook = NULL;
 #define X_CLOSE_IMMEDIATE 2
 #define X_NOWHITESPACE 4
 
-static void ExplainOneQuery(Query *query, ExplainState *es,
+static void ExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 				const char *queryString, ParamListInfo params);
 static void report_triggers(ResultRelInfo *rInfo, bool show_relname,
 				ExplainState *es);
 static double elapsed_time(instr_time *starttime);
+static void ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used);
+static void ExplainPreScanMemberNodes(List *plans, PlanState **planstates,
+						  Bitmapset **rels_used);
+static void ExplainPreScanSubPlans(List *plans, Bitmapset **rels_used);
 static void ExplainNode(PlanState *planstate, List *ancestors,
 			const char *relationship, const char *plan_name,
 			ExplainState *es);
@@ -116,7 +121,7 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 	TupOutputState *tstate;
 	List	   *rewritten;
 	ListCell   *lc;
-	bool	    timing_set = false;
+	bool		timing_set = false;
 
 	/* Initialize ExplainState. */
 	ExplainInitState(&es);
@@ -168,7 +173,7 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("EXPLAIN option BUFFERS requires ANALYZE")));
-	
+
 	/* if the timing was not set explicitly, set default value */
 	es.timing = (timing_set) ? es.timing : es.analyze;
 
@@ -212,7 +217,8 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 		/* Explain every plan */
 		foreach(l, rewritten)
 		{
-			ExplainOneQuery((Query *) lfirst(l), &es, queryString, params);
+			ExplainOneQuery((Query *) lfirst(l), NULL, &es,
+							queryString, params);
 
 			/* Separate plans with an appropriate separator */
 			if (lnext(l) != NULL)
@@ -288,21 +294,23 @@ ExplainResultDesc(ExplainStmt *stmt)
 /*
  * ExplainOneQuery -
  *	  print out the execution plan for one Query
+ *
+ * "into" is NULL unless we are explaining the contents of a CreateTableAsStmt.
  */
 static void
-ExplainOneQuery(Query *query, ExplainState *es,
+ExplainOneQuery(Query *query, IntoClause *into, ExplainState *es,
 				const char *queryString, ParamListInfo params)
 {
 	/* planner will not cope with utility statements */
 	if (query->commandType == CMD_UTILITY)
 	{
-		ExplainOneUtility(query->utilityStmt, es, queryString, params);
+		ExplainOneUtility(query->utilityStmt, into, es, queryString, params);
 		return;
 	}
 
 	/* if an advisor plugin is present, let it manage things */
 	if (ExplainOneQuery_hook)
-		(*ExplainOneQuery_hook) (query, es, queryString, params);
+		(*ExplainOneQuery_hook) (query, into, es, queryString, params);
 	else
 	{
 		PlannedStmt *plan;
@@ -311,7 +319,7 @@ ExplainOneQuery(Query *query, ExplainState *es,
 		plan = pg_plan_query(query, 0, params);
 
 		/* run it (if needed) and produce output */
-		ExplainOnePlan(plan, es, queryString, params);
+		ExplainOnePlan(plan, into, es, queryString, params);
 	}
 }
 
@@ -321,18 +329,36 @@ ExplainOneQuery(Query *query, ExplainState *es,
  *	  (In general, utility statements don't have plans, but there are some
  *	  we treat as special cases)
  *
+ * "into" is NULL unless we are explaining the contents of a CreateTableAsStmt.
+ *
  * This is exported because it's called back from prepare.c in the
- * EXPLAIN EXECUTE case
+ * EXPLAIN EXECUTE case.
  */
 void
-ExplainOneUtility(Node *utilityStmt, ExplainState *es,
+ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 				  const char *queryString, ParamListInfo params)
 {
 	if (utilityStmt == NULL)
 		return;
 
-	if (IsA(utilityStmt, ExecuteStmt))
-		ExplainExecuteQuery((ExecuteStmt *) utilityStmt, es,
+	if (IsA(utilityStmt, CreateTableAsStmt))
+	{
+		/*
+		 * We have to rewrite the contained SELECT and then pass it back to
+		 * ExplainOneQuery.  It's probably not really necessary to copy the
+		 * contained parsetree another time, but let's be safe.
+		 */
+		CreateTableAsStmt *ctas = (CreateTableAsStmt *) utilityStmt;
+		List	   *rewritten;
+
+		Assert(IsA(ctas->query, Query));
+		rewritten = QueryRewrite((Query *) copyObject(ctas->query));
+		Assert(list_length(rewritten) == 1);
+		ExplainOneQuery((Query *) linitial(rewritten), ctas->into, es,
+						queryString, params);
+	}
+	else if (IsA(utilityStmt, ExecuteStmt))
+		ExplainExecuteQuery((ExecuteStmt *) utilityStmt, into, es,
 							queryString, params);
 	else if (IsA(utilityStmt, NotifyStmt))
 	{
@@ -356,6 +382,9 @@ ExplainOneUtility(Node *utilityStmt, ExplainState *es,
  *		given a planned query, execute it if needed, and then print
  *		EXPLAIN output
  *
+ * "into" is NULL unless we are explaining the contents of a CreateTableAsStmt,
+ * in which case executing the query should result in creating that table.
+ *
  * Since we ignore any DeclareCursorStmt that might be attached to the query,
  * if you say EXPLAIN ANALYZE DECLARE CURSOR then we'll actually run the
  * query.  This is different from pre-8.3 behavior but seems more useful than
@@ -366,9 +395,10 @@ ExplainOneUtility(Node *utilityStmt, ExplainState *es,
  * to call it.
  */
 void
-ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
+ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 			   const char *queryString, ParamListInfo params)
 {
+	DestReceiver *dest;
 	QueryDesc  *queryDesc;
 	instr_time	starttime;
 	double		totaltime = 0;
@@ -392,16 +422,27 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
 	PushCopiedSnapshot(GetActiveSnapshot());
 	UpdateActiveSnapshotCommandId();
 
-	/* Create a QueryDesc requesting no output */
+	/*
+	 * Normally we discard the query's output, but if explaining CREATE TABLE
+	 * AS, we'd better use the appropriate tuple receiver.
+	 */
+	if (into)
+		dest = CreateIntoRelDestReceiver(into);
+	else
+		dest = None_Receiver;
+
+	/* Create a QueryDesc for the query */
 	queryDesc = CreateQueryDesc(plannedstmt, queryString,
 								GetActiveSnapshot(), InvalidSnapshot,
-								None_Receiver, params, instrument_option);
+								dest, params, instrument_option);
 
 	/* Select execution options */
 	if (es->analyze)
 		eflags = 0;				/* default run-to-completion flags */
 	else
 		eflags = EXEC_FLAG_EXPLAIN_ONLY;
+	if (into)
+		eflags |= GetIntoRelEFlags(into);
 
 	/* call ExecutorStart to prepare the plan for execution */
 	ExecutorStart(queryDesc, eflags);
@@ -409,8 +450,16 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
 	/* Execute the plan for statistics if asked for */
 	if (es->analyze)
 	{
+		ScanDirection dir;
+
+		/* EXPLAIN ANALYZE CREATE TABLE AS WITH NO DATA is weird */
+		if (into && into->skipData)
+			dir = NoMovementScanDirection;
+		else
+			dir = ForwardScanDirection;
+
 		/* run the plan */
-		ExecutorRun(queryDesc, ForwardScanDirection, 0L);
+		ExecutorRun(queryDesc, dir, 0L);
 
 		/* run cleanup too */
 		ExecutorFinish(queryDesc);
@@ -494,9 +543,13 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
 void
 ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 {
+	Bitmapset  *rels_used = NULL;
+
 	Assert(queryDesc->plannedstmt != NULL);
 	es->pstmt = queryDesc->plannedstmt;
 	es->rtable = queryDesc->plannedstmt->rtable;
+	ExplainPreScanNode(queryDesc->planstate, &rels_used);
+	es->rtable_names = select_rtable_names_for_explain(es->rtable, rels_used);
 	ExplainNode(queryDesc->planstate, NIL, NULL, NULL, es);
 }
 
@@ -593,6 +646,132 @@ elapsed_time(instr_time *starttime)
 	INSTR_TIME_SET_CURRENT(endtime);
 	INSTR_TIME_SUBTRACT(endtime, *starttime);
 	return INSTR_TIME_GET_DOUBLE(endtime);
+}
+
+/*
+ * ExplainPreScanNode -
+ *	  Prescan the planstate tree to identify which RTEs are referenced
+ *
+ * Adds the relid of each referenced RTE to *rels_used.  The result controls
+ * which RTEs are assigned aliases by select_rtable_names_for_explain.
+ * This ensures that we don't confusingly assign un-suffixed aliases to RTEs
+ * that never appear in the EXPLAIN output (such as inheritance parents).
+ */
+static void
+ExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used)
+{
+	Plan	   *plan = planstate->plan;
+
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapHeapScan:
+		case T_TidScan:
+		case T_SubqueryScan:
+		case T_FunctionScan:
+		case T_ValuesScan:
+		case T_CteScan:
+		case T_WorkTableScan:
+		case T_ForeignScan:
+			*rels_used = bms_add_member(*rels_used,
+										((Scan *) plan)->scanrelid);
+			break;
+		case T_ModifyTable:
+			/* cf ExplainModifyTarget */
+			*rels_used = bms_add_member(*rels_used,
+					  linitial_int(((ModifyTable *) plan)->resultRelations));
+			break;
+		default:
+			break;
+	}
+
+	/* initPlan-s */
+	if (planstate->initPlan)
+		ExplainPreScanSubPlans(planstate->initPlan, rels_used);
+
+	/* lefttree */
+	if (outerPlanState(planstate))
+		ExplainPreScanNode(outerPlanState(planstate), rels_used);
+
+	/* righttree */
+	if (innerPlanState(planstate))
+		ExplainPreScanNode(innerPlanState(planstate), rels_used);
+
+	/* special child plans */
+	switch (nodeTag(plan))
+	{
+		case T_ModifyTable:
+			ExplainPreScanMemberNodes(((ModifyTable *) plan)->plans,
+								  ((ModifyTableState *) planstate)->mt_plans,
+									  rels_used);
+			break;
+		case T_Append:
+			ExplainPreScanMemberNodes(((Append *) plan)->appendplans,
+									((AppendState *) planstate)->appendplans,
+									  rels_used);
+			break;
+		case T_MergeAppend:
+			ExplainPreScanMemberNodes(((MergeAppend *) plan)->mergeplans,
+								((MergeAppendState *) planstate)->mergeplans,
+									  rels_used);
+			break;
+		case T_BitmapAnd:
+			ExplainPreScanMemberNodes(((BitmapAnd *) plan)->bitmapplans,
+								 ((BitmapAndState *) planstate)->bitmapplans,
+									  rels_used);
+			break;
+		case T_BitmapOr:
+			ExplainPreScanMemberNodes(((BitmapOr *) plan)->bitmapplans,
+								  ((BitmapOrState *) planstate)->bitmapplans,
+									  rels_used);
+			break;
+		case T_SubqueryScan:
+			ExplainPreScanNode(((SubqueryScanState *) planstate)->subplan,
+							   rels_used);
+			break;
+		default:
+			break;
+	}
+
+	/* subPlan-s */
+	if (planstate->subPlan)
+		ExplainPreScanSubPlans(planstate->subPlan, rels_used);
+}
+
+/*
+ * Prescan the constituent plans of a ModifyTable, Append, MergeAppend,
+ * BitmapAnd, or BitmapOr node.
+ *
+ * Note: we don't actually need to examine the Plan list members, but
+ * we need the list in order to determine the length of the PlanState array.
+ */
+static void
+ExplainPreScanMemberNodes(List *plans, PlanState **planstates,
+						  Bitmapset **rels_used)
+{
+	int			nplans = list_length(plans);
+	int			j;
+
+	for (j = 0; j < nplans; j++)
+		ExplainPreScanNode(planstates[j], rels_used);
+}
+
+/*
+ * Prescan a list of SubPlans (or initPlans, which also use SubPlan nodes).
+ */
+static void
+ExplainPreScanSubPlans(List *plans, Bitmapset **rels_used)
+{
+	ListCell   *lst;
+
+	foreach(lst, plans)
+	{
+		SubPlanState *sps = (SubPlanState *) lfirst(lst);
+
+		ExplainPreScanNode(sps->planstate, rels_used);
+	}
 }
 
 /*
@@ -976,7 +1155,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		{
 			if (planstate->instrument->need_timer)
 				appendStringInfo(es->str,
-								 " (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
+							" (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
 								 startup_sec, total_sec, rows, nloops);
 			else
 				appendStringInfo(es->str,
@@ -1050,7 +1229,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 										   planstate, es);
 			if (es->analyze)
 				ExplainPropertyLong("Heap Fetches",
-					((IndexOnlyScanState *) planstate)->ioss_HeapFetches, es);
+				   ((IndexOnlyScanState *) planstate)->ioss_HeapFetches, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
@@ -1191,6 +1370,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 									 usage->local_blks_written > 0);
 			bool		has_temp = (usage->temp_blks_read > 0 ||
 									usage->temp_blks_written > 0);
+			bool		has_timing = (!INSTR_TIME_IS_ZERO(usage->blk_read_time) ||
+								 !INSTR_TIME_IS_ZERO(usage->blk_write_time));
 
 			/* Show only positive counter values. */
 			if (has_shared || has_local || has_temp)
@@ -1246,6 +1427,20 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				}
 				appendStringInfoChar(es->str, '\n');
 			}
+
+			/* As above, show only positive counter values. */
+			if (has_timing)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfoString(es->str, "I/O Timings:");
+				if (!INSTR_TIME_IS_ZERO(usage->blk_read_time))
+					appendStringInfo(es->str, " read=%0.3f",
+							  INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
+				if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
+					appendStringInfo(es->str, " write=%0.3f",
+							 INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
+				appendStringInfoChar(es->str, '\n');
+			}
 		}
 		else
 		{
@@ -1259,6 +1454,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			ExplainPropertyLong("Local Written Blocks", usage->local_blks_written, es);
 			ExplainPropertyLong("Temp Read Blocks", usage->temp_blks_read, es);
 			ExplainPropertyLong("Temp Written Blocks", usage->temp_blks_written, es);
+			ExplainPropertyFloat("I/O Read Time", INSTR_TIME_GET_MILLISEC(usage->blk_read_time), 3, es);
+			ExplainPropertyFloat("I/O Write Time", INSTR_TIME_GET_MILLISEC(usage->blk_write_time), 3, es);
 		}
 	}
 
@@ -1377,7 +1574,8 @@ show_plan_tlist(PlanState *planstate, List *ancestors, ExplainState *es)
 	/* Set up deparsing context */
 	context = deparse_context_for_planstate((Node *) planstate,
 											ancestors,
-											es->rtable);
+											es->rtable,
+											es->rtable_names);
 	useprefix = list_length(es->rtable) > 1;
 
 	/* Deparse each result column (we now include resjunk ones) */
@@ -1408,7 +1606,8 @@ show_expression(Node *node, const char *qlabel,
 	/* Set up deparsing context */
 	context = deparse_context_for_planstate((Node *) planstate,
 											ancestors,
-											es->rtable);
+											es->rtable,
+											es->rtable_names);
 
 	/* Deparse the expression */
 	exprstr = deparse_expression(node, context, useprefix, false);
@@ -1510,7 +1709,8 @@ show_sort_keys_common(PlanState *planstate, int nkeys, AttrNumber *keycols,
 	/* Set up deparsing context */
 	context = deparse_context_for_planstate((Node *) planstate,
 											ancestors,
-											es->rtable);
+											es->rtable,
+											es->rtable_names);
 	useprefix = (list_length(es->rtable) > 1 || es->verbose);
 
 	for (keyno = 0; keyno < nkeys; keyno++)
@@ -1750,8 +1950,12 @@ ExplainTargetRel(Plan *plan, Index rti, ExplainState *es)
 	char	   *namespace = NULL;
 	const char *objecttag = NULL;
 	RangeTblEntry *rte;
+	char	   *refname;
 
 	rte = rt_fetch(rti, es->rtable);
+	refname = (char *) list_nth(es->rtable_names, rti - 1);
+	if (refname == NULL)
+		refname = rte->eref->aliasname;
 
 	switch (nodeTag(plan))
 	{
@@ -1824,10 +2028,8 @@ ExplainTargetRel(Plan *plan, Index rti, ExplainState *es)
 							 quote_identifier(objectname));
 		else if (objectname != NULL)
 			appendStringInfo(es->str, " %s", quote_identifier(objectname));
-		if (objectname == NULL ||
-			strcmp(rte->eref->aliasname, objectname) != 0)
-			appendStringInfo(es->str, " %s",
-							 quote_identifier(rte->eref->aliasname));
+		if (objectname == NULL || strcmp(refname, objectname) != 0)
+			appendStringInfo(es->str, " %s", quote_identifier(refname));
 	}
 	else
 	{
@@ -1835,7 +2037,7 @@ ExplainTargetRel(Plan *plan, Index rti, ExplainState *es)
 			ExplainPropertyText(objecttag, objectname, es);
 		if (namespace != NULL)
 			ExplainPropertyText("Schema", namespace, es);
-		ExplainPropertyText("Alias", rte->eref->aliasname, es);
+		ExplainPropertyText("Alias", refname, es);
 	}
 }
 

@@ -6,7 +6,7 @@
  * The type cache exists to speed lookup of certain information about data
  * types that is not directly available from a type's pg_type row.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/typcache.h
@@ -73,13 +73,13 @@ typedef struct TypeCacheEntry
 	TupleDesc	tupDesc;
 
 	/*
-	 * Fields computed when TYPECACHE_RANGE_INFO is requested.  Zeroes if
-	 * not a range type or information hasn't yet been requested.  Note that
+	 * Fields computed when TYPECACHE_RANGE_INFO is requested.	Zeroes if not
+	 * a range type or information hasn't yet been requested.  Note that
 	 * rng_cmp_proc_finfo could be different from the element type's default
 	 * btree comparison function.
 	 */
-	struct TypeCacheEntry *rngelemtype;	/* range's element type */
-	Oid			rng_collation;			/* collation for comparisons, if any */
+	struct TypeCacheEntry *rngelemtype; /* range's element type */
+	Oid			rng_collation;	/* collation for comparisons, if any */
 	FmgrInfo	rng_cmp_proc_finfo;		/* comparison function */
 	FmgrInfo	rng_canonical_finfo;	/* canonicalization function, if any */
 	FmgrInfo	rng_subdiff_finfo;		/* difference function, if any */

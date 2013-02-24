@@ -3,7 +3,7 @@
  * pg_constraint.c
  *	  routines to support manipulation of the pg_constraint relation
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
@@ -67,7 +68,7 @@ CreateConstraintEntry(const char *constraintName,
 					  const char *conSrc,
 					  bool conIsLocal,
 					  int conInhCount,
-					  bool conIsOnly)
+					  bool conNoInherit)
 {
 	Relation	conDesc;
 	Oid			conOid;
@@ -170,7 +171,7 @@ CreateConstraintEntry(const char *constraintName,
 	values[Anum_pg_constraint_confmatchtype - 1] = CharGetDatum(foreignMatchType);
 	values[Anum_pg_constraint_conislocal - 1] = BoolGetDatum(conIsLocal);
 	values[Anum_pg_constraint_coninhcount - 1] = Int32GetDatum(conInhCount);
-	values[Anum_pg_constraint_conisonly - 1] = BoolGetDatum(conIsOnly);
+	values[Anum_pg_constraint_connoinherit - 1] = BoolGetDatum(conNoInherit);
 
 	if (conkeyArray)
 		values[Anum_pg_constraint_conkey - 1] = PointerGetDatum(conkeyArray);
@@ -678,7 +679,7 @@ RenameConstraintById(Oid conId, const char *newname)
  */
 void
 AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
-						  Oid newNspId, bool isType)
+						  Oid newNspId, bool isType, ObjectAddresses *objsMoved)
 {
 	Relation	conRel;
 	ScanKeyData key[1];
@@ -711,6 +712,14 @@ AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
 	while (HeapTupleIsValid((tup = systable_getnext(scan))))
 	{
 		Form_pg_constraint conform = (Form_pg_constraint) GETSTRUCT(tup);
+		ObjectAddress	thisobj;
+
+		thisobj.classId = ConstraintRelationId;
+		thisobj.objectId = HeapTupleGetOid(tup);
+		thisobj.objectSubId = 0;
+
+		if (object_address_present(&thisobj, objsMoved))
+			continue;
 
 		if (conform->connamespace == oldNspId)
 		{
@@ -728,6 +737,8 @@ AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
 			 * changeDependencyFor().
 			 */
 		}
+
+		add_exact_object_address(&thisobj, objsMoved);
 	}
 
 	systable_endscan(scan);
@@ -736,12 +747,12 @@ AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
 }
 
 /*
- * get_constraint_oid
+ * get_relation_constraint_oid
  *		Find a constraint on the specified relation with the specified name.
  *		Returns constraint's OID.
  */
 Oid
-get_constraint_oid(Oid relid, const char *conname, bool missing_ok)
+get_relation_constraint_oid(Oid relid, const char *conname, bool missing_ok)
 {
 	Relation	pg_constraint;
 	HeapTuple	tuple;
@@ -787,6 +798,64 @@ get_constraint_oid(Oid relid, const char *conname, bool missing_ok)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("constraint \"%s\" for table \"%s\" does not exist",
 						conname, get_rel_name(relid))));
+
+	heap_close(pg_constraint, AccessShareLock);
+
+	return conOid;
+}
+
+/*
+ * get_domain_constraint_oid
+ *		Find a constraint on the specified domain with the specified name.
+ *		Returns constraint's OID.
+ */
+Oid
+get_domain_constraint_oid(Oid typid, const char *conname, bool missing_ok)
+{
+	Relation	pg_constraint;
+	HeapTuple	tuple;
+	SysScanDesc scan;
+	ScanKeyData skey[1];
+	Oid			conOid = InvalidOid;
+
+	/*
+	 * Fetch the constraint tuple from pg_constraint.  There may be more than
+	 * one match, because constraints are not required to have unique names;
+	 * if so, error out.
+	 */
+	pg_constraint = heap_open(ConstraintRelationId, AccessShareLock);
+
+	ScanKeyInit(&skey[0],
+				Anum_pg_constraint_contypid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(typid));
+
+	scan = systable_beginscan(pg_constraint, ConstraintTypidIndexId, true,
+							  SnapshotNow, 1, skey);
+
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tuple);
+
+		if (strcmp(NameStr(con->conname), conname) == 0)
+		{
+			if (OidIsValid(conOid))
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_OBJECT),
+				errmsg("domain \"%s\" has multiple constraints named \"%s\"",
+					   format_type_be(typid), conname)));
+			conOid = HeapTupleGetOid(tuple);
+		}
+	}
+
+	systable_endscan(scan);
+
+	/* If no such constraint exists, complain */
+	if (!OidIsValid(conOid) && !missing_ok)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("constraint \"%s\" for domain \"%s\" does not exist",
+						conname, format_type_be(typid))));
 
 	heap_close(pg_constraint, AccessShareLock);
 

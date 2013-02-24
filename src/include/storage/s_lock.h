@@ -12,10 +12,11 @@
  *	void S_INIT_LOCK(slock_t *lock)
  *		Initialize a spinlock (to the unlocked state).
  *
- *	void S_LOCK(slock_t *lock)
+ *	int S_LOCK(slock_t *lock)
  *		Acquire a spinlock, waiting if necessary.
  *		Time out and abort() if unable to acquire the lock in a
  *		"reasonable" amount of time --- typically ~ 1 minute.
+ *		Should return number of "delays"; see s_lock.c
  *
  *	void S_UNLOCK(slock_t *lock)
  *		Unlock a previously acquired lock.
@@ -83,7 +84,7 @@
  *	when using the SysV semaphore code.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	  src/include/storage/s_lock.h
@@ -884,19 +885,6 @@ typedef int slock_t;
 #endif	 /* _AIX */
 
 
-#if defined (nextstep)		/* Nextstep */
-#define HAS_TEST_AND_SET
-
-typedef struct mutex slock_t;
-
-#define S_LOCK(lock)	mutex_lock(lock)
-#define S_UNLOCK(lock)	mutex_unlock(lock)
-#define S_INIT_LOCK(lock)	mutex_init(lock)
-/* For Mach, we have to delve inside the entrails of `struct mutex'.  Ick! */
-#define S_LOCK_FREE(alock)	((alock)->lock == 0)
-#endif	 /* nextstep */
-
-
 /* These are in s_lock.c */
 
 
@@ -991,10 +979,7 @@ extern int	tas_sema(volatile slock_t *lock);
 
 #if !defined(S_LOCK)
 #define S_LOCK(lock) \
-	do { \
-		if (TAS(lock)) \
-			s_lock((lock), __FILE__, __LINE__); \
-	} while (0)
+	(TAS(lock) ? s_lock((lock), __FILE__, __LINE__) : 0)
 #endif	 /* S_LOCK */
 
 #if !defined(S_LOCK_FREE)
@@ -1028,7 +1013,7 @@ extern int	tas(volatile slock_t *lock);		/* in port/.../tas.s, or
 /*
  * Platform-independent out-of-line support routines
  */
-extern void s_lock(volatile slock_t *lock, const char *file, int line);
+extern int s_lock(volatile slock_t *lock, const char *file, int line);
 
 /* Support for dynamic adjustment of spins_per_delay */
 #define DEFAULT_SPINS_PER_DELAY  100

@@ -3,7 +3,7 @@
  * datetime.c
  *	  Support functions for date/time types.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,12 +19,12 @@
 #include <limits.h>
 #include <math.h>
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
-#include "parser/parse_clause.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
@@ -947,6 +947,16 @@ DecodeDateTime(char **field, int *ftype, int nf,
 				break;
 
 			case DTK_TIME:
+				/*
+				 * This might be an ISO time following a "t" field.
+				 */
+				if (ptype != 0)
+				{
+					/* Sanity check; should not fail this test */
+					if (ptype != DTK_TIME)
+						return DTERR_BAD_FORMAT;
+					ptype = 0;
+				}
 				dterr = DecodeTime(field[i], fmask, INTERVAL_FULL_RANGE,
 								   &tmask, tm, fsec);
 				if (dterr)
@@ -2168,8 +2178,11 @@ DecodeDate(char *str, int fmask, int *tmask, bool *is2digits,
 	while (*str != '\0' && nf < MAXDATEFIELDS)
 	{
 		/* skip field separators */
-		while (!isalnum((unsigned char) *str))
+		while (*str != '\0' && !isalnum((unsigned char) *str))
 			str++;
+
+		if (*str == '\0')
+			return DTERR_BAD_FORMAT;		/* end of string after separator */
 
 		field[nf] = str;
 		if (isdigit((unsigned char) *str))
@@ -2701,9 +2714,6 @@ DecodeNumberField(int len, char *str, int fmask,
  * Return 0 if okay (and set *tzp), a DTERR code if not okay.
  *
  * NB: this must *not* ereport on failure; see commands/variable.c.
- *
- * Note: we allow timezone offsets up to 13:59.  There are places that
- * use +1300 summer time.
  */
 static int
 DecodeTimezone(char *str, int *tzp)
@@ -2748,7 +2758,8 @@ DecodeTimezone(char *str, int *tzp)
 	else
 		min = 0;
 
-	if (hr < 0 || hr > 14)
+	/* Range-check the values; see notes in datatype/timestamp.h */
+	if (hr < 0 || hr > MAX_TZDISP_HOUR)
 		return DTERR_TZDISP_OVERFLOW;
 	if (min < 0 || min >= MINS_PER_HOUR)
 		return DTERR_TZDISP_OVERFLOW;
@@ -2878,19 +2889,18 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 			case DTK_TZ:
 
 				/*
-				 * Timezone is a token with a leading sign character and at
+				 * Timezone means a token with a leading sign character and at
 				 * least one digit; there could be ':', '.', '-' embedded in
 				 * it as well.
 				 */
 				Assert(*field[i] == '-' || *field[i] == '+');
 
 				/*
-				 * Try for hh:mm or hh:mm:ss.  If not, fall through to
-				 * DTK_NUMBER case, which can handle signed float numbers and
-				 * signed year-month values.
+				 * Check for signed hh:mm or hh:mm:ss.  If so, process exactly
+				 * like DTK_TIME case above, plus handling the sign.
 				 */
 				if (strchr(field[i] + 1, ':') != NULL &&
-					DecodeTime(field[i] + 1, fmask, INTERVAL_FULL_RANGE,
+					DecodeTime(field[i] + 1, fmask, range,
 							   &tmask, tm, fsec) == 0)
 				{
 					if (*field[i] == '-')
@@ -2908,9 +2918,14 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 					 * are reading right to left.
 					 */
 					type = DTK_DAY;
-					tmask = DTK_M(TZ);
 					break;
 				}
+
+				/*
+				 * Otherwise, fall through to DTK_NUMBER case, which can
+				 * handle signed float numbers and signed year-month values.
+				 */
+
 				/* FALL THROUGH */
 
 			case DTK_DATE:
@@ -4155,32 +4170,34 @@ CheckDateTokenTables(void)
 }
 
 /*
- * Helper for temporal protransform functions.  Types time, timetz, timestamp
- * and timestamptz each have a range of allowed precisions.  An unspecified
- * precision is rigorously equivalent to the highest specifiable precision.
+ * Common code for temporal protransform functions.  Types time, timetz,
+ * timestamp and timestamptz each have a range of allowed precisions.  An
+ * unspecified precision is rigorously equivalent to the highest specifiable
+ * precision.
+ *
+ * Note: timestamp_scale throws an error when the typmod is out of range, but
+ * we can't get there from a cast: our typmodin will have caught it already.
  */
 Node *
 TemporalTransform(int32 max_precis, Node *node)
 {
 	FuncExpr   *expr = (FuncExpr *) node;
-	Node	   *typmod;
 	Node	   *ret = NULL;
+	Node	   *typmod;
 
-	if (!IsA(expr, FuncExpr))
-		return ret;
+	Assert(IsA(expr, FuncExpr));
+	Assert(list_length(expr->args) >= 2);
 
-	Assert(list_length(expr->args) == 2);
-	typmod = lsecond(expr->args);
+	typmod = (Node *) lsecond(expr->args);
 
-	if (IsA(typmod, Const))
+	if (IsA(typmod, Const) &&!((Const *) typmod)->constisnull)
 	{
-		Node	   *source = linitial(expr->args);
+		Node	   *source = (Node *) linitial(expr->args);
 		int32		old_precis = exprTypmod(source);
 		int32		new_precis = DatumGetInt32(((Const *) typmod)->constvalue);
 
-		if (new_precis == -1 ||
-			new_precis == max_precis ||
-			(old_precis != -1 && new_precis >= old_precis))
+		if (new_precis < 0 || new_precis == max_precis ||
+			(old_precis >= 0 && new_precis >= old_precis))
 			ret = relabel_to_typmod(source, new_precis);
 	}
 

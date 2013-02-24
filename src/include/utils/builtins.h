@@ -4,7 +4,7 @@
  *	  Declarations for operations on built-in types.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/builtins.h
@@ -143,7 +143,10 @@ extern Datum char_text(PG_FUNCTION_ARGS);
 /* domains.c */
 extern Datum domain_in(PG_FUNCTION_ARGS);
 extern Datum domain_recv(PG_FUNCTION_ARGS);
-extern void domain_check(Datum value, bool isnull, Oid domainType, void **extra, MemoryContext mcxt);
+extern void domain_check(Datum value, bool isnull, Oid domainType,
+			 void **extra, MemoryContext mcxt);
+extern int	errdatatype(Oid datatypeOid);
+extern int	errdomainconstraint(Oid datatypeOid, const char *conname);
 
 /* encode.c */
 extern Datum binary_encode(PG_FUNCTION_ARGS);
@@ -256,7 +259,7 @@ extern Datum int2shl(PG_FUNCTION_ARGS);
 extern Datum int2shr(PG_FUNCTION_ARGS);
 extern Datum generate_series_int4(PG_FUNCTION_ARGS);
 extern Datum generate_series_step_int4(PG_FUNCTION_ARGS);
-extern int2vector *buildint2vector(const int2 *int2s, int n);
+extern int2vector *buildint2vector(const int16 *int2s, int n);
 
 /* name.c */
 extern Datum namein(PG_FUNCTION_ARGS);
@@ -311,7 +314,7 @@ extern Datum btnamecmp(PG_FUNCTION_ARGS);
 extern Datum bttextcmp(PG_FUNCTION_ARGS);
 
 /*
- *		Per-opclass sort support functions for new btrees.  Like the
+ *		Per-opclass sort support functions for new btrees.	Like the
  *		functions above, these are stored in pg_amproc; most are defined in
  *		access/nbtree/nbtcompare.c
  */
@@ -453,6 +456,7 @@ extern Datum pg_database_size_name(PG_FUNCTION_ARGS);
 extern Datum pg_relation_size(PG_FUNCTION_ARGS);
 extern Datum pg_total_relation_size(PG_FUNCTION_ARGS);
 extern Datum pg_size_pretty(PG_FUNCTION_ARGS);
+extern Datum pg_size_pretty_numeric(PG_FUNCTION_ARGS);
 extern Datum pg_table_size(PG_FUNCTION_ARGS);
 extern Datum pg_indexes_size(PG_FUNCTION_ARGS);
 extern Datum pg_relation_filenode(PG_FUNCTION_ARGS);
@@ -481,6 +485,8 @@ extern Datum pg_sleep(PG_FUNCTION_ARGS);
 extern Datum pg_get_keywords(PG_FUNCTION_ARGS);
 extern Datum pg_typeof(PG_FUNCTION_ARGS);
 extern Datum pg_collation_for(PG_FUNCTION_ARGS);
+extern Datum pg_view_is_insertable(PG_FUNCTION_ARGS);
+extern Datum pg_view_is_updatable(PG_FUNCTION_ARGS);
 
 /* oid.c */
 extern Datum oidin(PG_FUNCTION_ARGS);
@@ -531,6 +537,8 @@ extern Datum void_recv(PG_FUNCTION_ARGS);
 extern Datum void_send(PG_FUNCTION_ARGS);
 extern Datum trigger_in(PG_FUNCTION_ARGS);
 extern Datum trigger_out(PG_FUNCTION_ARGS);
+extern Datum event_trigger_in(PG_FUNCTION_ARGS);
+extern Datum event_trigger_out(PG_FUNCTION_ARGS);
 extern Datum language_handler_in(PG_FUNCTION_ARGS);
 extern Datum language_handler_out(PG_FUNCTION_ARGS);
 extern Datum fdw_handler_in(PG_FUNCTION_ARGS);
@@ -567,6 +575,8 @@ extern Datum regexp_split_to_table(PG_FUNCTION_ARGS);
 extern Datum regexp_split_to_table_no_flags(PG_FUNCTION_ARGS);
 extern Datum regexp_split_to_array(PG_FUNCTION_ARGS);
 extern Datum regexp_split_to_array_no_flags(PG_FUNCTION_ARGS);
+extern char *regexp_fixed_prefix(text *text_re, bool case_insensitive,
+								 Oid collation, bool *exact);
 
 /* regproc.c */
 extern Datum regprocin(PG_FUNCTION_ARGS);
@@ -649,7 +659,9 @@ extern char *deparse_expression(Node *expr, List *dpcontext,
 				   bool forceprefix, bool showimplicit);
 extern List *deparse_context_for(const char *aliasname, Oid relid);
 extern List *deparse_context_for_planstate(Node *planstate, List *ancestors,
-							  List *rtable);
+							  List *rtable, List *rtable_names);
+extern List *select_rtable_names_for_explain(List *rtable,
+								Bitmapset *rels_used);
 extern const char *quote_identifier(const char *ident);
 extern char *quote_qualified_identifier(const char *qualifier,
 						   const char *ident);
@@ -751,6 +763,8 @@ extern int	varstr_cmp(char *arg1, int len1, char *arg2, int len2, Oid collid);
 extern List *textToQualifiedNameList(text *textval);
 extern bool SplitIdentifierString(char *rawstring, char separator,
 					  List **namelist);
+extern bool SplitDirectoriesString(char *rawstring, char separator,
+					   List **namelist);
 extern Datum replace_text(PG_FUNCTION_ARGS);
 extern text *replace_text_regexp(text *src_text, void *regexp,
 					text *replace_text, bool glob);
@@ -771,8 +785,8 @@ extern Datum unknownsend(PG_FUNCTION_ARGS);
 
 extern Datum pg_column_size(PG_FUNCTION_ARGS);
 
-extern Datum bytea_agg_transfn(PG_FUNCTION_ARGS);
-extern Datum bytea_agg_finalfn(PG_FUNCTION_ARGS);
+extern Datum bytea_string_agg_transfn(PG_FUNCTION_ARGS);
+extern Datum bytea_string_agg_finalfn(PG_FUNCTION_ARGS);
 extern Datum string_agg_transfn(PG_FUNCTION_ARGS);
 extern Datum string_agg_finalfn(PG_FUNCTION_ARGS);
 
@@ -1122,6 +1136,9 @@ extern Datum ginarrayconsistent(PG_FUNCTION_ARGS);
 
 /* access/transam/twophase.c */
 extern Datum pg_prepared_xact(PG_FUNCTION_ARGS);
+
+/* access/transam/multixact.c */
+extern Datum pg_get_multixact_members(PG_FUNCTION_ARGS);
 
 /* catalogs/dependency.c */
 extern Datum pg_describe_object(PG_FUNCTION_ARGS);

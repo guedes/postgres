@@ -18,7 +18,7 @@
  * code for possible future use.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/pg_crc_tables.h
@@ -511,7 +511,6 @@ const uint64 pg_crc64_table[256] = {
 	UINT64CONST(0xD80C07CD676F8394), UINT64CONST(0x9AFCE626CE85B507)
 };
 #endif   /* SIZEOF_VOID_P < 8 */
-
 #endif   /* PROVIDE_64BIT_CRC */
 
 #endif   /* PG_CRC_TABLES_H */

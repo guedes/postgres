@@ -4,7 +4,7 @@
  *		Common support routines for bin/scripts/
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/scripts/common.c
@@ -109,14 +109,8 @@ connectDatabase(const char *dbname, const char *pghost, const char *pgport,
 	do
 	{
 #define PARAMS_ARRAY_SIZE	7
-		const char **keywords = malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-		const char **values = malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-		if (!keywords || !values)
-		{
-			fprintf(stderr, _("%s: out of memory\n"), progname);
-			exit(1);
-		}
+		const char **keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
+		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
 
 		keywords[0] = "host";
 		values[0] = pghost;
@@ -185,7 +179,7 @@ connectMaintenanceDatabase(const char *maintenance_db, const char *pghost,
 						   enum trivalue prompt_password,
 						   const char *progname)
 {
-	PGconn *conn;
+	PGconn	   *conn;
 
 	/* If a maintenance database name was specified, just connect to it. */
 	if (maintenance_db)
@@ -197,17 +191,7 @@ connectMaintenanceDatabase(const char *maintenance_db, const char *pghost,
 						   progname, true);
 	if (!conn)
 		conn = connectDatabase("template1", pghost, pgport, pguser,
-							   prompt_password, progname, true);
-
-	if (!conn)
-	{
-		fprintf(stderr, _("%s: could not connect to databases \"postgres\" or \"template1\"\n"
-						  "Please specify an alternative maintenance database.\n"),
-				progname);
-		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
-				progname);
-		exit(1);
-	}
+							   prompt_password, progname, false);
 
 	return conn;
 }
@@ -291,28 +275,6 @@ executeMaintenanceCommand(PGconn *conn, const char *query, bool echo)
 		PQclear(res);
 
 	return r;
-}
-
-/*
- * "Safe" wrapper around strdup().	Pulled from psql/common.c
- */
-char *
-pg_strdup(const char *string)
-{
-	char	   *tmp;
-
-	if (!string)
-	{
-		fprintf(stderr, _("pg_strdup: cannot duplicate null pointer (internal error)\n"));
-		exit(EXIT_FAILURE);
-	}
-	tmp = strdup(string);
-	if (!tmp)
-	{
-		fprintf(stderr, _("out of memory\n"));
-		exit(EXIT_FAILURE);
-	}
-	return tmp;
 }
 
 /*

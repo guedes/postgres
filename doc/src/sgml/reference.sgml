@@ -41,6 +41,7 @@
    &alterDefaultPrivileges;
    &alterDomain;
    &alterExtension;
+   &alterEventTrigger;
    &alterForeignDataWrapper;
    &alterForeignTable;
    &alterFunction;
@@ -52,6 +53,7 @@
    &alterOperatorClass;
    &alterOperatorFamily;
    &alterRole;
+   &alterRule;
    &alterSchema;
    &alterSequence;
    &alterServer;
@@ -82,6 +84,7 @@
    &createDatabase;
    &createDomain;
    &createExtension;
+   &createEventTrigger;
    &createForeignDataWrapper;
    &createForeignTable;
    &createFunction;
@@ -120,6 +123,7 @@
    &dropDatabase;
    &dropDomain;
    &dropExtension;
+   &dropEventTrigger;
    &dropForeignDataWrapper;
    &dropForeignTable;
    &dropFunction;
@@ -200,7 +204,7 @@
    </para>
 
    <para>
-    When specified on the command line, user and databases names have
+    When specified on the command line, user and database names have
     their case preserved &mdash; the presence of spaces or special
     characters might require quoting.  Table names and other identifiers
     do not have their case preserved, except where documented, and
@@ -220,6 +224,7 @@
    &pgConfig;
    &pgDump;
    &pgDumpall;
+   &pgIsready;
    &pgReceivexlog;
    &pgRestore;
    &psqlRef;

@@ -4,7 +4,7 @@
  *	  implementation of k-d tree over points for SP-GiST
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -135,12 +135,12 @@ spg_kd_picksplit(PG_FUNCTION_ARGS)
 
 	/*
 	 * Note: points that have coordinates exactly equal to coord may get
-	 * classified into either node, depending on where they happen to fall
-	 * in the sorted list.  This is okay as long as the inner_consistent
-	 * function descends into both sides for such cases.  This is better
-	 * than the alternative of trying to have an exact boundary, because
-	 * it keeps the tree balanced even when we have many instances of the
-	 * same point value.  So we should never trigger the allTheSame logic.
+	 * classified into either node, depending on where they happen to fall in
+	 * the sorted list.  This is okay as long as the inner_consistent function
+	 * descends into both sides for such cases.  This is better than the
+	 * alternative of trying to have an exact boundary, because it keeps the
+	 * tree balanced even when we have many instances of the same point value.
+	 * So we should never trigger the allTheSame logic.
 	 */
 	for (i = 0; i < in->nTuples; i++)
 	{

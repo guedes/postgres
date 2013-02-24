@@ -3,7 +3,7 @@
  * reloptions.c
  *	  Core support for relation options (pg_class.reloptions)
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -17,6 +17,7 @@
 
 #include "access/gist_private.h"
 #include "access/hash.h"
+#include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/reloptions.h"
 #include "access/spgist.h"
@@ -545,8 +546,8 @@ add_string_reloption(bits32 kinds, char *name, char *desc, char *default_val,
  *
  * Note that this is not responsible for determining whether the options
  * are valid, but it does check that namespaces for all the options given are
- * listed in validnsps.  The NULL namespace is always valid and needs not be
- * explicitely listed.	Passing a NULL pointer means that only the NULL
+ * listed in validnsps.  The NULL namespace is always valid and need not be
+ * explicitly listed.  Passing a NULL pointer means that only the NULL
  * namespace is valid.
  *
  * Both oldOptions and the result are text arrays (or NULL for "default"),
@@ -790,7 +791,6 @@ extractRelOptions(HeapTuple tuple, TupleDesc tupdesc, Oid amoptions)
 		case RELKIND_RELATION:
 		case RELKIND_TOASTVALUE:
 		case RELKIND_VIEW:
-		case RELKIND_UNCATALOGED:
 			options = heap_reloptions(classForm->relkind, datum, false);
 			break;
 		case RELKIND_INDEX:

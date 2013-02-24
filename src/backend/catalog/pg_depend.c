@@ -3,7 +3,7 @@
  * pg_depend.c
  *	  routines to support manipulation of the pg_depend relation
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,6 +16,7 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_constraint.h"
@@ -150,7 +151,7 @@ recordDependencyOnCurrentExtension(const ObjectAddress *object,
 		/* Only need to check for existing membership if isReplace */
 		if (isReplace)
 		{
-			Oid		oldext;
+			Oid			oldext;
 
 			oldext = getExtensionOfObject(object->classId, object->objectId);
 			if (OidIsValid(oldext))

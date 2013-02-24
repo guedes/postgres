@@ -9,7 +9,7 @@
  * shorn of features like subselects, inheritance, aggregates, grouping,
  * and so on.  (Those are the things planner.c deals with.)
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -141,13 +141,14 @@ query_planner(PlannerInfo *root, List *tlist,
 	root->right_join_clauses = NIL;
 	root->full_join_clauses = NIL;
 	root->join_info_list = NIL;
+	root->lateral_info_list = NIL;
 	root->placeholder_list = NIL;
 	root->initial_rels = NIL;
 
 	/*
 	 * Make a flattened version of the rangetable for faster access (this is
-	 * OK because the rangetable won't change any more), and set up an
-	 * empty array for indexing base relations.
+	 * OK because the rangetable won't change any more), and set up an empty
+	 * array for indexing base relations.
 	 */
 	setup_simple_rel_arrays(root);
 
@@ -178,7 +179,15 @@ query_planner(PlannerInfo *root, List *tlist,
 
 	find_placeholders_in_jointree(root);
 
+	find_lateral_references(root);
+
 	joinlist = deconstruct_jointree(root);
+
+	/*
+	 * Create the LateralJoinInfo list now that we have finalized
+	 * PlaceHolderVar eval levels.
+	 */
+	create_lateral_join_info(root);
 
 	/*
 	 * Reconsider any postponed outer-join quals now that we have built up
@@ -258,7 +267,8 @@ query_planner(PlannerInfo *root, List *tlist,
 	 */
 	final_rel = make_one_rel(root, joinlist);
 
-	if (!final_rel || !final_rel->cheapest_total_path)
+	if (!final_rel || !final_rel->cheapest_total_path ||
+		final_rel->cheapest_total_path->param_info != NULL)
 		elog(ERROR, "failed to construct the join relation");
 
 	/*

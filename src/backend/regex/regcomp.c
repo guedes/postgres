@@ -162,7 +162,7 @@ static void dumparcs(struct state *, FILE *);
 static int	dumprarcs(struct arc *, struct state *, FILE *, int);
 static void dumparc(struct arc *, struct state *, FILE *);
 static void dumpcnfa(struct cnfa *, FILE *);
-static void dumpcstate(int, struct carc *, struct cnfa *, FILE *);
+static void dumpcstate(int, struct cnfa *, FILE *);
 #endif
 /* === regc_cvec.c === */
 static struct cvec *newcvec(int, int);
@@ -278,6 +278,9 @@ static struct fns functions = {
 
 /*
  * pg_regcomp - compile regular expression
+ *
+ * Note: on failure, no resources remain allocated, so pg_regfree()
+ * need not be applied to re.
  */
 int
 pg_regcomp(regex_t *re,
@@ -1119,11 +1122,11 @@ parseqatom(struct vars * v,
 	{
 		/*
 		 * If there's no backrefs involved, we can turn x{m,n} into
-		 * x{m-1,n-1}x, with capturing parens in only the second x.  This
-		 * is valid because we only care about capturing matches from the
-		 * final iteration of the quantifier.  It's a win because we can
-		 * implement the backref-free left side as a plain DFA node, since
-		 * we don't really care where its submatches are.
+		 * x{m-1,n-1}x, with capturing parens in only the second x.  This is
+		 * valid because we only care about capturing matches from the final
+		 * iteration of the quantifier.  It's a win because we can implement
+		 * the backref-free left side as a plain DFA node, since we don't
+		 * really care where its submatches are.
 		 */
 		dupnfa(v->nfa, atom->begin, atom->end, s, atom->begin);
 		assert(m >= 1 && m != INFINITY && n >= 1);
@@ -1870,15 +1873,18 @@ rfree(regex_t *re)
 	g = (struct guts *) re->re_guts;
 	re->re_guts = NULL;
 	re->re_fns = NULL;
-	g->magic = 0;
-	freecm(&g->cmap);
-	if (g->tree != NULL)
-		freesubre((struct vars *) NULL, g->tree);
-	if (g->lacons != NULL)
-		freelacons(g->lacons, g->nlacons);
-	if (!NULLCNFA(g->search))
-		freecnfa(&g->search);
-	FREE(g);
+	if (g != NULL)
+	{
+		g->magic = 0;
+		freecm(&g->cmap);
+		if (g->tree != NULL)
+			freesubre((struct vars *) NULL, g->tree);
+		if (g->lacons != NULL)
+			freelacons(g->lacons, g->nlacons);
+		if (!NULLCNFA(g->search))
+			freecnfa(&g->search);
+		FREE(g);
+	}
 }
 
 #ifdef REG_DEBUG

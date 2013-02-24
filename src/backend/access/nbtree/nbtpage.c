@@ -4,7 +4,7 @@
  *	  BTree-specific page management code for the Postgres btree access
  *	  method.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -412,6 +412,82 @@ _bt_gettrueroot(Relation rel)
 }
 
 /*
+ *	_bt_getrootheight() -- Get the height of the btree search tree.
+ *
+ *		We return the level (counting from zero) of the current fast root.
+ *		This represents the number of tree levels we'd have to descend through
+ *		to start any btree index search.
+ *
+ *		This is used by the planner for cost-estimation purposes.  Since it's
+ *		only an estimate, slightly-stale data is fine, hence we don't worry
+ *		about updating previously cached data.
+ */
+int
+_bt_getrootheight(Relation rel)
+{
+	BTMetaPageData *metad;
+
+	/*
+	 * We can get what we need from the cached metapage data.  If it's not
+	 * cached yet, load it.  Sanity checks here must match _bt_getroot().
+	 */
+	if (rel->rd_amcache == NULL)
+	{
+		Buffer		metabuf;
+		Page		metapg;
+		BTPageOpaque metaopaque;
+
+		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
+		metapg = BufferGetPage(metabuf);
+		metaopaque = (BTPageOpaque) PageGetSpecialPointer(metapg);
+		metad = BTPageGetMeta(metapg);
+
+		/* sanity-check the metapage */
+		if (!(metaopaque->btpo_flags & BTP_META) ||
+			metad->btm_magic != BTREE_MAGIC)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("index \"%s\" is not a btree",
+							RelationGetRelationName(rel))));
+
+		if (metad->btm_version != BTREE_VERSION)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("version mismatch in index \"%s\": file version %d, code version %d",
+							RelationGetRelationName(rel),
+							metad->btm_version, BTREE_VERSION)));
+
+		/*
+		 * If there's no root page yet, _bt_getroot() doesn't expect a cache
+		 * to be made, so just stop here and report the index height is zero.
+		 * (XXX perhaps _bt_getroot() should be changed to allow this case.)
+		 */
+		if (metad->btm_root == P_NONE)
+		{
+			_bt_relbuf(rel, metabuf);
+			return 0;
+		}
+
+		/*
+		 * Cache the metapage data for next time
+		 */
+		rel->rd_amcache = MemoryContextAlloc(rel->rd_indexcxt,
+											 sizeof(BTMetaPageData));
+		memcpy(rel->rd_amcache, metad, sizeof(BTMetaPageData));
+
+		_bt_relbuf(rel, metabuf);
+	}
+
+	metad = (BTMetaPageData *) rel->rd_amcache;
+	/* We shouldn't have cached it if any of these fail */
+	Assert(metad->btm_magic == BTREE_MAGIC);
+	Assert(metad->btm_version == BTREE_VERSION);
+	Assert(metad->btm_fastroot != P_NONE);
+
+	return metad->btm_fastlevel;
+}
+
+/*
  *	_bt_checkpage() -- Verify that a freshly-read page looks sane.
  */
 void
@@ -558,19 +634,9 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
 					 */
 					if (XLogStandbyInfoActive())
 					{
-						TransactionId latestRemovedXid;
-
 						BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 
-						/*
-						 * opaque->btpo.xact is the threshold value not the
-						 * value to measure conflicts against. We must retreat
-						 * by one from it to get the correct conflict xid.
-						 */
-						latestRemovedXid = opaque->btpo.xact;
-						TransactionIdRetreat(latestRemovedXid);
-
-						_bt_log_reuse_page(rel, blkno, latestRemovedXid);
+						_bt_log_reuse_page(rel, blkno, opaque->btpo.xact);
 					}
 
 					/* Okay to use page.  Re-initialize and return it */
@@ -685,7 +751,6 @@ bool
 _bt_page_recyclable(Page page)
 {
 	BTPageOpaque opaque;
-	TransactionId cutoff;
 
 	/*
 	 * It's possible to find an all-zeroes page in an index --- for example, a
@@ -698,18 +763,11 @@ _bt_page_recyclable(Page page)
 
 	/*
 	 * Otherwise, recycle if deleted and too old to have any processes
-	 * interested in it.  If we are generating records for Hot Standby
-	 * defer page recycling until RecentGlobalXmin to respect user
-	 * controls specified by vacuum_defer_cleanup_age or hot_standby_feedback.
+	 * interested in it.
 	 */
-	if (XLogStandbyInfoActive())
-		cutoff = RecentGlobalXmin;
-	else
-		cutoff = RecentXmin;
-
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	if (P_ISDELETED(opaque) &&
-		TransactionIdPrecedesOrEquals(opaque->btpo.xact, cutoff))
+		TransactionIdPrecedes(opaque->btpo.xact, RecentGlobalXmin))
 		return true;
 	return false;
 }
@@ -1376,7 +1434,13 @@ _bt_pagedel(Relation rel, Buffer buf, BTStack stack)
 
 	/*
 	 * Mark the page itself deleted.  It can be recycled when all current
-	 * transactions are gone.
+	 * transactions are gone.  Storing GetTopTransactionId() would work, but
+	 * we're in VACUUM and would not otherwise have an XID.  Having already
+	 * updated links to the target, ReadNewTransactionId() suffices as an
+	 * upper bound.  Any scan having retained a now-stale link is advertising
+	 * in its PGXACT an xmin less than or equal to the value we read here.	It
+	 * will continue to do so, holding back RecentGlobalXmin, for the duration
+	 * of that scan.
 	 */
 	page = BufferGetPage(buf);
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);

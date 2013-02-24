@@ -3,7 +3,7 @@
  * fastpath.c
  *	  routines to handle function requests from the frontend
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,6 +20,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_proc.h"
 #include "libpq/libpq.h"
@@ -285,9 +286,22 @@ HandleFunctionRequest(StringInfo msgBuf)
 	{
 		if (GetOldFunctionMessage(msgBuf))
 		{
-			ereport(COMMERROR,
-					(errcode(ERRCODE_PROTOCOL_VIOLATION),
-					 errmsg("unexpected EOF on client connection")));
+			if (IsTransactionState())
+				ereport(COMMERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("unexpected EOF on client connection with an open transaction")));
+			else
+			{
+				/*
+				 * Can't send DEBUG log messages to client at this point.
+				 * Since we're disconnecting right away, we don't need to
+				 * restore whereToSendOutput.
+				 */
+				whereToSendOutput = DestNone;
+				ereport(DEBUG1,
+						(errcode(ERRCODE_CONNECTION_DOES_NOT_EXIST),
+						 errmsg("unexpected EOF on client connection")));
+			}
 			return EOF;
 		}
 	}

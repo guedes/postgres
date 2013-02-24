@@ -3,7 +3,7 @@
  * execUtils.c
  *	  miscellaneous executor utility routines
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -137,8 +137,6 @@ CreateExecutorState(void)
 
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
-	estate->es_select_into = false;
-	estate->es_into_oids = false;
 	estate->es_finished = false;
 
 	estate->es_exprcontexts = NIL;
@@ -526,8 +524,8 @@ ExecBuildProjectionInfo(List *targetList,
 	 * We separate the target list elements into simple Var references and
 	 * expressions which require the full ExecTargetList machinery.  To be a
 	 * simple Var, a Var has to be a user attribute and not mismatch the
-	 * inputDesc.  (Note: if there is a type mismatch then ExecEvalVar will
-	 * probably throw an error at runtime, but we leave that to it.)
+	 * inputDesc.  (Note: if there is a type mismatch then ExecEvalScalarVar
+	 * will probably throw an error at runtime, but we leave that to it.)
 	 */
 	exprlist = NIL;
 	numSimpleVars = 0;
@@ -580,7 +578,7 @@ ExecBuildProjectionInfo(List *targetList,
 						projInfo->pi_lastOuterVar = attnum;
 					break;
 
-				/* INDEX_VAR is handled by default case */
+					/* INDEX_VAR is handled by default case */
 
 				default:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
@@ -640,7 +638,7 @@ get_last_attnums(Node *node, ProjectionInfo *projInfo)
 					projInfo->pi_lastOuterVar = attnum;
 				break;
 
-			/* INDEX_VAR is handled by default case */
+				/* INDEX_VAR is handled by default case */
 
 			default:
 				if (projInfo->pi_lastScanVar < attnum)
@@ -908,6 +906,9 @@ ExecOpenIndices(ResultRelInfo *resultRelInfo)
 	/*
 	 * For each index, open the index relation and save pg_index info. We
 	 * acquire RowExclusiveLock, signifying we will update the index.
+	 *
+	 * Note: we do this even if the index is not IndexIsReady; it's not worth
+	 * the trouble to optimize for the case where it isn't.
 	 */
 	i = 0;
 	foreach(l, indexoidlist)
@@ -1306,14 +1307,18 @@ retry:
 					 errmsg("could not create exclusion constraint \"%s\"",
 							RelationGetRelationName(index)),
 					 errdetail("Key %s conflicts with key %s.",
-							   error_new, error_existing)));
+							   error_new, error_existing),
+					 errtableconstraint(heap,
+										RelationGetRelationName(index))));
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_EXCLUSION_VIOLATION),
 					 errmsg("conflicting key value violates exclusion constraint \"%s\"",
 							RelationGetRelationName(index)),
 					 errdetail("Key %s conflicts with existing key %s.",
-							   error_new, error_existing)));
+							   error_new, error_existing),
+					 errtableconstraint(heap,
+										RelationGetRelationName(index))));
 	}
 
 	index_endscan(index_scan);

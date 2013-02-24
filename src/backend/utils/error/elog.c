@@ -43,7 +43,7 @@
  * overflow.)
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -87,6 +87,7 @@ err_gettext(const char *str)
 /* This extension allows gcc to check the format string for consistency with
    the supplied arguments. */
 __attribute__((format_arg(1)));
+static void set_errdata_field(char **ptr, const char *str);
 
 /* Global variables */
 ErrorContextCallback *error_context_stack = NULL;
@@ -114,7 +115,7 @@ int			Log_destination = LOG_DESTINATION_STDERR;
 /*
  * Max string length to send to syslog().  Note that this doesn't count the
  * sequence-number prefix we add, and of course it doesn't count the prefix
- * added by syslog itself.  Solaris and sysklogd truncate the final message
+ * added by syslog itself.	Solaris and sysklogd truncate the final message
  * at 1024 bytes, so this value leaves 124 bytes for those prefixes.  (Most
  * other syslog implementations seem to have limits of 2KB or so.)
  */
@@ -475,6 +476,16 @@ errfinish(int dummy,...)
 		pfree(edata->hint);
 	if (edata->context)
 		pfree(edata->context);
+	if (edata->schema_name)
+		pfree(edata->schema_name);
+	if (edata->table_name)
+		pfree(edata->table_name);
+	if (edata->column_name)
+		pfree(edata->column_name);
+	if (edata->datatype_name)
+		pfree(edata->datatype_name);
+	if (edata->constraint_name)
+		pfree(edata->constraint_name);
 	if (edata->internalquery)
 		pfree(edata->internalquery);
 
@@ -683,13 +694,13 @@ errcode_for_socket_access(void)
  * to the edata field because the buffer might be considerably larger than
  * really necessary.
  */
-#define EVALUATE_MESSAGE(targetfield, appendval, translateit)  \
+#define EVALUATE_MESSAGE(domain, targetfield, appendval, translateit)	\
 	{ \
 		char		   *fmtbuf; \
 		StringInfoData	buf; \
 		/* Internationalize the error format string */ \
 		if (translateit && !in_error_recursion_trouble()) \
-			fmt = dgettext(edata->domain, fmt); \
+			fmt = dgettext((domain), fmt);				  \
 		/* Expand %m in format string */ \
 		fmtbuf = expand_fmt_string(fmt, edata); \
 		initStringInfo(&buf); \
@@ -723,14 +734,14 @@ errcode_for_socket_access(void)
  * must be declared like "const char *fmt_singular, const char *fmt_plural,
  * unsigned long n, ...".  Translation is assumed always wanted.
  */
-#define EVALUATE_MESSAGE_PLURAL(targetfield, appendval)  \
+#define EVALUATE_MESSAGE_PLURAL(domain, targetfield, appendval)  \
 	{ \
 		const char	   *fmt; \
 		char		   *fmtbuf; \
 		StringInfoData	buf; \
 		/* Internationalize the error format string */ \
 		if (!in_error_recursion_trouble()) \
-			fmt = dngettext(edata->domain, fmt_singular, fmt_plural, n); \
+			fmt = dngettext((domain), fmt_singular, fmt_plural, n);	\
 		else \
 			fmt = (n == 1 ? fmt_singular : fmt_plural); \
 		/* Expand %m in format string */ \
@@ -781,7 +792,7 @@ errmsg(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(message, false, true);
+	EVALUATE_MESSAGE(edata->domain, message, false, true);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -810,7 +821,7 @@ errmsg_internal(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(message, false, false);
+	EVALUATE_MESSAGE(edata->domain, message, false, false);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -833,7 +844,7 @@ errmsg_plural(const char *fmt_singular, const char *fmt_plural,
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE_PLURAL(message, false);
+	EVALUATE_MESSAGE_PLURAL(edata->domain, message, false);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -854,7 +865,7 @@ errdetail(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(detail, false, true);
+	EVALUATE_MESSAGE(edata->domain, detail, false, true);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -881,7 +892,7 @@ errdetail_internal(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(detail, false, false);
+	EVALUATE_MESSAGE(edata->domain, detail, false, false);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -902,7 +913,7 @@ errdetail_log(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(detail_log, false, true);
+	EVALUATE_MESSAGE(edata->domain, detail_log, false, true);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -925,7 +936,7 @@ errdetail_plural(const char *fmt_singular, const char *fmt_plural,
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE_PLURAL(detail, false);
+	EVALUATE_MESSAGE_PLURAL(edata->domain, detail, false);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -946,7 +957,7 @@ errhint(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(hint, false, true);
+	EVALUATE_MESSAGE(edata->domain, hint, false, true);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -955,14 +966,14 @@ errhint(const char *fmt,...)
 
 
 /*
- * errcontext --- add a context error message text to the current error
+ * errcontext_msg --- add a context error message text to the current error
  *
  * Unlike other cases, multiple calls are allowed to build up a stack of
  * context information.  We assume earlier calls represent more-closely-nested
  * states.
  */
 int
-errcontext(const char *fmt,...)
+errcontext_msg(const char *fmt,...)
 {
 	ErrorData  *edata = &errordata[errordata_stack_depth];
 	MemoryContext oldcontext;
@@ -971,10 +982,32 @@ errcontext(const char *fmt,...)
 	CHECK_STACK_DEPTH();
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(context, true, true);
+	EVALUATE_MESSAGE(edata->context_domain, context, true, true);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
+	return 0;					/* return value does not matter */
+}
+
+/*
+ * set_errcontext_domain --- set message domain to be used by errcontext()
+ *
+ * errcontext_msg() can be called from a different module than the original
+ * ereport(), so we cannot use the message domain passed in errstart() to
+ * translate it.  Instead, each errcontext_msg() call should be preceded by
+ * a set_errcontext_domain() call to specify the domain.  This is usually
+ * done transparently by the errcontext() macro.
+ */
+int
+set_errcontext_domain(const char *domain)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+
+	/* we don't bother incrementing recursion_depth */
+	CHECK_STACK_DEPTH();
+
+	edata->context_domain = domain;
+
 	return 0;					/* return value does not matter */
 }
 
@@ -1079,6 +1112,59 @@ internalerrquery(const char *query)
 }
 
 /*
+ * err_generic_string -- used to set individual ErrorData string fields
+ * identified by PG_DIAG_xxx codes.
+ *
+ * This intentionally only supports fields that don't use localized strings,
+ * so that there are no translation considerations.
+ *
+ * Most potential callers should not use this directly, but instead prefer
+ * higher-level abstractions, such as errtablecol() (see relcache.c).
+ */
+int
+err_generic_string(int field, const char *str)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+
+	/* we don't bother incrementing recursion_depth */
+	CHECK_STACK_DEPTH();
+
+	switch (field)
+	{
+		case PG_DIAG_SCHEMA_NAME:
+			set_errdata_field(&edata->schema_name, str);
+			break;
+		case PG_DIAG_TABLE_NAME:
+			set_errdata_field(&edata->table_name, str);
+			break;
+		case PG_DIAG_COLUMN_NAME:
+			set_errdata_field(&edata->column_name, str);
+			break;
+		case PG_DIAG_DATATYPE_NAME:
+			set_errdata_field(&edata->datatype_name, str);
+			break;
+		case PG_DIAG_CONSTRAINT_NAME:
+			set_errdata_field(&edata->constraint_name, str);
+			break;
+		default:
+			elog(ERROR, "unsupported ErrorData field id: %d", field);
+			break;
+	}
+
+	return 0;			/* return value does not matter */
+}
+
+/*
+ * set_errdata_field --- set an ErrorData string field
+ */
+static void
+set_errdata_field(char **ptr, const char *str)
+{
+	Assert(*ptr == NULL);
+	*ptr = MemoryContextStrdup(ErrorContext, str);
+}
+
+/*
  * geterrcode --- return the currently set SQLSTATE error code
  *
  * This is only intended for use in error callback subroutines, since there
@@ -1134,12 +1220,13 @@ getinternalerrposition(void)
  * elog_start --- startup for old-style API
  *
  * All that we do here is stash the hidden filename/lineno/funcname
- * arguments into a stack entry.
+ * arguments into a stack entry, along with the current value of errno.
  *
  * We need this to be separate from elog_finish because there's no other
- * portable way to deal with inserting extra arguments into the elog call.
- * (If macros with variable numbers of arguments were portable, it'd be
- * easy, but they aren't.)
+ * C89-compliant way to deal with inserting extra arguments into the elog
+ * call.  (When using C99's __VA_ARGS__, we could possibly merge this with
+ * elog_finish, but there doesn't seem to be a good way to save errno before
+ * evaluating the format arguments if we do that.)
  */
 void
 elog_start(const char *filename, int lineno, const char *funcname)
@@ -1201,7 +1288,7 @@ elog_finish(int elevel, const char *fmt,...)
 	recursion_depth++;
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(message, false, false);
+	EVALUATE_MESSAGE(edata->domain, message, false, false);
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -1260,7 +1347,7 @@ format_elog_string(const char *fmt,...)
 
 	oldcontext = MemoryContextSwitchTo(ErrorContext);
 
-	EVALUATE_MESSAGE(message, false, true);
+	EVALUATE_MESSAGE(edata->domain, message, false, true);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1350,6 +1437,16 @@ CopyErrorData(void)
 		newedata->hint = pstrdup(newedata->hint);
 	if (newedata->context)
 		newedata->context = pstrdup(newedata->context);
+	if (newedata->schema_name)
+		newedata->schema_name = pstrdup(newedata->schema_name);
+	if (newedata->table_name)
+		newedata->table_name = pstrdup(newedata->table_name);
+	if (newedata->column_name)
+		newedata->column_name = pstrdup(newedata->column_name);
+	if (newedata->datatype_name)
+		newedata->datatype_name = pstrdup(newedata->datatype_name);
+	if (newedata->constraint_name)
+		newedata->constraint_name = pstrdup(newedata->constraint_name);
 	if (newedata->internalquery)
 		newedata->internalquery = pstrdup(newedata->internalquery);
 
@@ -1375,6 +1472,16 @@ FreeErrorData(ErrorData *edata)
 		pfree(edata->hint);
 	if (edata->context)
 		pfree(edata->context);
+	if (edata->schema_name)
+		pfree(edata->schema_name);
+	if (edata->table_name)
+		pfree(edata->table_name);
+	if (edata->column_name)
+		pfree(edata->column_name);
+	if (edata->datatype_name)
+		pfree(edata->datatype_name);
+	if (edata->constraint_name)
+		pfree(edata->constraint_name);
 	if (edata->internalquery)
 		pfree(edata->internalquery);
 	pfree(edata);
@@ -1447,6 +1554,16 @@ ReThrowError(ErrorData *edata)
 		newedata->hint = pstrdup(newedata->hint);
 	if (newedata->context)
 		newedata->context = pstrdup(newedata->context);
+	if (newedata->schema_name)
+		newedata->schema_name = pstrdup(newedata->schema_name);
+	if (newedata->table_name)
+		newedata->table_name = pstrdup(newedata->table_name);
+	if (newedata->column_name)
+		newedata->column_name = pstrdup(newedata->column_name);
+	if (newedata->datatype_name)
+		newedata->datatype_name = pstrdup(newedata->datatype_name);
+	if (newedata->constraint_name)
+		newedata->constraint_name = pstrdup(newedata->constraint_name);
 	if (newedata->internalquery)
 		newedata->internalquery = pstrdup(newedata->internalquery);
 
@@ -1507,15 +1624,9 @@ pg_re_throw(void)
 		errfinish(0);
 	}
 
-	/* We mustn't return... */
+	/* Doesn't return ... */
 	ExceptionalCondition("pg_re_throw tried to return", "FailedAssertion",
 						 __FILE__, __LINE__);
-
-	/*
-	 * Since ExceptionalCondition isn't declared noreturn because of
-	 * TrapMacro(), we need this to keep gcc from complaining.
-	 */
-	abort();
 }
 
 
@@ -1863,8 +1974,8 @@ setup_formatted_log_time(void)
 	stamp_time = (pg_time_t) tv.tv_sec;
 
 	/*
-	 * Note: we expect that guc.c will ensure that log_timezone is set up
-	 * (at least with a minimal GMT value) before Log_line_prefix can become
+	 * Note: we expect that guc.c will ensure that log_timezone is set up (at
+	 * least with a minimal GMT value) before Log_line_prefix can become
 	 * nonempty or CSV mode can be selected.
 	 */
 	pg_strftime(formatted_log_time, FORMATTED_TS_LEN,
@@ -1886,8 +1997,8 @@ setup_formatted_start_time(void)
 	pg_time_t	stamp_time = (pg_time_t) MyStartTime;
 
 	/*
-	 * Note: we expect that guc.c will ensure that log_timezone is set up
-	 * (at least with a minimal GMT value) before Log_line_prefix can become
+	 * Note: we expect that guc.c will ensure that log_timezone is set up (at
+	 * least with a minimal GMT value) before Log_line_prefix can become
 	 * nonempty or CSV mode can be selected.
 	 */
 	pg_strftime(formatted_start_time, FORMATTED_TS_LEN,
@@ -1976,7 +2087,7 @@ log_line_prefix(StringInfo buf, ErrorData *edata)
 				}
 				break;
 			case 'c':
-				appendStringInfo(buf, "%lx.%x", (long) (MyStartTime), MyProcPid);
+				appendStringInfo(buf, "%lx.%04x", (long) (MyStartTime), MyProcPid);
 				break;
 			case 'p':
 				appendStringInfo(buf, "%d", MyProcPid);
@@ -2155,7 +2266,7 @@ write_csvlog(ErrorData *edata)
 	appendStringInfoChar(&buf, ',');
 
 	/* session id */
-	appendStringInfo(&buf, "%lx.%x", (long) MyStartTime, MyProcPid);
+	appendStringInfo(&buf, "%lx.%04x", (long) MyStartTime, MyProcPid);
 	appendStringInfoChar(&buf, ',');
 
 	/* Line number */
@@ -2512,7 +2623,7 @@ send_message_to_server_log(ErrorData *edata)
  *
  * Note: when there are multiple backends writing into the syslogger pipe,
  * it's critical that each write go into the pipe indivisibly, and not
- * get interleaved with data from other processes.  Fortunately, the POSIX
+ * get interleaved with data from other processes.	Fortunately, the POSIX
  * spec requires that writes to pipes be atomic so long as they are not
  * more than PIPE_BUF bytes long.  So we divide long messages into chunks
  * that are no more than that length, and send one chunk per write() call.
@@ -2638,6 +2749,36 @@ send_message_to_frontend(ErrorData *edata)
 		{
 			pq_sendbyte(&msgbuf, PG_DIAG_CONTEXT);
 			err_sendstring(&msgbuf, edata->context);
+		}
+
+		if (edata->schema_name)
+		{
+			pq_sendbyte(&msgbuf, PG_DIAG_SCHEMA_NAME);
+			err_sendstring(&msgbuf, edata->schema_name);
+		}
+
+		if (edata->table_name)
+		{
+			pq_sendbyte(&msgbuf, PG_DIAG_TABLE_NAME);
+			err_sendstring(&msgbuf, edata->table_name);
+		}
+
+		if (edata->column_name)
+		{
+			pq_sendbyte(&msgbuf, PG_DIAG_COLUMN_NAME);
+			err_sendstring(&msgbuf, edata->column_name);
+		}
+
+		if (edata->datatype_name)
+		{
+			pq_sendbyte(&msgbuf, PG_DIAG_DATATYPE_NAME);
+			err_sendstring(&msgbuf, edata->datatype_name);
+		}
+
+		if (edata->constraint_name)
+		{
+			pq_sendbyte(&msgbuf, PG_DIAG_CONSTRAINT_NAME);
+			err_sendstring(&msgbuf, edata->constraint_name);
 		}
 
 		if (edata->cursorpos > 0)

@@ -3,7 +3,7 @@
  * lsyscache.c
  *	  Convenience routines for common queries in the system catalog cache.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "access/hash.h"
+#include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "bootstrap/bootstrap.h"
 #include "catalog/pg_amop.h"
@@ -33,6 +34,7 @@
 #include "nodes/makefuncs.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/catcache.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -283,7 +285,7 @@ get_sort_function_for_ordering_op(Oid opno, Oid *sortfunc,
 										  opcintype,
 										  opcintype,
 										  BTORDER_PROC);
-			if (!OidIsValid(*sortfunc))		/* should not happen */
+			if (!OidIsValid(*sortfunc)) /* should not happen */
 				elog(ERROR, "missing support function %d(%u,%u) in opfamily %u",
 					 BTORDER_PROC, opcintype, opcintype, opfamily);
 			*issupport = false;
@@ -1549,7 +1551,7 @@ func_volatile(Oid funcid)
 
 /*
  * get_func_leakproof
- *     Given procedure id, return the function's leakproof field.
+ *	   Given procedure id, return the function's leakproof field.
  */
 bool
 get_func_leakproof(Oid funcid)
@@ -2914,8 +2916,8 @@ get_range_subtype(Oid rangeOid)
 	tp = SearchSysCache1(RANGETYPE, ObjectIdGetDatum(rangeOid));
 	if (HeapTupleIsValid(tp))
 	{
-		Form_pg_range	rngtup = (Form_pg_range) GETSTRUCT(tp);
-		Oid				result;
+		Form_pg_range rngtup = (Form_pg_range) GETSTRUCT(tp);
+		Oid			result;
 
 		result = rngtup->rngsubtype;
 		ReleaseSysCache(tp);

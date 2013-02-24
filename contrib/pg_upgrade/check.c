@@ -3,11 +3,11 @@
  *
  *	server checks and output routines
  *
- *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/check.c
  */
 
-#include "postgres.h"
+#include "postgres_fe.h"
 
 #include "pg_upgrade.h"
 
@@ -20,22 +20,46 @@ static void check_is_super_user(ClusterInfo *cluster);
 static void check_for_prepared_transactions(ClusterInfo *cluster);
 static void check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster);
 static void check_for_reg_data_type_usage(ClusterInfo *cluster);
-static void check_for_support_lib(ClusterInfo *cluster);
+static void check_for_invalid_indexes(ClusterInfo *cluster);
 static void get_bin_version(ClusterInfo *cluster);
+static char *get_canonical_locale_name(int category, const char *locale);
 
+
+/*
+ * fix_path_separator
+ * For non-Windows, just return the argument.
+ * For Windows convert any forward slash to a backslash
+ * such as is suitable for arguments to builtin commands 
+ * like RMDIR and DEL.
+ */
+static char *
+fix_path_separator(char *path)
+{
+#ifdef WIN32
+
+	char *result;
+	char *c;
+
+	result = pg_strdup(path);
+
+	for (c = result; *c != '\0'; c++)
+		if (*c == '/')
+			*c = '\\';
+
+	return result;
+
+#else
+
+	return path;
+
+#endif
+}
 
 void
-output_check_banner(bool *live_check)
+output_check_banner(bool live_check)
 {
-	if (user_opts.check && is_server_running(old_cluster.pgdata))
+	if (user_opts.check && live_check)
 	{
-		*live_check = true;
-		if (old_cluster.port == DEF_PGUPORT)
-			pg_log(PG_FATAL, "When checking a live old server, "
-				   "you must specify the old server's port number.\n");
-		if (old_cluster.port == new_cluster.port)
-			pg_log(PG_FATAL, "When checking a live server, "
-				   "the old and new port numbers must be different.\n");
 		pg_log(PG_REPORT, "Performing Consistency Checks on Old Live Server\n");
 		pg_log(PG_REPORT, "------------------------------------------------\n");
 	}
@@ -48,12 +72,12 @@ output_check_banner(bool *live_check)
 
 
 void
-check_old_cluster(bool live_check, char **sequence_script_file_name)
+check_and_dump_old_cluster(bool live_check, char **sequence_script_file_name)
 {
 	/* -- OLD -- */
 
 	if (!live_check)
-		start_postmaster(&old_cluster);
+		start_postmaster(&old_cluster, true);
 
 	set_locale_and_encoding(&old_cluster);
 
@@ -73,6 +97,7 @@ check_old_cluster(bool live_check, char **sequence_script_file_name)
 	check_is_super_user(&old_cluster);
 	check_for_prepared_transactions(&old_cluster);
 	check_for_reg_data_type_usage(&old_cluster);
+	check_for_invalid_indexes(&old_cluster);
 	check_for_isn_and_int8_passing_mismatch(&old_cluster);
 
 	/* old = PG 8.3 checks? */
@@ -107,10 +132,7 @@ check_old_cluster(bool live_check, char **sequence_script_file_name)
 	 * the old server is running.
 	 */
 	if (!user_opts.check)
-	{
 		generate_old_dump();
-		split_old_dump();
-	}
 
 	if (!live_check)
 		stop_postmaster(false);
@@ -122,17 +144,36 @@ check_new_cluster(void)
 {
 	set_locale_and_encoding(&new_cluster);
 
+	check_locale_and_encoding(&old_cluster.controldata, &new_cluster.controldata);
+
 	get_db_and_rel_infos(&new_cluster);
 
 	check_new_cluster_is_empty();
-	check_for_prepared_transactions(&new_cluster);
 
 	check_loadable_libraries();
 
-	check_locale_and_encoding(&old_cluster.controldata, &new_cluster.controldata);
-
 	if (user_opts.transfer_mode == TRANSFER_MODE_LINK)
 		check_hard_link();
+
+	check_is_super_user(&new_cluster);
+
+	/*
+	 *	We don't restore our own user, so both clusters must match have
+	 *	matching install-user oids.
+	 */
+	if (old_cluster.install_role_oid != new_cluster.install_role_oid)
+		pg_log(PG_FATAL,
+		"Old and new cluster install users have different values for pg_authid.oid.\n");
+
+	/*
+	 *	We only allow the install user in the new cluster because other
+	 *	defined users might match users defined in the old cluster and
+	 *	generate an error during pg_dump restore.
+	 */
+	if (new_cluster.role_count != 1)
+		pg_log(PG_FATAL, "Only the install user can be defined in the new cluster.\n");
+    
+	check_for_prepared_transactions(&new_cluster);
 }
 
 
@@ -159,19 +200,16 @@ issue_warnings(char *sequence_script_file_name)
 	/* old = PG 8.3 warnings? */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 803)
 	{
-		start_postmaster(&new_cluster);
+		start_postmaster(&new_cluster, true);
 
 		/* restore proper sequence values using file created from old server */
 		if (sequence_script_file_name)
 		{
 			prep_status("Adjusting sequences");
-			exec_prog(true, true, UTILITY_LOG_FILE,
-					  SYSTEMQUOTE "\"%s/psql\" --echo-queries "
-					  "--set ON_ERROR_STOP=on "
-					  "--no-psqlrc --port %d --username \"%s\" "
-					  "-f \"%s\" --dbname template1 >> \"%s\" 2>&1" SYSTEMQUOTE,
-					  new_cluster.bindir, new_cluster.port, os_info.user,
-					  sequence_script_file_name, UTILITY_LOG_FILE);
+			exec_prog(UTILITY_LOG_FILE, NULL, true,
+					  "\"%s/psql\" " EXEC_PSQL_ARGS " %s -f \"%s\"",
+					  new_cluster.bindir, cluster_conn_opts(&new_cluster),
+					  sequence_script_file_name);
 			unlink(sequence_script_file_name);
 			check_ok();
 		}
@@ -185,7 +223,7 @@ issue_warnings(char *sequence_script_file_name)
 	/* Create dummy large object permissions for old < PG 9.0? */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 804)
 	{
-		start_postmaster(&new_cluster);
+		start_postmaster(&new_cluster, true);
 		new_9_0_populate_pg_largeobject_metadata(&new_cluster, false);
 		stop_postmaster(false);
 	}
@@ -205,13 +243,20 @@ output_completion_banner(char *analyze_script_file_name,
 	else
 		pg_log(PG_REPORT,
 			   "Optimizer statistics and free space information are not transferred\n"
-			   "by pg_upgrade so, once you start the new server, consider running:\n"
+		"by pg_upgrade so, once you start the new server, consider running:\n"
 			   "    %s\n\n", analyze_script_file_name);
 
-	pg_log(PG_REPORT,
-		   "Running this script will delete the old cluster's data files:\n"
-		   "    %s\n",
-		   deletion_script_file_name);
+
+	if (deletion_script_file_name)
+		pg_log(PG_REPORT,
+			   "Running this script will delete the old cluster's data files:\n"
+			   "    %s\n",
+			   deletion_script_file_name);
+	else
+		pg_log(PG_REPORT,
+			   "Could not create a script to delete the old cluster's data\n"
+			   "files because user-defined tablespaces exist in the old cluster\n"
+			   "directory.  The old cluster's contents must be deleted manually.\n");
 }
 
 
@@ -239,7 +284,8 @@ check_cluster_versions(void)
 
 	/*
 	 * We can't allow downgrading because we use the target pg_dumpall, and
-	 * pg_dumpall cannot operate on new database versions, only older versions.
+	 * pg_dumpall cannot operate on new database versions, only older
+	 * versions.
 	 */
 	if (old_cluster.major_version > new_cluster.major_version)
 		pg_log(PG_FATAL, "This utility cannot be used to downgrade to older major PostgreSQL versions.\n");
@@ -265,8 +311,6 @@ check_cluster_versions(void)
 void
 check_cluster_compatibility(bool live_check)
 {
-	check_for_support_lib(&new_cluster);
-
 	/* get/check pg_control data of servers */
 	get_control_data(&old_cluster, live_check);
 	get_control_data(&new_cluster, false);
@@ -277,6 +321,16 @@ check_cluster_compatibility(bool live_check)
 		new_cluster.controldata.cat_ver < TABLE_SPACE_SUBDIRS_CAT_VER)
 		pg_log(PG_FATAL, "This utility can only upgrade to PostgreSQL version 9.0 after 2010-01-11\n"
 			   "because of backend API changes made during development.\n");
+
+	/* We read the real port number for PG >= 9.1 */
+	if (live_check && GET_MAJOR_VERSION(old_cluster.major_version) < 901 &&
+		old_cluster.port == DEF_PGUPORT)
+			pg_log(PG_FATAL, "When checking a pre-PG 9.1 live old server, "
+				   "you must specify the old server's port number.\n");
+
+	if (live_check && old_cluster.port == new_cluster.port)
+		pg_log(PG_FATAL, "When checking a live server, "
+			   "the old and new port numbers must be different.\n");
 }
 
 
@@ -311,8 +365,23 @@ set_locale_and_encoding(ClusterInfo *cluster)
 		i_datcollate = PQfnumber(res, "datcollate");
 		i_datctype = PQfnumber(res, "datctype");
 
-		ctrl->lc_collate = pg_strdup(PQgetvalue(res, 0, i_datcollate));
-		ctrl->lc_ctype = pg_strdup(PQgetvalue(res, 0, i_datctype));
+		if (GET_MAJOR_VERSION(cluster->major_version) < 902)
+		{
+			/*
+			 *	Pre-9.2 did not canonicalize the supplied locale names
+			 *	to match what the system returns, while 9.2+ does, so
+			 *	convert pre-9.2 to match.
+			 */
+			ctrl->lc_collate = get_canonical_locale_name(LC_COLLATE,
+							   pg_strdup(PQgetvalue(res, 0, i_datcollate)));
+			ctrl->lc_ctype = get_canonical_locale_name(LC_CTYPE,
+							   pg_strdup(PQgetvalue(res, 0, i_datctype)));
+ 		}
+		else
+		{
+	 		ctrl->lc_collate = pg_strdup(PQgetvalue(res, 0, i_datcollate));
+			ctrl->lc_ctype = pg_strdup(PQgetvalue(res, 0, i_datctype));
+		}
 
 		PQclear(res);
 	}
@@ -342,16 +411,23 @@ static void
 check_locale_and_encoding(ControlData *oldctrl,
 						  ControlData *newctrl)
 {
-	/* These are often defined with inconsistent case, so use pg_strcasecmp(). */
+	/*
+	 *	These are often defined with inconsistent case, so use pg_strcasecmp().
+	 *	They also often use inconsistent hyphenation, which we cannot fix, e.g.
+	 *	UTF-8 vs. UTF8, so at least we display the mismatching values.
+	 */
 	if (pg_strcasecmp(oldctrl->lc_collate, newctrl->lc_collate) != 0)
 		pg_log(PG_FATAL,
-			   "old and new cluster lc_collate values do not match\n");
+			   "lc_collate cluster values do not match:  old \"%s\", new \"%s\"\n",
+			   oldctrl->lc_collate, newctrl->lc_collate);
 	if (pg_strcasecmp(oldctrl->lc_ctype, newctrl->lc_ctype) != 0)
 		pg_log(PG_FATAL,
-			   "old and new cluster lc_ctype values do not match\n");
+			   "lc_ctype cluster values do not match:  old \"%s\", new \"%s\"\n",
+			   oldctrl->lc_ctype, newctrl->lc_ctype);
 	if (pg_strcasecmp(oldctrl->encoding, newctrl->encoding) != 0)
 		pg_log(PG_FATAL,
-			   "old and new cluster encoding values do not match\n");
+			   "encoding cluster values do not match:  old \"%s\", new \"%s\"\n",
+			   oldctrl->encoding, newctrl->encoding);
 }
 
 
@@ -402,35 +478,38 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 #ifndef WIN32
 	/* add shebang header */
 	fprintf(script, "#!/bin/sh\n\n");
+#else
+	/* suppress command echoing */
+	fprintf(script, "@echo off\n");
 #endif
 
 	fprintf(script, "echo %sThis script will generate minimal optimizer statistics rapidly%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %sso your system is usable, and then gather statistics twice more%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %swith increasing accuracy.  When it is done, your system will%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %shave the default level of optimizer statistics.%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "echo\n\n");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 	fprintf(script, "echo %sIf you have used ALTER TABLE to modify the statistics target for%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %sany tables, you might want to remove them and restore them after%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %srunning this script because they will delay fast statistics generation.%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "echo\n\n");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 	fprintf(script, "echo %sIf you would like default statistics as quickly as possible, cancel%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %sthis script and run:%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "echo %s    vacuumdb --all %s%s\n", ECHO_QUOTE,
-		/* Did we copy the free space files? */
-		(GET_MAJOR_VERSION(old_cluster.major_version) >= 804) ?
-		"--analyze-only" : "--analyze", ECHO_QUOTE);
-	fprintf(script, "echo\n\n");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "echo %s    \"%s/vacuumdb\" --all %s%s\n", ECHO_QUOTE, new_cluster.bindir,
+	/* Did we copy the free space files? */
+			(GET_MAJOR_VERSION(old_cluster.major_version) >= 804) ?
+			"--analyze-only" : "--analyze", ECHO_QUOTE);
+	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 #ifndef WIN32
 	fprintf(script, "sleep 2\n");
@@ -444,16 +523,16 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 #endif
 
 	fprintf(script, "echo %sGenerating minimal optimizer statistics (1 target)%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %s--------------------------------------------------%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "vacuumdb --all --analyze-only\n");
-	fprintf(script, "echo\n");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "\"%s/vacuumdb\" --all --analyze-only\n", new_cluster.bindir);
+	fprintf(script, "echo%s\n", ECHO_BLANK);
 	fprintf(script, "echo %sThe server is now available with minimal optimizer statistics.%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %sQuery performance will be optimal once this script completes.%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "echo\n\n");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 #ifndef WIN32
 	fprintf(script, "sleep 2\n");
@@ -465,11 +544,11 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 #endif
 
 	fprintf(script, "echo %sGenerating medium optimizer statistics (10 targets)%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %s---------------------------------------------------%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "vacuumdb --all --analyze-only\n");
-	fprintf(script, "echo\n\n");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "\"%s/vacuumdb\" --all --analyze-only\n", new_cluster.bindir);
+	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 
 #ifndef WIN32
 	fprintf(script, "unset PGOPTIONS\n");
@@ -478,17 +557,17 @@ create_script_for_cluster_analyze(char **analyze_script_file_name)
 #endif
 
 	fprintf(script, "echo %sGenerating default (full) optimizer statistics (100 targets?)%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 	fprintf(script, "echo %s-------------------------------------------------------------%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
-	fprintf(script, "vacuumdb --all %s\n",
-		/* Did we copy the free space files? */
-		(GET_MAJOR_VERSION(old_cluster.major_version) >= 804) ?
-		"--analyze-only" : "--analyze");
+			ECHO_QUOTE, ECHO_QUOTE);
+	fprintf(script, "\"%s/vacuumdb\" --all %s\n", new_cluster.bindir,
+	/* Did we copy the free space files? */
+			(GET_MAJOR_VERSION(old_cluster.major_version) >= 804) ?
+			"--analyze-only" : "--analyze");
 
-	fprintf(script, "echo\n\n");
+	fprintf(script, "echo%s\n\n", ECHO_BLANK);
 	fprintf(script, "echo %sDone%s\n",
-					ECHO_QUOTE, ECHO_QUOTE);
+			ECHO_QUOTE, ECHO_QUOTE);
 
 	fclose(script);
 
@@ -512,13 +591,37 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 {
 	FILE	   *script = NULL;
 	int			tblnum;
+	char		old_cluster_pgdata[MAXPGPATH];
 
 	*deletion_script_file_name = pg_malloc(MAXPGPATH);
 
-	prep_status("Creating script to delete old cluster");
-
 	snprintf(*deletion_script_file_name, MAXPGPATH, "delete_old_cluster.%s",
 			 SCRIPT_EXT);
+
+	/*
+	 *	Some users (oddly) create tablespaces inside the cluster data
+	 *	directory.  We can't create a proper old cluster delete script
+	 *	in that case.
+	 */
+	strlcpy(old_cluster_pgdata, old_cluster.pgdata, MAXPGPATH);
+	canonicalize_path(old_cluster_pgdata);
+	for (tblnum = 0; tblnum < os_info.num_old_tablespaces; tblnum++)
+	{
+		char		old_tablespace_dir[MAXPGPATH];
+		
+		strlcpy(old_tablespace_dir, os_info.old_tablespaces[tblnum], MAXPGPATH);
+		canonicalize_path(old_tablespace_dir);
+		if (path_is_prefix_of_path(old_cluster_pgdata, old_tablespace_dir))
+		{
+			/* Unlink file in case it is left over from a previous run. */
+			unlink(*deletion_script_file_name);
+			pg_free(*deletion_script_file_name);
+			*deletion_script_file_name = NULL;
+			return;
+		}
+	}
+
+	prep_status("Creating script to delete old cluster");
 
 	if ((script = fopen_priv(*deletion_script_file_name, "w")) == NULL)
 		pg_log(PG_FATAL, "Could not open file \"%s\": %s\n",
@@ -530,10 +633,10 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 #endif
 
 	/* delete old cluster's default tablespace */
-	fprintf(script, RMDIR_CMD " %s\n", old_cluster.pgdata);
+	fprintf(script, RMDIR_CMD " %s\n", fix_path_separator(old_cluster.pgdata));
 
 	/* delete old cluster's alternate tablespaces */
-	for (tblnum = 0; tblnum < os_info.num_tablespaces; tblnum++)
+	for (tblnum = 0; tblnum < os_info.num_old_tablespaces; tblnum++)
 	{
 		/*
 		 * Do the old cluster's per-database directories share a directory
@@ -547,14 +650,17 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 			fprintf(script, "\n");
 			/* remove PG_VERSION? */
 			if (GET_MAJOR_VERSION(old_cluster.major_version) <= 804)
-				fprintf(script, RM_CMD " %s%s/PG_VERSION\n",
-				 os_info.tablespaces[tblnum], old_cluster.tablespace_suffix);
+				fprintf(script, RM_CMD " %s%s%cPG_VERSION\n",
+						fix_path_separator(os_info.old_tablespaces[tblnum]), 
+						fix_path_separator(old_cluster.tablespace_suffix),
+						PATH_SEPARATOR);
 
 			for (dbnum = 0; dbnum < old_cluster.dbarr.ndbs; dbnum++)
 			{
-				fprintf(script, RMDIR_CMD " %s%s/%d\n",
-				  os_info.tablespaces[tblnum], old_cluster.tablespace_suffix,
-						old_cluster.dbarr.dbs[dbnum].db_oid);
+				fprintf(script, RMDIR_CMD " %s%s%c%d\n",
+						fix_path_separator(os_info.old_tablespaces[tblnum]),
+						fix_path_separator(old_cluster.tablespace_suffix),
+						PATH_SEPARATOR, old_cluster.dbarr.dbs[dbnum].db_oid);
 			}
 		}
 		else
@@ -564,7 +670,8 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 			 * or a version-specific subdirectory.
 			 */
 			fprintf(script, RMDIR_CMD " %s%s\n",
-				 os_info.tablespaces[tblnum], old_cluster.tablespace_suffix);
+					fix_path_separator(os_info.old_tablespaces[tblnum]), 
+					fix_path_separator(old_cluster.tablespace_suffix));
 	}
 
 	fclose(script);
@@ -582,7 +689,7 @@ create_script_for_old_cluster_deletion(char **deletion_script_file_name)
 /*
  *	check_is_super_user()
  *
- *	Make sure we are the super-user.
+ *	Check we are superuser, and out user id and user count
  */
 static void
 check_is_super_user(ClusterInfo *cluster)
@@ -594,13 +701,26 @@ check_is_super_user(ClusterInfo *cluster)
 
 	/* Can't use pg_authid because only superusers can view it. */
 	res = executeQueryOrDie(conn,
-							"SELECT rolsuper "
+							"SELECT rolsuper, oid "
 							"FROM pg_catalog.pg_roles "
 							"WHERE rolname = current_user");
 
 	if (PQntuples(res) != 1 || strcmp(PQgetvalue(res, 0, 0), "t") != 0)
 		pg_log(PG_FATAL, "database user \"%s\" is not a superuser\n",
 			   os_info.user);
+
+	cluster->install_role_oid = atooid(PQgetvalue(res, 0, 1));
+
+	PQclear(res);
+
+	res = executeQueryOrDie(conn,
+							"SELECT COUNT(*) "
+							"FROM pg_catalog.pg_roles ");
+
+	if (PQntuples(res) != 1)
+		pg_log(PG_FATAL, "could not determine the number of users\n");
+
+	cluster->role_count = atoi(PQgetvalue(res, 0, 0));
 
 	PQclear(res);
 
@@ -719,8 +839,8 @@ check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster)
 		pg_log(PG_REPORT, "fatal\n");
 		pg_log(PG_FATAL,
 			   "Your installation contains \"contrib/isn\" functions which rely on the\n"
-			   "bigint data type.  Your old and new clusters pass bigint values\n"
-			   "differently so this cluster cannot currently be upgraded.  You can\n"
+		  "bigint data type.  Your old and new clusters pass bigint values\n"
+		"differently so this cluster cannot currently be upgraded.  You can\n"
 			   "manually upgrade databases that use \"contrib/isn\" facilities and remove\n"
 			   "\"contrib/isn\" from the old cluster and restart the upgrade.  A list of\n"
 			   "the problem functions is in the file:\n"
@@ -767,9 +887,9 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
 
 		/*
-		 *	While several relkinds don't store any data, e.g. views, they
-		 *	can be used to define data types of other columns, so we
-		 *	check all relkinds.
+		 * While several relkinds don't store any data, e.g. views, they can
+		 * be used to define data types of other columns, so we check all
+		 * relkinds.
 		 */
 		res = executeQueryOrDie(conn,
 								"SELECT n.nspname, c.relname, a.attname "
@@ -780,16 +900,16 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 								"		NOT a.attisdropped AND "
 								"		a.atttypid IN ( "
 		  "			'pg_catalog.regproc'::pg_catalog.regtype, "
-		  "			'pg_catalog.regprocedure'::pg_catalog.regtype, "
+								"			'pg_catalog.regprocedure'::pg_catalog.regtype, "
 		  "			'pg_catalog.regoper'::pg_catalog.regtype, "
-		  "			'pg_catalog.regoperator'::pg_catalog.regtype, "
+								"			'pg_catalog.regoperator'::pg_catalog.regtype, "
 		/* regclass.oid is preserved, so 'regclass' is OK */
 		/* regtype.oid is preserved, so 'regtype' is OK */
-		  "			'pg_catalog.regconfig'::pg_catalog.regtype, "
-		  "			'pg_catalog.regdictionary'::pg_catalog.regtype) AND "
-		  "		c.relnamespace = n.oid AND "
-		  "		n.nspname != 'pg_catalog' AND "
-		  "		n.nspname != 'information_schema'");
+		"			'pg_catalog.regconfig'::pg_catalog.regtype, "
+								"			'pg_catalog.regdictionary'::pg_catalog.regtype) AND "
+								"		c.relnamespace = n.oid AND "
+							  "		n.nspname != 'pg_catalog' AND "
+						 "		n.nspname != 'information_schema'");
 
 		ntups = PQntuples(res);
 		i_nspname = PQfnumber(res, "nspname");
@@ -825,8 +945,8 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 		pg_log(PG_REPORT, "fatal\n");
 		pg_log(PG_FATAL,
 			   "Your installation contains one of the reg* data types in user tables.\n"
-			   "These data types reference system OIDs that are not preserved by\n"
-			   "pg_upgrade, so this cluster cannot currently be upgraded.  You can\n"
+		 "These data types reference system OIDs that are not preserved by\n"
+		"pg_upgrade, so this cluster cannot currently be upgraded.  You can\n"
 			   "remove the problem tables and restart the upgrade.  A list of the problem\n"
 			   "columns is in the file:\n"
 			   "    %s\n\n", output_path);
@@ -837,50 +957,102 @@ check_for_reg_data_type_usage(ClusterInfo *cluster)
 
 
 /*
- * Test pg_upgrade_support.so is in the proper place.	 We cannot copy it
- * ourselves because install directories are typically root-owned.
+ * check_for_invalid_indexes()
+ *
+ *	CREATE INDEX CONCURRENTLY can create invalid indexes if the index build
+ *	fails.  These are dumped as valid indexes by pg_dump, but the
+ *	underlying files are still invalid indexes.  This checks to make sure
+ *	no invalid indexes exist, either failed index builds or concurrent
+ *	indexes in the process of being created.
  */
 static void
-check_for_support_lib(ClusterInfo *cluster)
+check_for_invalid_indexes(ClusterInfo *cluster)
 {
-	char		cmd[MAXPGPATH];
-	char		libdir[MAX_STRING];
-	char		libfile[MAXPGPATH];
-	FILE	   *lib_test;
-	FILE	   *output;
+	int			dbnum;
+	FILE	   *script = NULL;
+	bool		found = false;
+	char		output_path[MAXPGPATH];
 
-	snprintf(cmd, sizeof(cmd), "\"%s/pg_config\" --pkglibdir", cluster->bindir);
+	prep_status("Checking for invalid indexes from concurrent index builds");
 
-	if ((output = popen(cmd, "r")) == NULL ||
-		fgets(libdir, sizeof(libdir), output) == NULL)
-		pg_log(PG_FATAL, "Could not get pkglibdir data using %s: %s\n",
-			   cmd, getErrorText(errno));
+	snprintf(output_path, sizeof(output_path), "invalid_indexes.txt");
 
+	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
+	{
+		PGresult   *res;
+		bool		db_used = false;
+		int			ntups;
+		int			rowno;
+		int			i_nspname,
+					i_relname;
+		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
 
-	pclose(output);
+		res = executeQueryOrDie(conn,
+								"SELECT n.nspname, c.relname "
+								"FROM	pg_catalog.pg_class c, "
+								"		pg_catalog.pg_namespace n, "
+								"		pg_catalog.pg_index i "
+								"WHERE	(i.indisvalid = false OR "
+								"		 i.indisready = false) AND "
+								"		i.indexrelid = c.oid AND "
+								"		c.relnamespace = n.oid AND "
+								/* we do not migrate these, so skip them */
+							    " 		n.nspname != 'pg_catalog' AND "
+								"		n.nspname != 'information_schema' AND "
+								/* indexes do not have toast tables */
+								"		n.nspname != 'pg_toast'");
 
-	/* Remove trailing newline */
-	if (strchr(libdir, '\n') != NULL)
-		*strchr(libdir, '\n') = '\0';
+		ntups = PQntuples(res);
+		i_nspname = PQfnumber(res, "nspname");
+		i_relname = PQfnumber(res, "relname");
+		for (rowno = 0; rowno < ntups; rowno++)
+		{
+			found = true;
+			if (script == NULL && (script = fopen_priv(output_path, "w")) == NULL)
+				pg_log(PG_FATAL, "Could not open file \"%s\": %s\n",
+					   output_path, getErrorText(errno));
+			if (!db_used)
+			{
+				fprintf(script, "Database: %s\n", active_db->db_name);
+				db_used = true;
+			}
+			fprintf(script, "  %s.%s\n",
+					PQgetvalue(res, rowno, i_nspname),
+					PQgetvalue(res, rowno, i_relname));
+		}
 
-	snprintf(libfile, sizeof(libfile), "%s/pg_upgrade_support%s", libdir,
-			 DLSUFFIX);
+		PQclear(res);
 
-	if ((lib_test = fopen(libfile, "r")) == NULL)
+		PQfinish(conn);
+	}
+
+	if (script)
+		fclose(script);
+
+	if (found)
+	{
+		pg_log(PG_REPORT, "fatal\n");
 		pg_log(PG_FATAL,
-			   "The pg_upgrade_support module must be created and installed in the %s cluster.\n",
-				CLUSTER_NAME(cluster));
-
-	fclose(lib_test);
+			   "Your installation contains invalid indexes due to failed or\n"
+		 	   "currently running CREATE INDEX CONCURRENTLY operations.  You\n"
+			   "cannot upgrade until these indexes are valid or removed.  A\n"
+			   "list of the problem indexes is in the file:\n"
+			   "    %s\n\n", output_path);
+	}
+	else
+		check_ok();
 }
 
 
 static void
 get_bin_version(ClusterInfo *cluster)
 {
-	char		cmd[MAXPGPATH], cmd_output[MAX_STRING];
+	char		cmd[MAXPGPATH],
+				cmd_output[MAX_STRING];
 	FILE	   *output;
-	int			pre_dot, post_dot;
+	int			pre_dot,
+				post_dot;
 
 	snprintf(cmd, sizeof(cmd), "\"%s/pg_ctl\" --version", cluster->bindir);
 
@@ -901,3 +1073,39 @@ get_bin_version(ClusterInfo *cluster)
 	cluster->bin_version = (pre_dot * 100 + post_dot) * 100;
 }
 
+
+/*
+ * get_canonical_locale_name
+ *
+ * Send the locale name to the system, and hope we get back a canonical
+ * version.  This should match the backend's check_locale() function.
+ */
+static char *
+get_canonical_locale_name(int category, const char *locale)
+{
+	char	   *save;
+	char	   *res;
+
+	save = setlocale(category, NULL);
+	if (!save)
+        pg_log(PG_FATAL, "failed to get the current locale\n");
+
+	/* 'save' may be pointing at a modifiable scratch variable, so copy it. */
+	save = pg_strdup(save);
+
+	/* set the locale with setlocale, to see if it accepts it. */
+	res = setlocale(category, locale);
+
+	if (!res)
+        pg_log(PG_FATAL, "failed to get system local name for \"%s\"\n", res);
+
+	res = pg_strdup(res);
+
+	/* restore old value. */
+	if (!setlocale(category, save))
+        pg_log(PG_FATAL, "failed to restore old locale \"%s\"\n", save);
+
+	pg_free(save);
+
+	return res;
+}

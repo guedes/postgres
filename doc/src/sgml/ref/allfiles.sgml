@@ -12,6 +12,7 @@ Complete list of usable sgml source files in this directory.
 <!ENTITY alterDatabase      SYSTEM "alter_database.sgml">
 <!ENTITY alterDefaultPrivileges SYSTEM "alter_default_privileges.sgml">
 <!ENTITY alterDomain        SYSTEM "alter_domain.sgml">
+<!ENTITY alterEventTrigger  SYSTEM "alter_event_trigger.sgml">
 <!ENTITY alterExtension     SYSTEM "alter_extension.sgml">
 <!ENTITY alterForeignDataWrapper SYSTEM "alter_foreign_data_wrapper.sgml">
 <!ENTITY alterForeignTable  SYSTEM "alter_foreign_table.sgml">
@@ -24,6 +25,7 @@ Complete list of usable sgml source files in this directory.
 <!ENTITY alterOperatorClass SYSTEM "alter_opclass.sgml">
 <!ENTITY alterOperatorFamily SYSTEM "alter_opfamily.sgml">
 <!ENTITY alterRole          SYSTEM "alter_role.sgml">
+<!ENTITY alterRule          SYSTEM "alter_rule.sgml">
 <!ENTITY alterSchema        SYSTEM "alter_schema.sgml">
 <!ENTITY alterServer        SYSTEM "alter_server.sgml">
 <!ENTITY alterSequence      SYSTEM "alter_sequence.sgml">
@@ -53,6 +55,7 @@ Complete list of usable sgml source files in this directory.
 <!ENTITY createConversion   SYSTEM "create_conversion.sgml">
 <!ENTITY createDatabase     SYSTEM "create_database.sgml">
 <!ENTITY createDomain       SYSTEM "create_domain.sgml">
+<!ENTITY createEventTrigger SYSTEM "create_event_trigger.sgml">
 <!ENTITY createExtension    SYSTEM "create_extension.sgml">
 <!ENTITY createForeignDataWrapper SYSTEM "create_foreign_data_wrapper.sgml">
 <!ENTITY createForeignTable SYSTEM "create_foreign_table.sgml">
@@ -91,6 +94,7 @@ Complete list of usable sgml source files in this directory.
 <!ENTITY dropConversion     SYSTEM "drop_conversion.sgml">
 <!ENTITY dropDatabase       SYSTEM "drop_database.sgml">
 <!ENTITY dropDomain         SYSTEM "drop_domain.sgml">
+<!ENTITY dropEventTrigger   SYSTEM "drop_event_trigger.sgml">
 <!ENTITY dropExtension      SYSTEM "drop_extension.sgml">
 <!ENTITY dropForeignDataWrapper SYSTEM "drop_foreign_data_wrapper.sgml">
 <!ENTITY dropForeignTable   SYSTEM "drop_foreign_table.sgml">
@@ -172,6 +176,7 @@ Complete list of usable sgml source files in this directory.
 <!ENTITY pgCtl              SYSTEM "pg_ctl-ref.sgml">
 <!ENTITY pgDump             SYSTEM "pg_dump.sgml">
 <!ENTITY pgDumpall          SYSTEM "pg_dumpall.sgml">
+<!ENTITY pgIsready          SYSTEM "pg_isready.sgml">
 <!ENTITY pgReceivexlog      SYSTEM "pg_receivexlog.sgml">
 <!ENTITY pgResetxlog        SYSTEM "pg_resetxlog.sgml">
 <!ENTITY pgRestore          SYSTEM "pg_restore.sgml">

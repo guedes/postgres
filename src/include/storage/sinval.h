@@ -4,7 +4,7 @@
  *	  POSTGRES shared cache invalidation communication definitions.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/sinval.h
@@ -33,8 +33,8 @@
  * updates and deletions in system catalogs (see CacheInvalidateHeapTuple).
  * An update can generate two inval events, one for the old tuple and one for
  * the new, but this is reduced to one event if the tuple's hash key doesn't
- * change.  Note that the inval events themselves don't actually say whether
- * the tuple is being inserted or deleted.  Also, since we transmit only a
+ * change.	Note that the inval events themselves don't actually say whether
+ * the tuple is being inserted or deleted.	Also, since we transmit only a
  * hash key, there is a small risk of unnecessary invalidations due to chance
  * matches of hash keys.
  *

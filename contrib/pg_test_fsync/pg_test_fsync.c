@@ -25,11 +25,12 @@
 
 #define LABEL_FORMAT		"        %-32s"
 #define NA_FORMAT			"%18s"
-#define OPS_FORMAT			"%9.3f ops/sec"
+#define OPS_FORMAT			"%9.3f ops/sec (%6.0f microsecs/op)"
+#define USECS_SEC			1000000
 
 /* These are macros to avoid timing the function call overhead. */
 #ifndef WIN32
-#define START_TIMER	\
+#define START_TIMER \
 do { \
 	alarm_triggered = false; \
 	alarm(secs_per_test); \
@@ -37,7 +38,7 @@ do { \
 } while (0)
 #else
 /* WIN32 doesn't support alarm, so we create a thread and sleep there */
-#define START_TIMER	\
+#define START_TIMER \
 do { \
 	alarm_triggered = false; \
 	if (CreateThread(NULL, 0, process_alarm, NULL, 0, NULL) == \
@@ -55,7 +56,7 @@ do { \
 	gettimeofday(&stop_t, NULL); \
 	print_elapse(start_t, stop_t, ops); \
 } while (0)
-		
+
 
 static const char *progname;
 
@@ -77,6 +78,7 @@ static void test_sync(int writes_per_op);
 static void test_open_syncs(void);
 static void test_open_sync(const char *msg, int writes_size);
 static void test_file_descriptor_sync(void);
+
 #ifndef WIN32
 static void process_alarm(int sig);
 #else
@@ -138,6 +140,7 @@ handle_args(int argc, char *argv[])
 		{"secs-per-test", required_argument, NULL, 's'},
 		{NULL, 0, NULL, 0}
 	};
+
 	int			option;			/* Command line option */
 	int			optindex = 0;	/* used by getopt_long */
 
@@ -567,8 +570,9 @@ print_elapse(struct timeval start_t, struct timeval stop_t, int ops)
 	double		total_time = (stop_t.tv_sec - start_t.tv_sec) +
 	(stop_t.tv_usec - start_t.tv_usec) * 0.000001;
 	double		per_second = ops / total_time;
+	double		avg_op_time_us = (total_time / ops) * USECS_SEC;
 
-	printf(OPS_FORMAT "\n", per_second);
+	printf(OPS_FORMAT "\n", per_second, avg_op_time_us);
 }
 
 #ifndef WIN32

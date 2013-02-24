@@ -16,7 +16,7 @@
  * a quick copyObject() call before manipulating the query tree.
  *
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/parser/parse_utilcmd.c
@@ -26,6 +26,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
@@ -103,12 +104,12 @@ static void transformColumnDefinition(CreateStmtContext *cxt,
 static void transformTableConstraint(CreateStmtContext *cxt,
 						 Constraint *constraint);
 static void transformTableLikeClause(CreateStmtContext *cxt,
-					 TableLikeClause *table_like_clause);
+						 TableLikeClause *table_like_clause);
 static void transformOfType(CreateStmtContext *cxt,
 				TypeName *ofTypename);
-static char *chooseIndexName(const RangeVar *relation, IndexStmt *index_stmt);
 static IndexStmt *generateClonedIndexStmt(CreateStmtContext *cxt,
-						Relation parent_index, AttrNumber *attmap);
+						Relation source_idx,
+						const AttrNumber *attmap, int attmap_length);
 static List *get_collation(Oid collation, Oid actual_datatype);
 static List *get_opclass(Oid opclass, Oid actual_datatype);
 static void transformIndexConstraints(CreateStmtContext *cxt);
@@ -309,7 +310,7 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 			column->typeName->typeOid = INT2OID;
 		}
 		else if (strcmp(typname, "serial") == 0 ||
-			strcmp(typname, "serial4") == 0)
+				 strcmp(typname, "serial4") == 0)
 		{
 			is_serial = true;
 			column->typeName->names = NIL;
@@ -378,7 +379,7 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 								   "seq",
 								   snamespaceid);
 
-		ereport(NOTICE,
+		ereport(DEBUG1,
 				(errmsg("%s will create implicit sequence \"%s\" for serial column \"%s.%s\"",
 						cxt->stmtType, sname,
 						cxt->relation->relname, column->colname)));
@@ -554,13 +555,13 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 	}
 
 	/*
-	 * Generate ALTER FOREIGN TABLE ALTER COLUMN statement which adds 
+	 * Generate ALTER FOREIGN TABLE ALTER COLUMN statement which adds
 	 * per-column foreign data wrapper options for this column.
 	 */
 	if (column->fdwoptions != NIL)
 	{
 		AlterTableStmt *stmt;
-		AlterTableCmd  *cmd;
+		AlterTableCmd *cmd;
 
 		cmd = makeNode(AlterTableCmd);
 		cmd->subtype = AT_AlterColumnGenericOptions;
@@ -634,6 +635,7 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	Relation	relation;
 	TupleDesc	tupleDesc;
 	TupleConstr *constr;
+	AttrNumber *attmap;
 	AclResult	aclresult;
 	char	   *comment;
 	ParseCallbackState pcbstate;
@@ -642,14 +644,14 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 
 	relation = relation_openrv(table_like_clause->relation, AccessShareLock);
 
-	if (relation->rd_rel->relkind != RELKIND_RELATION
-		&& relation->rd_rel->relkind != RELKIND_VIEW
-		&& relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE
-		&& relation->rd_rel->relkind != RELKIND_COMPOSITE_TYPE)
+	if (relation->rd_rel->relkind != RELKIND_RELATION &&
+		relation->rd_rel->relkind != RELKIND_VIEW &&
+		relation->rd_rel->relkind != RELKIND_COMPOSITE_TYPE &&
+		relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a table, view, composite type, or foreign table",
-						table_like_clause->relation->relname)));
+						RelationGetRelationName(relation))));
 
 	cancel_parser_errposition_callback(&pcbstate);
 
@@ -667,7 +669,7 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	else
 	{
 		aclresult = pg_class_aclcheck(RelationGetRelid(relation), GetUserId(),
-								  ACL_SELECT);
+									  ACL_SELECT);
 		if (aclresult != ACLCHECK_OK)
 			aclcheck_error(aclresult, ACL_KIND_CLASS,
 						   RelationGetRelationName(relation));
@@ -675,6 +677,13 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 
 	tupleDesc = RelationGetDescr(relation);
 	constr = tupleDesc->constr;
+
+	/*
+	 * Initialize column number map for map_variable_attnos().  We need this
+	 * since dropped columns in the source table aren't copied, so the new
+	 * table can have different column numbers.
+	 */
+	attmap = (AttrNumber *) palloc0(sizeof(AttrNumber) * tupleDesc->natts);
 
 	/*
 	 * Insert the copied attributes into the cxt for the new table definition.
@@ -687,7 +696,7 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 		ColumnDef  *def;
 
 		/*
-		 * Ignore dropped columns in the parent.
+		 * Ignore dropped columns in the parent.  attmap entry is left zero.
 		 */
 		if (attribute->attisdropped)
 			continue;
@@ -717,6 +726,8 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 		 * Add to column list
 		 */
 		cxt->columns = lappend(cxt->columns, def);
+
+		attmap[parent_attno - 1] = list_length(cxt->columns);
 
 		/*
 		 * Copy default, if present and the default has been requested
@@ -776,22 +787,39 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 
 	/*
 	 * Copy CHECK constraints if requested, being careful to adjust attribute
-	 * numbers
+	 * numbers so they match the child.
 	 */
 	if ((table_like_clause->options & CREATE_TABLE_LIKE_CONSTRAINTS) &&
 		tupleDesc->constr)
 	{
-		AttrNumber *attmap = varattnos_map_schema(tupleDesc, cxt->columns);
 		int			ccnum;
 
 		for (ccnum = 0; ccnum < tupleDesc->constr->num_check; ccnum++)
 		{
 			char	   *ccname = tupleDesc->constr->check[ccnum].ccname;
 			char	   *ccbin = tupleDesc->constr->check[ccnum].ccbin;
-			Node	   *ccbin_node = stringToNode(ccbin);
 			Constraint *n = makeNode(Constraint);
+			Node	   *ccbin_node;
+			bool		found_whole_row;
 
-			change_varattnos_of_a_node(ccbin_node, attmap);
+			ccbin_node = map_variable_attnos(stringToNode(ccbin),
+											 1, 0,
+											 attmap, tupleDesc->natts,
+											 &found_whole_row);
+
+			/*
+			 * We reject whole-row variables because the whole point of LIKE
+			 * is that the new table's rowtype might later diverge from the
+			 * parent's.  So, while translation might be possible right now,
+			 * it wouldn't be possible to guarantee it would work in future.
+			 */
+			if (found_whole_row)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert whole-row table reference"),
+						 errdetail("Constraint \"%s\" contains a whole-row reference to table \"%s\".",
+								   ccname,
+								   RelationGetRelationName(relation))));
 
 			n->contype = CONSTR_CHECK;
 			n->location = -1;
@@ -802,8 +830,8 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 
 			/* Copy comment on constraint */
 			if ((table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS) &&
-				(comment = GetComment(get_constraint_oid(RelationGetRelid(relation),
-														 n->conname, false),
+				(comment = GetComment(get_relation_constraint_oid(RelationGetRelid(relation),
+														  n->conname, false),
 									  ConstraintRelationId,
 									  0)) != NULL)
 			{
@@ -827,7 +855,6 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	if ((table_like_clause->options & CREATE_TABLE_LIKE_INDEXES) &&
 		relation->rd_rel->relhasindex)
 	{
-		AttrNumber *attmap = varattnos_map_schema(tupleDesc, cxt->columns);
 		List	   *parent_indexes;
 		ListCell   *l;
 
@@ -842,35 +869,19 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 			parent_index = index_open(parent_index_oid, AccessShareLock);
 
 			/* Build CREATE INDEX statement to recreate the parent_index */
-			index_stmt = generateClonedIndexStmt(cxt, parent_index, attmap);
+			index_stmt = generateClonedIndexStmt(cxt, parent_index,
+												 attmap, tupleDesc->natts);
 
-			/* Copy comment on index */
+			/* Copy comment on index, if requested */
 			if (table_like_clause->options & CREATE_TABLE_LIKE_COMMENTS)
 			{
 				comment = GetComment(parent_index_oid, RelationRelationId, 0);
 
-				if (comment != NULL)
-				{
-					CommentStmt *stmt;
-
-					/*
-					 * We have to assign the index a name now, so that we can
-					 * reference it in CommentStmt.
-					 */
-					if (index_stmt->idxname == NULL)
-						index_stmt->idxname = chooseIndexName(cxt->relation,
-															  index_stmt);
-
-					stmt = makeNode(CommentStmt);
-					stmt->objtype = OBJECT_INDEX;
-					stmt->objname =
-						list_make2(makeString(cxt->relation->schemaname),
-								   makeString(index_stmt->idxname));
-					stmt->objargs = NIL;
-					stmt->comment = comment;
-
-					cxt->alist = lappend(cxt->alist, stmt);
-				}
+				/*
+				 * We make use of IndexStmt's idxcomment option, so as not to
+				 * need to know now what name the index will have.
+				 */
+				index_stmt->idxcomment = comment;
 			}
 
 			/* Save it in the inh_indexes list for the time being */
@@ -933,35 +944,12 @@ transformOfType(CreateStmtContext *cxt, TypeName *ofTypename)
 }
 
 /*
- * chooseIndexName
- *
- * Compute name for an index.  This must match code in indexcmds.c.
- *
- * XXX this is inherently broken because the indexes aren't created
- * immediately, so we fail to resolve conflicts when the same name is
- * derived for multiple indexes.  However, that's a reasonably uncommon
- * situation, so we'll live with it for now.
- */
-static char *
-chooseIndexName(const RangeVar *relation, IndexStmt *index_stmt)
-{
-	Oid			namespaceId;
-	List	   *colnames;
-
-	namespaceId = RangeVarGetCreationNamespace(relation);
-	colnames = ChooseIndexColumnNames(index_stmt->indexParams);
-	return ChooseIndexName(relation->relname, namespaceId,
-						   colnames, index_stmt->excludeOpNames,
-						   index_stmt->primary, index_stmt->isconstraint);
-}
-
-/*
  * Generate an IndexStmt node using information from an already existing index
  * "source_idx".  Attribute numbers should be adjusted according to attmap.
  */
 static IndexStmt *
 generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
-						AttrNumber *attmap)
+						const AttrNumber *attmap, int attmap_length)
 {
 	Oid			source_relid = RelationGetRelid(source_idx);
 	Form_pg_attribute *attrs = RelationGetDescr(source_idx)->attrs;
@@ -1018,7 +1006,10 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 		index->tableSpace = get_tablespace_name(idxrelrec->reltablespace);
 	else
 		index->tableSpace = NULL;
+	index->excludeOpNames = NIL;
+	index->idxcomment = NULL;
 	index->indexOid = InvalidOid;
+	index->oldNode = InvalidOid;
 	index->unique = idxrec->indisunique;
 	index->primary = idxrec->indisprimary;
 	index->concurrent = false;
@@ -1149,14 +1140,26 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 		{
 			/* Expressional index */
 			Node	   *indexkey;
+			bool		found_whole_row;
 
 			if (indexpr_item == NULL)
 				elog(ERROR, "too few entries in indexprs list");
 			indexkey = (Node *) lfirst(indexpr_item);
 			indexpr_item = lnext(indexpr_item);
 
-			/* OK to modify indexkey since we are working on a private copy */
-			change_varattnos_of_a_node(indexkey, attmap);
+			/* Adjust Vars to match new table's column numbering */
+			indexkey = map_variable_attnos(indexkey,
+										   1, 0,
+										   attmap, attmap_length,
+										   &found_whole_row);
+
+			/* As in transformTableLikeClause, reject whole-row variables */
+			if (found_whole_row)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot convert whole-row table reference"),
+						 errdetail("Index \"%s\" contains a whole-row table reference.",
+								   RelationGetRelationName(source_idx))));
 
 			iparam->name = NULL;
 			iparam->expr = indexkey;
@@ -1213,12 +1216,28 @@ generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
 	if (!isnull)
 	{
 		char	   *pred_str;
+		Node	   *pred_tree;
+		bool		found_whole_row;
 
 		/* Convert text string to node tree */
 		pred_str = TextDatumGetCString(datum);
-		index->whereClause = (Node *) stringToNode(pred_str);
-		/* Adjust attribute numbers */
-		change_varattnos_of_a_node(index->whereClause, attmap);
+		pred_tree = (Node *) stringToNode(pred_str);
+
+		/* Adjust Vars to match new table's column numbering */
+		pred_tree = map_variable_attnos(pred_tree,
+										1, 0,
+										attmap, attmap_length,
+										&found_whole_row);
+
+		/* As in transformTableLikeClause, reject whole-row variables */
+		if (found_whole_row)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot convert whole-row table reference"),
+					 errdetail("Index \"%s\" contains a whole-row table reference.",
+							   RelationGetRelationName(source_idx))));
+
+		index->whereClause = pred_tree;
 	}
 
 	/* Clean up */
@@ -1448,7 +1467,9 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 	index->whereClause = constraint->where_clause;
 	index->indexParams = NIL;
 	index->excludeOpNames = NIL;
+	index->idxcomment = NULL;
 	index->indexOid = InvalidOid;
+	index->oldNode = InvalidOid;
 	index->concurrent = false;
 
 	/*
@@ -1512,16 +1533,10 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 							index_name, RelationGetRelationName(heap_rel)),
 					 parser_errposition(cxt->pstate, constraint->location)));
 
-		if (!index_form->indisvalid)
+		if (!IndexIsValid(index_form))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("index \"%s\" is not valid", index_name),
-					 parser_errposition(cxt->pstate, constraint->location)));
-
-		if (!index_form->indisready)
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("index \"%s\" is not ready", index_name),
 					 parser_errposition(cxt->pstate, constraint->location)));
 
 		if (!index_form->indisunique)
@@ -1578,7 +1593,7 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 
 		for (i = 0; i < index_form->indnatts; i++)
 		{
-			int2		attnum = index_form->indkey.values[i];
+			int16		attnum = index_form->indkey.values[i];
 			Form_pg_attribute attform;
 			char	   *attname;
 			Oid			defopclass;
@@ -1897,6 +1912,7 @@ transformIndexStmt(IndexStmt *stmt, const char *queryString)
 	{
 		stmt->whereClause = transformWhereClause(pstate,
 												 stmt->whereClause,
+												 EXPR_KIND_INDEX_PREDICATE,
 												 "WHERE");
 		/* we have to fix its collations too */
 		assign_expr_collations(pstate, stmt->whereClause);
@@ -1914,15 +1930,20 @@ transformIndexStmt(IndexStmt *stmt, const char *queryString)
 				ielem->indexcolname = FigureIndexColname(ielem->expr);
 
 			/* Now do parse transformation of the expression */
-			ielem->expr = transformExpr(pstate, ielem->expr);
+			ielem->expr = transformExpr(pstate, ielem->expr,
+										EXPR_KIND_INDEX_EXPRESSION);
 
 			/* We have to fix its collations too */
 			assign_expr_collations(pstate, ielem->expr);
 
 			/*
-			 * We check only that the result type is legitimate; this is for
-			 * consistency with what transformWhereClause() checks for the
-			 * predicate.  DefineIndex() will make more checks.
+			 * transformExpr() should have already rejected subqueries,
+			 * aggregates, and window functions, based on the EXPR_KIND_ for
+			 * an index expression.
+			 *
+			 * Also reject expressions returning sets; this is for consistency
+			 * with what transformWhereClause() checks for the predicate.
+			 * DefineIndex() will make more checks.
 			 */
 			if (expression_returns_set(ielem->expr))
 				ereport(ERROR,
@@ -1932,7 +1953,8 @@ transformIndexStmt(IndexStmt *stmt, const char *queryString)
 	}
 
 	/*
-	 * Check that only the base rel is mentioned.
+	 * Check that only the base rel is mentioned.  (This should be dead code
+	 * now that add_missing_from is history.)
 	 */
 	if (list_length(pstate->p_rtable) != 1)
 		ereport(ERROR,
@@ -2027,24 +2049,16 @@ transformRuleStmt(RuleStmt *stmt, const char *queryString,
 	/* take care of the where clause */
 	*whereClause = transformWhereClause(pstate,
 									  (Node *) copyObject(stmt->whereClause),
+										EXPR_KIND_WHERE,
 										"WHERE");
 	/* we have to fix its collations too */
 	assign_expr_collations(pstate, *whereClause);
 
+	/* this is probably dead code without add_missing_from: */
 	if (list_length(pstate->p_rtable) != 2)		/* naughty, naughty... */
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 				 errmsg("rule WHERE condition cannot contain references to other relations")));
-
-	/* aggregates not allowed (but subselects are okay) */
-	if (pstate->p_hasAggs)
-		ereport(ERROR,
-				(errcode(ERRCODE_GROUPING_ERROR),
-		   errmsg("cannot use aggregate function in rule WHERE condition")));
-	if (pstate->p_hasWindowFuncs)
-		ereport(ERROR,
-				(errcode(ERRCODE_WINDOWING_ERROR),
-			  errmsg("cannot use window function in rule WHERE condition")));
 
 	/*
 	 * 'instead nothing' rules with a qualification need a query rangetable so
@@ -2305,7 +2319,7 @@ transformAlterTableStmt(AlterTableStmt *stmt, const char *queryString)
 		/* this message is consistent with relation_openrv */
 		ereport(NOTICE,
 				(errmsg("relation \"%s\" does not exist, skipping",
-							stmt->relation->relname)));
+						stmt->relation->relname)));
 		return NIL;
 	}
 

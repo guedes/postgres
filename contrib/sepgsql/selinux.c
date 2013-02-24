@@ -5,7 +5,7 @@
  * Interactions between userspace and selinux in kernelspace,
  * using libselinux api.
  *
- * Copyright (c) 2010-2012, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2013, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
@@ -830,7 +830,7 @@ sepgsql_compute_avd(const char *scontext,
  * given security context.
  *
  * scontext: security context of the subject (mostly, peer process).
- * tcontext: security context of the the upper database object.
+ * tcontext: security context of the upper database object.
  * tclass: class code (SEPG_CLASS_*) of the new object in creation
  */
 char *
@@ -893,7 +893,7 @@ sepgsql_compute_create(const char *scontext,
  * tclass: class code (SEPG_CLASS_*) of the object being referenced
  * required: a mask of required permissions (SEPG_<class>__<perm>)
  * audit_name: a human readable object name for audit logs, or NULL.
- * abort: true, if caller wants to raise an error on access violation
+ * abort_on_violation: true, if error shall be raised on access violation
  */
 bool
 sepgsql_check_perms(const char *scontext,
@@ -901,7 +901,7 @@ sepgsql_check_perms(const char *scontext,
 					uint16 tclass,
 					uint32 required,
 					const char *audit_name,
-					bool abort)
+					bool abort_on_violation)
 {
 	struct av_decision avd;
 	uint32		denied;
@@ -937,7 +937,7 @@ sepgsql_check_perms(const char *scontext,
 						  audit_name);
 	}
 
-	if (!result && abort)
+	if (!result && abort_on_violation)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("SELinux: security policy violation")));

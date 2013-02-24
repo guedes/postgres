@@ -3,7 +3,7 @@
  * copy.c
  *		Implements the COPY utility command
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
@@ -43,6 +44,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/portal.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -108,6 +110,7 @@ typedef struct CopyStateData
 	char	   *filename;		/* filename, or NULL for STDIN/STDOUT */
 	bool		binary;			/* binary format? */
 	bool		oids;			/* include OIDs? */
+	bool		freeze;			/* freeze rows on loading? */
 	bool		csv_mode;		/* Comma Separated Value format? */
 	bool		header_line;	/* CSV header line? */
 	char	   *null_print;		/* NULL marker string (server encoding!) */
@@ -121,6 +124,9 @@ typedef struct CopyStateData
 	bool	   *force_quote_flags;		/* per-column CSV FQ flags */
 	List	   *force_notnull;	/* list of column names */
 	bool	   *force_notnull_flags;	/* per-column CSV FNN flags */
+	bool		convert_selectively;	/* do selective binary conversion? */
+	List	   *convert_select;	/* list of column names (can be NIL) */
+	bool	   *convert_select_flags;	/* per-column CSV/TEXT CS flags */
 
 	/* these are just for error messages, see CopyFromErrorCallback */
 	const char *cur_relname;	/* table name for error messages */
@@ -150,7 +156,7 @@ typedef struct CopyStateData
 	Oid		   *typioparams;	/* array of element types for in_functions */
 	int		   *defmap;			/* array of default att numbers */
 	ExprState **defexprs;		/* array of default att expressions */
-	bool		volatile_defexprs; /* is any of defexprs volatile? */
+	bool		volatile_defexprs;		/* is any of defexprs volatile? */
 
 	/*
 	 * These variables are used to reduce overhead in textual COPY FROM.
@@ -547,7 +553,7 @@ CopyGetData(CopyState cstate, void *databuf, int minread, int maxread)
 				/* Only a \. terminator is legal EOF in old protocol */
 				ereport(ERROR,
 						(errcode(ERRCODE_CONNECTION_FAILURE),
-						 errmsg("unexpected EOF on client connection")));
+						 errmsg("unexpected EOF on client connection with an open transaction")));
 			}
 			bytesread = minread;
 			break;
@@ -566,11 +572,11 @@ CopyGetData(CopyState cstate, void *databuf, int minread, int maxread)
 					if (mtype == EOF)
 						ereport(ERROR,
 								(errcode(ERRCODE_CONNECTION_FAILURE),
-							 errmsg("unexpected EOF on client connection")));
+								 errmsg("unexpected EOF on client connection with an open transaction")));
 					if (pq_getmessage(cstate->fe_msgbuf, 0))
 						ereport(ERROR,
 								(errcode(ERRCODE_CONNECTION_FAILURE),
-							 errmsg("unexpected EOF on client connection")));
+								 errmsg("unexpected EOF on client connection with an open transaction")));
 					switch (mtype)
 					{
 						case 'd':		/* CopyData */
@@ -737,14 +743,14 @@ CopyLoadRawBuf(CopyState cstate)
  * Do not allow the copy if user doesn't have proper permission to access
  * the table or the specifically requested columns.
  */
-uint64
-DoCopy(const CopyStmt *stmt, const char *queryString)
+Oid
+DoCopy(const CopyStmt *stmt, const char *queryString, uint64 *processed)
 {
 	CopyState	cstate;
 	bool		is_from = stmt->is_from;
 	bool		pipe = (stmt->filename == NULL);
 	Relation	rel;
-	uint64		processed;
+	Oid         relid;
 
 	/* Disallow file COPY except to superusers. */
 	if (!pipe && !superuser())
@@ -767,6 +773,8 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 		/* Open and lock the relation, using the appropriate lock type. */
 		rel = heap_openrv(stmt->relation,
 						  (is_from ? RowExclusiveLock : AccessShareLock));
+
+		relid = RelationGetRelid(rel);
 
 		rte = makeNode(RangeTblEntry);
 		rte->rtekind = RTE_RELATION;
@@ -792,6 +800,7 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 	{
 		Assert(stmt->query);
 
+		relid = InvalidOid;
 		rel = NULL;
 	}
 
@@ -800,19 +809,19 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 		Assert(rel);
 
 		/* check read-only transaction */
-		if (XactReadOnly && rel->rd_backend != MyBackendId)
+		if (XactReadOnly && !rel->rd_islocaltemp)
 			PreventCommandIfReadOnly("COPY FROM");
 
 		cstate = BeginCopyFrom(rel, stmt->filename,
 							   stmt->attlist, stmt->options);
-		processed = CopyFrom(cstate);	/* copy from file to database */
+		*processed = CopyFrom(cstate);	/* copy from file to database */
 		EndCopyFrom(cstate);
 	}
 	else
 	{
 		cstate = BeginCopyTo(rel, stmt->query, queryString, stmt->filename,
 							 stmt->attlist, stmt->options);
-		processed = DoCopyTo(cstate);	/* copy from database to file */
+		*processed = DoCopyTo(cstate);	/* copy from database to file */
 		EndCopyTo(cstate);
 	}
 
@@ -824,7 +833,7 @@ DoCopy(const CopyStmt *stmt, const char *queryString)
 	if (rel != NULL)
 		heap_close(rel, (is_from ? NoLock : AccessShareLock));
 
-	return processed;
+	return relid;
 }
 
 /*
@@ -891,6 +900,14 @@ ProcessCopyOptions(CopyState cstate,
 						 errmsg("conflicting or redundant options")));
 			cstate->oids = defGetBoolean(defel);
 		}
+		else if (strcmp(defel->defname, "freeze") == 0)
+		{
+			if (cstate->freeze)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options")));
+			cstate->freeze = defGetBoolean(defel);
+		}
 		else if (strcmp(defel->defname, "delimiter") == 0)
 		{
 			if (cstate->delim)
@@ -955,6 +972,26 @@ ProcessCopyOptions(CopyState cstate,
 						 errmsg("conflicting or redundant options")));
 			if (defel->arg && IsA(defel->arg, List))
 				cstate->force_notnull = (List *) defel->arg;
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("argument to option \"%s\" must be a list of column names",
+								defel->defname)));
+		}
+		else if (strcmp(defel->defname, "convert_selectively") == 0)
+		{
+			/*
+			 * Undocumented, not-accessible-from-SQL option: convert only
+			 * the named columns to binary form, storing the rest as NULLs.
+			 * It's allowed for the column list to be NIL.
+			 */
+			if (cstate->convert_selectively)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options")));
+			cstate->convert_selectively = true;
+			if (defel->arg == NULL || IsA(defel->arg, List))
+				cstate->convert_select = (List *) defel->arg;
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1210,14 +1247,16 @@ BeginCopy(bool is_from,
 			elog(ERROR, "unexpected rewrite result");
 
 		query = (Query *) linitial(rewritten);
-		Assert(query->commandType == CMD_SELECT);
-		Assert(query->utilityStmt == NULL);
 
-		/* Query mustn't use INTO, either */
-		if (query->intoClause)
+		/* The grammar allows SELECT INTO, but we don't support that */
+		if (query->utilityStmt != NULL &&
+			IsA(query->utilityStmt, CreateTableAsStmt))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("COPY (SELECT INTO) is not supported")));
+
+		Assert(query->commandType == CMD_SELECT);
+		Assert(query->utilityStmt == NULL);
 
 		/* plan the query */
 		plan = planner(query, 0, NULL);
@@ -1302,6 +1341,29 @@ BeginCopy(bool is_from,
 				errmsg("FORCE NOT NULL column \"%s\" not referenced by COPY",
 					   NameStr(tupDesc->attrs[attnum - 1]->attname))));
 			cstate->force_notnull_flags[attnum - 1] = true;
+		}
+	}
+
+	/* Convert convert_selectively name list to per-column flags */
+	if (cstate->convert_selectively)
+	{
+		List	   *attnums;
+		ListCell   *cur;
+
+		cstate->convert_select_flags = (bool *) palloc0(num_phys_attrs * sizeof(bool));
+
+		attnums = CopyGetAttnums(tupDesc, cstate->rel, cstate->convert_select);
+
+		foreach(cur, attnums)
+		{
+			int			attnum = lfirst_int(cur);
+
+			if (!list_member_int(cstate->attnumlist, attnum))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+						 errmsg_internal("selected column \"%s\" not referenced by COPY",
+										 NameStr(tupDesc->attrs[attnum - 1]->attname))));
+			cstate->convert_select_flags[attnum - 1] = true;
 		}
 	}
 
@@ -1852,13 +1914,14 @@ CopyFrom(CopyState cstate)
 	TupleTableSlot *myslot;
 	MemoryContext oldcontext = CurrentMemoryContext;
 
-	ErrorContextCallback errcontext;
+	ErrorContextCallback errcallback;
 	CommandId	mycid = GetCurrentCommandId(true);
 	int			hi_options = 0; /* start with default heap_insert options */
 	BulkInsertState bistate;
 	uint64		processed = 0;
 	bool		useHeapMultiInsert;
 	int			nBufferedTuples = 0;
+
 #define MAX_BUFFERED_TUPLES 1000
 	HeapTuple  *bufferedTuples = NULL;	/* initialize to silence warning */
 	Size		bufferedTuplesSize = 0;
@@ -1903,9 +1966,17 @@ CopyFrom(CopyState cstate)
 	 * routine first.
 	 *
 	 * As mentioned in comments in utils/rel.h, the in-same-transaction test
-	 * is not completely reliable, since in rare cases rd_createSubid or
-	 * rd_newRelfilenodeSubid can be cleared before the end of the transaction.
-	 * However this is OK since at worst we will fail to make the optimization.
+	 * is not always set correctly, since in rare cases rd_newRelfilenodeSubid
+	 * can be cleared before the end of the transaction. The exact case is
+	 * when a relation sets a new relfilenode twice in same transaction, yet
+	 * the second one fails in an aborted subtransaction, e.g.
+	 *
+	 * BEGIN;
+	 * TRUNCATE t;
+	 * SAVEPOINT save;
+	 * TRUNCATE t;
+	 * ROLLBACK TO save;
+	 * COPY ...
 	 *
 	 * Also, if the target file is new-in-transaction, we assume that checking
 	 * FSM for free space is a waste of time, even if we must use WAL because
@@ -1918,12 +1989,38 @@ CopyFrom(CopyState cstate)
 	 * no additional work to enforce that.
 	 *----------
 	 */
+	/* createSubid is creation check, newRelfilenodeSubid is truncation check */
 	if (cstate->rel->rd_createSubid != InvalidSubTransactionId ||
 		cstate->rel->rd_newRelfilenodeSubid != InvalidSubTransactionId)
 	{
 		hi_options |= HEAP_INSERT_SKIP_FSM;
 		if (!XLogIsNeeded())
 			hi_options |= HEAP_INSERT_SKIP_WAL;
+	}
+
+	/*
+	 * Optimize if new relfilenode was created in this subxact or
+	 * one of its committed children and we won't see those rows later
+	 * as part of an earlier scan or command. This ensures that if this
+	 * subtransaction aborts then the frozen rows won't be visible
+	 * after xact cleanup. Note that the stronger test of exactly
+	 * which subtransaction created it is crucial for correctness
+	 * of this optimisation.
+	 */
+	if (cstate->freeze)
+	{
+		if (!ThereAreNoPriorRegisteredSnapshots() || !ThereAreNoReadyPortals())
+			ereport(ERROR,
+					(ERRCODE_INVALID_TRANSACTION_STATE,
+					errmsg("cannot perform FREEZE because of prior transaction activity")));
+
+		if (cstate->rel->rd_createSubid != GetCurrentSubTransactionId() &&
+			cstate->rel->rd_newRelfilenodeSubid != GetCurrentSubTransactionId())
+			ereport(ERROR,
+					(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+					 errmsg("cannot perform FREEZE because the table was not created or truncated in the current subtransaction")));
+
+		hi_options |= HEAP_INSERT_FROZEN;
 	}
 
 	/*
@@ -1966,8 +2063,8 @@ CopyFrom(CopyState cstate)
 	 * processed and prepared for insertion are not there.
 	 */
 	if ((resultRelInfo->ri_TrigDesc != NULL &&
-		(resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
-		 resultRelInfo->ri_TrigDesc->trig_insert_instead_row)) ||
+		 (resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
+		  resultRelInfo->ri_TrigDesc->trig_insert_instead_row)) ||
 		cstate->volatile_defexprs)
 	{
 		useHeapMultiInsert = false;
@@ -1982,7 +2079,7 @@ CopyFrom(CopyState cstate)
 	AfterTriggerBeginQuery();
 
 	/*
-	 * Check BEFORE STATEMENT insertion triggers. It's debateable whether we
+	 * Check BEFORE STATEMENT insertion triggers. It's debatable whether we
 	 * should do this for COPY, since it's not really an "INSERT" statement as
 	 * such. However, executing these triggers maintains consistency with the
 	 * EACH ROW triggers that we already fire on COPY.
@@ -1996,10 +2093,10 @@ CopyFrom(CopyState cstate)
 	econtext = GetPerTupleExprContext(estate);
 
 	/* Set up callback to identify error line number */
-	errcontext.callback = CopyFromErrorCallback;
-	errcontext.arg = (void *) cstate;
-	errcontext.previous = error_context_stack;
-	error_context_stack = &errcontext;
+	errcallback.callback = CopyFromErrorCallback;
+	errcallback.arg = (void *) cstate;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	for (;;)
 	{
@@ -2114,7 +2211,7 @@ CopyFrom(CopyState cstate)
 							nBufferedTuples, bufferedTuples);
 
 	/* Done, clean up */
-	error_context_stack = errcontext.previous;
+	error_context_stack = errcallback.previous;
 
 	FreeBulkInsertState(bistate);
 
@@ -2160,8 +2257,8 @@ CopyFromInsertBatch(CopyState cstate, EState *estate, CommandId mycid,
 	int			i;
 
 	/*
-	 * heap_multi_insert leaks memory, so switch to short-lived memory
-	 * context before calling it.
+	 * heap_multi_insert leaks memory, so switch to short-lived memory context
+	 * before calling it.
 	 */
 	oldcontext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 	heap_multi_insert(cstate->rel,
@@ -2173,14 +2270,14 @@ CopyFromInsertBatch(CopyState cstate, EState *estate, CommandId mycid,
 	MemoryContextSwitchTo(oldcontext);
 
 	/*
-	 * If there are any indexes, update them for all the inserted tuples,
-	 * and run AFTER ROW INSERT triggers.
+	 * If there are any indexes, update them for all the inserted tuples, and
+	 * run AFTER ROW INSERT triggers.
 	 */
 	if (resultRelInfo->ri_NumIndices > 0)
 	{
 		for (i = 0; i < nBufferedTuples; i++)
 		{
-			List *recheckIndexes;
+			List	   *recheckIndexes;
 
 			ExecStoreTuple(bufferedTuples[i], myslot, InvalidBuffer, false);
 			recheckIndexes =
@@ -2192,6 +2289,7 @@ CopyFromInsertBatch(CopyState cstate, EState *estate, CommandId mycid,
 			list_free(recheckIndexes);
 		}
 	}
+
 	/*
 	 * There's no indexes, but see if we need to run AFTER ROW INSERT triggers
 	 * anyway.
@@ -2560,6 +2658,13 @@ NextCopyFrom(CopyState cstate, ExprContext *econtext,
 						 errmsg("missing data for column \"%s\"",
 								NameStr(attr[m]->attname))));
 			string = field_strings[fieldno++];
+
+			if (cstate->convert_select_flags &&
+				!cstate->convert_select_flags[m])
+			{
+				/* ignore input field, leaving column as NULL */
+				continue;
+			}
 
 			if (cstate->csv_mode && string == NULL &&
 				cstate->force_notnull_flags[m])
@@ -3241,7 +3346,17 @@ CopyReadAttributesText(CopyState cstate)
 		start_ptr = cur_ptr;
 		cstate->raw_fields[fieldno] = output_ptr;
 
-		/* Scan data for field */
+		/*
+		 * Scan data for field.
+		 *
+		 * Note that in this loop, we are scanning to locate the end of field
+		 * and also speculatively performing de-escaping.  Once we find the
+		 * end-of-field, we can match the raw field contents against the null
+		 * marker string.  Only after that comparison fails do we know that
+		 * de-escaping is actually the right thing to do; therefore we *must
+		 * not* throw any syntax errors before we've done the null-marker
+		 * check.
+		 */
 		for (;;)
 		{
 			char		c;
@@ -3354,26 +3469,29 @@ CopyReadAttributesText(CopyState cstate)
 			*output_ptr++ = c;
 		}
 
-		/* Terminate attribute value in output area */
-		*output_ptr++ = '\0';
-
-		/*
-		 * If we de-escaped a non-7-bit-ASCII char, make sure we still have
-		 * valid data for the db encoding. Avoid calling strlen here for the
-		 * sake of efficiency.
-		 */
-		if (saw_non_ascii)
-		{
-			char	   *fld = cstate->raw_fields[fieldno];
-
-			pg_verifymbstr(fld, output_ptr - (fld + 1), false);
-		}
-
 		/* Check whether raw input matched null marker */
 		input_len = end_ptr - start_ptr;
 		if (input_len == cstate->null_print_len &&
 			strncmp(start_ptr, cstate->null_print, input_len) == 0)
 			cstate->raw_fields[fieldno] = NULL;
+		else
+		{
+			/*
+			 * At this point we know the field is supposed to contain data.
+			 *
+			 * If we de-escaped any non-7-bit-ASCII chars, make sure the
+			 * resulting string is valid data for the db encoding.
+			 */
+			if (saw_non_ascii)
+			{
+				char	   *fld = cstate->raw_fields[fieldno];
+
+				pg_verifymbstr(fld, output_ptr - fld, false);
+			}
+		}
+
+		/* Terminate attribute value in output area */
+		*output_ptr++ = '\0';
 
 		fieldno++;
 		/* Done if we hit EOL instead of a delim */

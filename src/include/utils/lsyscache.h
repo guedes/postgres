@@ -3,7 +3,7 @@
  * lsyscache.h
  *	  Convenience routines for common queries in the system catalog cache.
  *
- * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/lsyscache.h
@@ -13,15 +13,17 @@
 #ifndef LSYSCACHE_H
 #define LSYSCACHE_H
 
+#include "access/attnum.h"
 #include "access/htup.h"
+#include "nodes/pg_list.h"
 
 /* Result list element for get_op_btree_interpretation */
 typedef struct OpBtreeInterpretation
 {
-	Oid			opfamily_id;		/* btree opfamily containing operator */
-	int			strategy;			/* its strategy number */
-	Oid			oplefttype;			/* declared left input datatype */
-	Oid			oprighttype;		/* declared right input datatype */
+	Oid			opfamily_id;	/* btree opfamily containing operator */
+	int			strategy;		/* its strategy number */
+	Oid			oplefttype;		/* declared left input datatype */
+	Oid			oprighttype;	/* declared right input datatype */
 } OpBtreeInterpretation;
 
 /* I/O function selector for get_type_io_data */
@@ -149,7 +151,7 @@ extern void free_attstatsslot(Oid atttype,
 				  Datum *values, int nvalues,
 				  float4 *numbers, int nnumbers);
 extern char *get_namespace_name(Oid nspid);
-extern Oid get_range_subtype(Oid rangeOid);
+extern Oid	get_range_subtype(Oid rangeOid);
 
 #define type_is_array(typid)  (get_element_type(typid) != InvalidOid)
 /* type_is_array_domain accepts both plain arrays and domains over arrays */
