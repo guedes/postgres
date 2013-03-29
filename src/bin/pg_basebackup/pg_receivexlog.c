@@ -13,19 +13,20 @@
  */
 
 #include "postgres_fe.h"
-#include "libpq-fe.h"
-#include "libpq/pqsignal.h"
-#include "access/xlog_internal.h"
-
-#include "receivelog.h"
-#include "streamutil.h"
 
 #include <dirent.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "libpq-fe.h"
+#include "access/xlog_internal.h"
 #include "getopt_long.h"
+
+#include "receivelog.h"
+#include "streamutil.h"
+
 
 /* Time to sleep between reconnection attempts */
 #define RECONNECT_SLEEP_TIME 5
@@ -58,6 +59,7 @@ usage(void)
 	printf(_("  -V, --version          output version information, then exit\n"));
 	printf(_("  -?, --help             show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
+	printf(_("  -d, --dbname=CONNSTR   connection string\n"));
 	printf(_("  -h, --host=HOSTNAME    database server host or socket directory\n"));
 	printf(_("  -p, --port=PORT        database server port number\n"));
 	printf(_("  -s, --status-interval=INTERVAL\n"
@@ -227,6 +229,16 @@ StreamLog(void)
 		/* Error message already written in GetConnection() */
 		return;
 
+	if (!CheckServerVersionForStreaming(conn))
+	{
+		/*
+		 * Error message already written in CheckServerVersionForStreaming().
+		 * There's no hope of recovering from a version mismatch, so don't
+		 * retry.
+		 */
+		disconnect_and_exit(1);
+	}
+
 	/*
 	 * Run IDENTIFY_SYSTEM so we can get the timeline and current xlog
 	 * position.
@@ -306,6 +318,7 @@ main(int argc, char **argv)
 		{"help", no_argument, NULL, '?'},
 		{"version", no_argument, NULL, 'V'},
 		{"directory", required_argument, NULL, 'D'},
+		{"dbname", required_argument, NULL, 'd'},
 		{"host", required_argument, NULL, 'h'},
 		{"port", required_argument, NULL, 'p'},
 		{"username", required_argument, NULL, 'U'},
@@ -338,13 +351,16 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "D:h:p:U:s:nwWv",
+	while ((c = getopt_long(argc, argv, "D:d:h:p:U:s:nwWv",
 							long_options, &option_index)) != -1)
 	{
 		switch (c)
 		{
 			case 'D':
 				basedir = pg_strdup(optarg);
+				break;
+			case 'd':
+				connection_string = pg_strdup(optarg);
 				break;
 			case 'h':
 				dbhost = pg_strdup(optarg);

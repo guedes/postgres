@@ -426,8 +426,7 @@ CreateRole(CreateRoleStmt *stmt)
 				GetUserId(), false);
 
 	/* Post creation hook for new role */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   AuthIdRelationId, roleid, 0, NULL);
+	InvokeObjectPostCreateHook(AuthIdRelationId, roleid, 0);
 
 	/*
 	 * Close pg_authid, but keep lock till commit.
@@ -778,6 +777,8 @@ AlterRole(AlterRoleStmt *stmt)
 	/* Update indexes */
 	CatalogUpdateIndexes(pg_authid_rel, new_tuple);
 
+	InvokeObjectPostAlterHook(AuthIdRelationId, roleid, 0);
+
 	ReleaseSysCache(tuple);
 	heap_freetuple(new_tuple);
 
@@ -968,14 +969,7 @@ DropRole(DropRoleStmt *stmt)
 					 errmsg("must be superuser to drop superusers")));
 
 		/* DROP hook for the role being removed */
-		if (object_access_hook)
-		{
-			ObjectAccessDrop drop_arg;
-
-			memset(&drop_arg, 0, sizeof(ObjectAccessDrop));
-			InvokeObjectAccessHook(OAT_DROP,
-								   AuthIdRelationId, roleid, 0, &drop_arg);
-		}
+		InvokeObjectDropHook(AuthIdRelationId, roleid, 0);
 
 		/*
 		 * Lock the role, so nobody can add dependencies to her while we drop
@@ -1168,6 +1162,8 @@ RenameRole(const char *oldname, const char *newname)
 	simple_heap_update(rel, &oldtuple->t_self, newtuple);
 
 	CatalogUpdateIndexes(rel, newtuple);
+
+	InvokeObjectPostAlterHook(AuthIdRelationId, roleid, 0);
 
 	ReleaseSysCache(oldtuple);
 

@@ -241,6 +241,9 @@ AlterForeignDataWrapperOwner_internal(Relation rel, HeapTuple tup, Oid newOwnerI
 								HeapTupleGetOid(tup),
 								newOwnerId);
 	}
+
+	InvokeObjectPostAlterHook(ForeignDataWrapperRelationId,
+							  HeapTupleGetOid(tup), 0);
 }
 
 /*
@@ -349,6 +352,9 @@ AlterForeignServerOwner_internal(Relation rel, HeapTuple tup, Oid newOwnerId)
 		changeDependencyOnOwner(ForeignServerRelationId, HeapTupleGetOid(tup),
 								newOwnerId);
 	}
+
+	InvokeObjectPostAlterHook(ForeignServerRelationId,
+							  HeapTupleGetOid(tup), 0);
 }
 
 /*
@@ -599,8 +605,7 @@ CreateForeignDataWrapper(CreateFdwStmt *stmt)
 	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* Post creation hook for new foreign data wrapper */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   ForeignDataWrapperRelationId, fdwId, 0, NULL);
+	InvokeObjectPostCreateHook(ForeignDataWrapperRelationId, fdwId, 0);
 
 	heap_close(rel, RowExclusiveLock);
 
@@ -765,6 +770,8 @@ AlterForeignDataWrapper(AlterFdwStmt *stmt)
 		}
 	}
 
+	InvokeObjectPostAlterHook(ForeignDataWrapperRelationId, fdwId, 0);
+
 	heap_close(rel, RowExclusiveLock);
 
 	return fdwId;
@@ -900,8 +907,7 @@ CreateForeignServer(CreateForeignServerStmt *stmt)
 	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* Post creation hook for new foreign server */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   ForeignServerRelationId, srvId, 0, NULL);
+	InvokeObjectPostCreateHook(ForeignServerRelationId, srvId, 0);
 
 	heap_close(rel, RowExclusiveLock);
 
@@ -995,6 +1001,8 @@ AlterForeignServer(AlterForeignServerStmt *stmt)
 
 	simple_heap_update(rel, &tp->t_self, tp);
 	CatalogUpdateIndexes(rel, tp);
+
+	InvokeObjectPostAlterHook(ForeignServerRelationId, srvId, 0);
 
 	heap_freetuple(tp);
 
@@ -1145,8 +1153,7 @@ CreateUserMapping(CreateUserMappingStmt *stmt)
 	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* Post creation hook for new user mapping */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   UserMappingRelationId, umId, 0, NULL);
+	InvokeObjectPostCreateHook(UserMappingRelationId, umId, 0);
 
 	heap_close(rel, RowExclusiveLock);
 

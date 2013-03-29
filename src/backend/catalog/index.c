@@ -933,7 +933,8 @@ index_create(Relation heapRelation,
 									false,		/* already marked primary */
 									false,		/* pg_index entry is OK */
 									false,		/* no old dependencies */
-									allow_system_table_mods);
+									allow_system_table_mods,
+									is_internal);
 		}
 		else
 		{
@@ -1028,15 +1029,8 @@ index_create(Relation heapRelation,
 	}
 
 	/* Post creation hook for new index */
-	if (object_access_hook)
-	{
-		ObjectAccessPostCreate	post_create_args;
-
-		memset(&post_create_args, 0, sizeof(ObjectAccessPostCreate));
-		post_create_args.is_internal = is_internal;
-		(*object_access_hook)(OAT_POST_CREATE, RelationRelationId,
-							  indexRelationId, 0, &post_create_args);
-	}
+	InvokeObjectPostCreateHookArg(RelationRelationId,
+								  indexRelationId, 0, is_internal);
 
 	/*
 	 * Advance the command counter so that we can see the newly-entered
@@ -1114,6 +1108,7 @@ index_create(Relation heapRelation,
  * remove_old_dependencies: if true, remove existing dependencies of index
  *		on table's columns
  * allow_system_table_mods: allow table to be a system catalog
+ * is_internal: index is constructed due to internal process
  */
 void
 index_constraint_create(Relation heapRelation,
@@ -1126,7 +1121,8 @@ index_constraint_create(Relation heapRelation,
 						bool mark_as_primary,
 						bool update_pgindex,
 						bool remove_old_dependencies,
-						bool allow_system_table_mods)
+						bool allow_system_table_mods,
+						bool is_internal)
 {
 	Oid			namespaceId = RelationGetNamespace(heapRelation);
 	ObjectAddress myself,
@@ -1191,7 +1187,8 @@ index_constraint_create(Relation heapRelation,
 								   NULL,
 								   true,		/* islocal */
 								   0,	/* inhcount */
-								   true);		/* noinherit */
+								   true,		/* noinherit */
+								   is_internal);
 
 	/*
 	 * Register the index as internally dependent on the constraint.
@@ -1300,6 +1297,9 @@ index_constraint_create(Relation heapRelation,
 		{
 			simple_heap_update(pg_index, &indexTuple->t_self, indexTuple);
 			CatalogUpdateIndexes(pg_index, indexTuple);
+
+			InvokeObjectPostAlterHookArg(IndexRelationId, indexRelationId, 0,
+										 InvalidOid, is_internal);
 		}
 
 		heap_freetuple(indexTuple);

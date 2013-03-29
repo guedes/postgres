@@ -37,6 +37,7 @@
 #include "commands/event_trigger.h"
 #include "commands/explain.h"
 #include "commands/extension.h"
+#include "commands/matview.h"
 #include "commands/lockcmds.h"
 #include "commands/portalcmds.h"
 #include "commands/prepare.h"
@@ -202,6 +203,7 @@ check_xact_readonly(Node *parsetree)
 		case T_CreateSeqStmt:
 		case T_CreateStmt:
 		case T_CreateTableAsStmt:
+		case T_RefreshMatViewStmt:
 		case T_CreateTableSpaceStmt:
 		case T_CreateTrigStmt:
 		case T_CompositeTypeStmt:
@@ -344,12 +346,13 @@ ProcessUtility(Node *parsetree,
 	do { \
 	    if (isCompleteQuery) \
         { \
-		    EventTriggerDDLCommandStart(parsetree); \
+			EventTriggerDDLCommandStart(parsetree); \
 		} \
 		fncall; \
         if (isCompleteQuery) \
         { \
-		    EventTriggerDDLCommandEnd(parsetree); \
+			EventTriggerSQLDrop(parsetree); \
+			EventTriggerDDLCommandEnd(parsetree); \
 		} \
 	} while (0)
 
@@ -364,7 +367,42 @@ ProcessUtility(Node *parsetree,
 		fncall; \
 		if (_supported) \
 		{ \
+			EventTriggerSQLDrop(parsetree); \
 			EventTriggerDDLCommandEnd(parsetree); \
+		} \
+	} while (0)
+
+/*
+ * UTILITY_BEGIN_QUERY and UTILITY_END_QUERY are a pair of macros to enclose
+ * execution of a single DDL command, to ensure the event trigger environment
+ * is appropriately set up before starting, and tore down after completion or
+ * error.
+ */
+#define UTILITY_BEGIN_QUERY(isComplete) \
+	do { \
+		bool		_needCleanup; \
+		\
+		_needCleanup = (isComplete) && EventTriggerBeginCompleteQuery(); \
+		\
+		PG_TRY(); \
+		{ \
+			/* avoid empty statement when followed by a semicolon */ \
+			(void) 0
+
+#define UTILITY_END_QUERY() \
+		} \
+		PG_CATCH(); \
+		{ \
+			if (_needCleanup) \
+			{ \
+				EventTriggerEndCompleteQuery(); \
+			} \
+			PG_RE_THROW(); \
+		} \
+		PG_END_TRY(); \
+		if (_needCleanup) \
+		{ \
+			EventTriggerEndCompleteQuery(); \
 		} \
 	} while (0)
 
@@ -383,6 +421,8 @@ standard_ProcessUtility(Node *parsetree,
 
 	if (completionTag)
 		completionTag[0] = '\0';
+
+	UTILITY_BEGIN_QUERY(isCompleteQuery);
 
 	switch (nodeTag(parsetree))
 	{
@@ -613,7 +653,10 @@ standard_ProcessUtility(Node *parsetree,
 				}
 
 				if (isCompleteQuery)
+				{
+					EventTriggerSQLDrop(parsetree);
 					EventTriggerDDLCommandEnd(parsetree);
+				}
 			}
 			break;
 
@@ -713,6 +756,7 @@ standard_ProcessUtility(Node *parsetree,
 					case OBJECT_TABLE:
 					case OBJECT_SEQUENCE:
 					case OBJECT_VIEW:
+					case OBJECT_MATVIEW:
 					case OBJECT_FOREIGN_TABLE:
 						RemoveRelations((DropStmt *) parsetree);
 						break;
@@ -723,7 +767,10 @@ standard_ProcessUtility(Node *parsetree,
 
 				if (isCompleteQuery
 					&& EventTriggerSupportsObjectType(stmt->removeType))
+				{
+					EventTriggerSQLDrop(parsetree);
 					EventTriggerDDLCommandEnd(parsetree);
+				}
 
 				break;
 			}
@@ -853,6 +900,12 @@ standard_ProcessUtility(Node *parsetree,
 					ereport(NOTICE,
 						  (errmsg("relation \"%s\" does not exist, skipping",
 								  atstmt->relation->relname)));
+
+				if (isCompleteQuery)
+				{
+					EventTriggerSQLDrop(parsetree);
+					EventTriggerDDLCommandEnd(parsetree);
+				}
 			}
 			break;
 
@@ -1164,6 +1217,13 @@ standard_ProcessUtility(Node *parsetree,
 								  queryString, params, completionTag));
 			break;
 
+		case T_RefreshMatViewStmt:
+			if (isCompleteQuery)
+				EventTriggerDDLCommandStart(parsetree);
+			ExecRefreshMatView((RefreshMatViewStmt *) parsetree,
+								queryString, params, completionTag);
+			break;
+
 		case T_VariableSetStmt:
 			ExecSetVariableStmt((VariableSetStmt *) parsetree);
 			break;
@@ -1238,8 +1298,9 @@ standard_ProcessUtility(Node *parsetree,
 			break;
 
 		case T_DropOwnedStmt:
-			/* no event triggers for global objects */
-			DropOwnedObjects((DropOwnedStmt *) parsetree);
+			InvokeDDLCommandEventTriggers(
+				parsetree,
+				DropOwnedObjects((DropOwnedStmt *) parsetree));
 			break;
 
 		case T_ReassignOwnedStmt:
@@ -1290,6 +1351,7 @@ standard_ProcessUtility(Node *parsetree,
 						ReindexIndex(stmt->relation);
 						break;
 					case OBJECT_TABLE:
+					case OBJECT_MATVIEW:
 						ReindexTable(stmt->relation);
 						break;
 					case OBJECT_DATABASE:
@@ -1361,6 +1423,8 @@ standard_ProcessUtility(Node *parsetree,
 				 (int) nodeTag(parsetree));
 			break;
 	}
+
+	UTILITY_END_QUERY();
 }
 
 /*
@@ -1509,9 +1573,10 @@ QueryReturnsTuples(Query *parsetree)
  * We assume it is invoked only on already-parse-analyzed statements
  * (else the contained parsetree isn't a Query yet).
  *
- * In some cases (currently, only EXPLAIN of CREATE TABLE AS/SELECT INTO),
- * potentially Query-containing utility statements can be nested.  This
- * function will drill down to a non-utility Query, or return NULL if none.
+ * In some cases (currently, only EXPLAIN of CREATE TABLE AS/SELECT INTO and
+ * CREATE MATERIALIZED VIEW), potentially Query-containing utility statements
+ * can be nested.  This function will drill down to a non-utility Query, or
+ * return NULL if none.
  */
 Query *
 UtilityContainsQuery(Node *parsetree)
@@ -1654,6 +1719,9 @@ AlterObjectTypeCommandTag(ObjectType objtype)
 			break;
 		case OBJECT_VIEW:
 			tag = "ALTER VIEW";
+			break;
+		case OBJECT_MATVIEW:
+			tag = "ALTER MATERIALIZED VIEW";
 			break;
 		default:
 			tag = "???";
@@ -1851,6 +1919,9 @@ CreateCommandTag(Node *parsetree)
 					break;
 				case OBJECT_VIEW:
 					tag = "DROP VIEW";
+					break;
+				case OBJECT_MATVIEW:
+					tag = "DROP MATERIALIZED VIEW";
 					break;
 				case OBJECT_INDEX:
 					tag = "DROP INDEX";
@@ -2113,10 +2184,24 @@ CreateCommandTag(Node *parsetree)
 			break;
 
 		case T_CreateTableAsStmt:
-			if (((CreateTableAsStmt *) parsetree)->is_select_into)
-				tag = "SELECT INTO";
-			else
-				tag = "CREATE TABLE AS";
+			switch (((CreateTableAsStmt *) parsetree)->relkind)
+			{
+				case OBJECT_TABLE:
+					if (((CreateTableAsStmt *) parsetree)->is_select_into)
+						tag = "SELECT INTO";
+					else
+						tag = "CREATE TABLE AS";
+					break;
+				case OBJECT_MATVIEW:
+					tag = "CREATE MATERIALIZED VIEW";
+					break;
+				default:
+					tag = "???";
+			}
+			break;
+
+		case T_RefreshMatViewStmt:
+			tag = "REFRESH MATERIALIZED VIEW";
 			break;
 
 		case T_VariableSetStmt:
@@ -2678,6 +2763,10 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_CreateTableAsStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
+		case T_RefreshMatViewStmt:
 			lev = LOGSTMT_DDL;
 			break;
 

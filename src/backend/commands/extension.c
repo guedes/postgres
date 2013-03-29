@@ -1562,8 +1562,7 @@ InsertExtensionTuple(const char *extName, Oid extOwner,
 		recordDependencyOn(&myself, &otherext, DEPENDENCY_NORMAL);
 	}
 	/* Post creation hook for new extension */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   ExtensionRelationId, extensionOid, 0, NULL);
+	InvokeObjectPostCreateHook(ExtensionRelationId, extensionOid, 0);
 
 	return extensionOid;
 }
@@ -2574,6 +2573,8 @@ AlterExtensionNamespace(List *names, const char *newschema)
 	changeDependencyFor(ExtensionRelationId, extensionOid,
 						NamespaceRelationId, oldNspOid, nspOid);
 
+	InvokeObjectPostAlterHook(ExtensionRelationId, extensionOid, 0);
+
 	return extensionOid;
 }
 
@@ -2857,6 +2858,8 @@ ApplyExtensionUpdates(Oid extensionOid,
 			recordDependencyOn(&myself, &otherext, DEPENDENCY_NORMAL);
 		}
 
+		InvokeObjectPostAlterHook(ExtensionRelationId, extensionOid, 0);
+
 		/*
 		 * Finally, execute the update script file
 		 */
@@ -2969,6 +2972,8 @@ ExecAlterExtensionContentsStmt(AlterExtensionContentsStmt *stmt)
 		if (object.classId == RelationRelationId)
 			extension_config_remove(extension.objectId, object.objectId);
 	}
+
+	InvokeObjectPostAlterHook(ExtensionRelationId, extension.objectId, 0);
 
 	/*
 	 * If get_object_address() opened the relation for us, we close it to keep

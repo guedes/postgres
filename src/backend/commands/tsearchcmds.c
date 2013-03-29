@@ -272,8 +272,7 @@ DefineTSParser(List *names, List *parameters)
 	makeParserDependencies(tup);
 
 	/* Post creation hook for new text search parser */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   TSParserRelationId, prsOid, 0, NULL);
+	InvokeObjectPostCreateHook(TSParserRelationId, prsOid, 0);
 
 	heap_freetuple(tup);
 
@@ -479,8 +478,7 @@ DefineTSDictionary(List *names, List *parameters)
 	makeDictionaryDependencies(tup);
 
 	/* Post creation hook for new text search dictionary */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   TSDictionaryRelationId, dictOid, 0, NULL);
+	InvokeObjectPostCreateHook(TSDictionaryRelationId, dictOid, 0);
 
 	heap_freetuple(tup);
 
@@ -613,6 +611,8 @@ AlterTSDictionary(AlterTSDictionaryStmt *stmt)
 	simple_heap_update(rel, &newtup->t_self, newtup);
 
 	CatalogUpdateIndexes(rel, newtup);
+
+	InvokeObjectPostAlterHook(TSDictionaryRelationId, dictId, 0);
 
 	/*
 	 * NOTE: because we only support altering the options, not the template,
@@ -796,8 +796,7 @@ DefineTSTemplate(List *names, List *parameters)
 	makeTSTemplateDependencies(tup);
 
 	/* Post creation hook for new text search template */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   TSTemplateRelationId, tmplOid, 0, NULL);
+	InvokeObjectPostCreateHook(TSTemplateRelationId, tmplOid, 0);
 
 	heap_freetuple(tup);
 
@@ -1092,8 +1091,7 @@ DefineTSConfiguration(List *names, List *parameters)
 	makeConfigurationDependencies(tup, false, mapRel);
 
 	/* Post creation hook for new text search configuration */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   TSConfigRelationId, cfgOid, 0, NULL);
+	InvokeObjectPostCreateHook(TSConfigRelationId, cfgOid, 0);
 
 	heap_freetuple(tup);
 
@@ -1187,6 +1185,9 @@ AlterTSConfiguration(AlterTSConfigurationStmt *stmt)
 
 	/* Update dependencies */
 	makeConfigurationDependencies(tup, true, relMap);
+
+	InvokeObjectPostAlterHook(TSConfigMapRelationId,
+							  HeapTupleGetOid(tup), 0);
 
 	heap_close(relMap, RowExclusiveLock);
 

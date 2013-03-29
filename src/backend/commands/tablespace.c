@@ -331,8 +331,7 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 	recordDependencyOnOwner(TableSpaceRelationId, tablespaceoid, ownerId);
 
 	/* Post creation hook for new tablespace */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   TableSpaceRelationId, tablespaceoid, 0, NULL);
+	InvokeObjectPostCreateHook(TableSpaceRelationId, tablespaceoid, 0);
 
 	create_tablespace_directories(location, tablespaceoid);
 
@@ -439,14 +438,7 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 					   tablespacename);
 
 	/* DROP hook for the tablespace being removed */
-	if (object_access_hook)
-	{
-		ObjectAccessDrop drop_arg;
-
-		memset(&drop_arg, 0, sizeof(ObjectAccessDrop));
-		InvokeObjectAccessHook(OAT_DROP, TableSpaceRelationId,
-							   tablespaceoid, 0, &drop_arg);
-	}
+	InvokeObjectDropHook(TableSpaceRelationId, tablespaceoid, 0);
 
 	/*
 	 * Remove the pg_tablespace tuple (this will roll back if we fail below)
@@ -885,6 +877,8 @@ RenameTableSpace(const char *oldname, const char *newname)
 	simple_heap_update(rel, &newtuple->t_self, newtuple);
 	CatalogUpdateIndexes(rel, newtuple);
 
+	InvokeObjectPostAlterHook(TableSpaceRelationId, tspId, 0);
+
 	heap_close(rel, NoLock);
 
 	return tspId;
@@ -953,6 +947,9 @@ AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt)
 	/* Update system catalog. */
 	simple_heap_update(rel, &newtuple->t_self, newtuple);
 	CatalogUpdateIndexes(rel, newtuple);
+
+	InvokeObjectPostAlterHook(TableSpaceRelationId, HeapTupleGetOid(tup), 0);
+
 	heap_freetuple(newtuple);
 
 	/* Conclude heap scan. */

@@ -110,7 +110,8 @@ typedef enum
 	DO_BLOB_DATA,
 	DO_PRE_DATA_BOUNDARY,
 	DO_POST_DATA_BOUNDARY,
-	DO_EVENT_TRIGGER
+	DO_EVENT_TRIGGER,
+	DO_REFRESH_MATVIEW
 } DumpableObjectType;
 
 typedef struct _dumpableObject
@@ -242,6 +243,7 @@ typedef struct _tableInfo
 	bool		hasrules;		/* does it have any rules? */
 	bool		hastriggers;	/* does it have any triggers? */
 	bool		hasoids;		/* does it have OIDs? */
+	bool		isscannable;	/* is valid for use in queries */
 	uint32		frozenxid;		/* for restore frozen xid */
 	Oid			toast_oid;		/* for restore toast frozen xid */
 	uint32		toast_frozenxid;	/* for restore toast frozen xid */
@@ -250,6 +252,7 @@ typedef struct _tableInfo
 	/* these two are set only if table is a sequence owned by a column: */
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
+	int			relpages;
 
 	bool		interesting;	/* true if need to collect more data */
 
@@ -313,6 +316,7 @@ typedef struct _indxInfo
 	bool		indisclustered;
 	/* if there is an associated constraint object, its dumpId: */
 	DumpId		indexconstraint;
+	int			relpages;		/* relpages of the underlying table */
 } IndxInfo;
 
 typedef struct _ruleInfo
@@ -530,6 +534,7 @@ extern void sortDumpableObjects(DumpableObject **objs, int numObjs,
 					DumpId preBoundaryId, DumpId postBoundaryId);
 extern void sortDumpableObjectsByTypeName(DumpableObject **objs, int numObjs);
 extern void sortDumpableObjectsByTypeOid(DumpableObject **objs, int numObjs);
+extern void sortDataAndIndexObjectsBySize(DumpableObject **objs, int numObjs);
 
 /*
  * version specific routines

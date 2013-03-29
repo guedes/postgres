@@ -2129,7 +2129,6 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 		recptr = XLogInsert(RM_HEAP_ID, info, rdata);
 
 		PageSetLSN(page, recptr);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	END_CRIT_SECTION();
@@ -2214,7 +2213,8 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 	 * If the new tuple is too big for storage or contains already toasted
 	 * out-of-line attributes from some other relation, invoke the toaster.
 	 */
-	if (relation->rd_rel->relkind != RELKIND_RELATION)
+	if (relation->rd_rel->relkind != RELKIND_RELATION &&
+		relation->rd_rel->relkind != RELKIND_MATVIEW)
 	{
 		/* toast table entries should never be recursively toasted */
 		Assert(!HeapTupleHasExternal(tup));
@@ -2425,7 +2425,6 @@ heap_multi_insert(Relation relation, HeapTuple *tuples, int ntuples,
 			recptr = XLogInsert(RM_HEAP2_ID, info, rdata);
 
 			PageSetLSN(page, recptr);
-			PageSetTLI(page, ThisTimeLineID);
 		}
 
 		END_CRIT_SECTION();
@@ -2786,7 +2785,6 @@ l1:
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_DELETE, rdata);
 
 		PageSetLSN(page, recptr);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	END_CRIT_SECTION();
@@ -2802,7 +2800,8 @@ l1:
 	 * because we need to look at the contents of the tuple, but it's OK to
 	 * release the content lock on the buffer first.
 	 */
-	if (relation->rd_rel->relkind != RELKIND_RELATION)
+	if (relation->rd_rel->relkind != RELKIND_RELATION &&
+		relation->rd_rel->relkind != RELKIND_MATVIEW)
 	{
 		/* toast table entries should never be recursively toasted */
 		Assert(!HeapTupleHasExternal(&tp));
@@ -3346,7 +3345,8 @@ l2:
 	 * We need to invoke the toaster if there are already any out-of-line
 	 * toasted values present, or if the new tuple is over-threshold.
 	 */
-	if (relation->rd_rel->relkind != RELKIND_RELATION)
+	if (relation->rd_rel->relkind != RELKIND_RELATION &&
+		relation->rd_rel->relkind != RELKIND_MATVIEW)
 	{
 		/* toast table entries should never be recursively toasted */
 		Assert(!HeapTupleHasExternal(&oldtup));
@@ -3567,10 +3567,8 @@ l2:
 		if (newbuf != buffer)
 		{
 			PageSetLSN(BufferGetPage(newbuf), recptr);
-			PageSetTLI(BufferGetPage(newbuf), ThisTimeLineID);
 		}
 		PageSetLSN(BufferGetPage(buffer), recptr);
-		PageSetTLI(BufferGetPage(buffer), ThisTimeLineID);
 	}
 
 	END_CRIT_SECTION();
@@ -4469,7 +4467,6 @@ failed:
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_LOCK, rdata);
 
 		PageSetLSN(page, recptr);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	END_CRIT_SECTION();
@@ -4886,7 +4883,6 @@ l4:
 			recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_LOCK_UPDATED, rdata);
 
 			PageSetLSN(page, recptr);
-			PageSetTLI(page, ThisTimeLineID);
 		}
 
 		END_CRIT_SECTION();
@@ -5030,7 +5026,6 @@ heap_inplace_update(Relation relation, HeapTuple tuple)
 		recptr = XLogInsert(RM_HEAP_ID, XLOG_HEAP_INPLACE, rdata);
 
 		PageSetLSN(page, recptr);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	END_CRIT_SECTION();
@@ -5759,17 +5754,23 @@ log_heap_freeze(Relation reln, Buffer buffer,
  * being marked all-visible, and vm_buffer is the buffer containing the
  * corresponding visibility map block.	Both should have already been modified
  * and dirtied.
+ *
+ * If checksums are enabled, we also add the heap_buffer to the chain to
+ * protect it from being torn.
  */
 XLogRecPtr
-log_heap_visible(RelFileNode rnode, BlockNumber block, Buffer vm_buffer,
+log_heap_visible(RelFileNode rnode, Buffer heap_buffer, Buffer vm_buffer,
 				 TransactionId cutoff_xid)
 {
 	xl_heap_visible xlrec;
 	XLogRecPtr	recptr;
-	XLogRecData rdata[2];
+	XLogRecData rdata[3];
+
+	Assert(BufferIsValid(heap_buffer));
+	Assert(BufferIsValid(vm_buffer));
 
 	xlrec.node = rnode;
-	xlrec.block = block;
+	xlrec.block = BufferGetBlockNumber(heap_buffer);
 	xlrec.cutoff_xid = cutoff_xid;
 
 	rdata[0].data = (char *) &xlrec;
@@ -5782,6 +5783,17 @@ log_heap_visible(RelFileNode rnode, BlockNumber block, Buffer vm_buffer,
 	rdata[1].buffer = vm_buffer;
 	rdata[1].buffer_std = false;
 	rdata[1].next = NULL;
+
+	if (DataChecksumsEnabled())
+	{
+		rdata[1].next = &(rdata[2]);
+
+		rdata[2].data = NULL;
+		rdata[2].len = 0;
+		rdata[2].buffer = heap_buffer;
+		rdata[2].buffer_std = true;
+		rdata[2].next = NULL;
+	}
 
 	recptr = XLogInsert(RM_HEAP2_ID, XLOG_HEAP2_VISIBLE, rdata);
 
@@ -5912,7 +5924,6 @@ log_newpage(RelFileNode *rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (!PageIsNew(page))
 	{
 		PageSetLSN(page, recptr);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	END_CRIT_SECTION();
@@ -5961,7 +5972,6 @@ log_newpage_buffer(Buffer buffer)
 	if (!PageIsNew(page))
 	{
 		PageSetLSN(page, recptr);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	return recptr;
@@ -6063,7 +6073,6 @@ heap_xlog_clean(XLogRecPtr lsn, XLogRecord *record)
 	 */
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(buffer);
 	UnlockReleaseBuffer(buffer);
 
@@ -6131,7 +6140,6 @@ heap_xlog_freeze(XLogRecPtr lsn, XLogRecord *record)
 	}
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(buffer);
 	UnlockReleaseBuffer(buffer);
 }
@@ -6148,8 +6156,6 @@ static void
 heap_xlog_visible(XLogRecPtr lsn, XLogRecord *record)
 {
 	xl_heap_visible *xlrec = (xl_heap_visible *) XLogRecGetData(record);
-	Buffer		buffer;
-	Page		page;
 
 	/*
 	 * If there are any Hot Standby transactions running that have an xmin
@@ -6164,39 +6170,56 @@ heap_xlog_visible(XLogRecPtr lsn, XLogRecord *record)
 		ResolveRecoveryConflictWithSnapshot(xlrec->cutoff_xid, xlrec->node);
 
 	/*
-	 * Read the heap page, if it still exists.	If the heap file has been
-	 * dropped or truncated later in recovery, we don't need to update the
-	 * page, but we'd better still update the visibility map.
+	 * If heap block was backed up, restore it. This can only happen with
+	 * checksums enabled.
 	 */
-	buffer = XLogReadBufferExtended(xlrec->node, MAIN_FORKNUM, xlrec->block,
-									RBM_NORMAL);
-	if (BufferIsValid(buffer))
+	if (record->xl_info & XLR_BKP_BLOCK(1))
 	{
-		LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-
-		page = (Page) BufferGetPage(buffer);
+		Assert(DataChecksumsEnabled());
+		(void) RestoreBackupBlock(lsn, record, 1, false, false);
+	}
+	else
+	{
+		Buffer		buffer;
+		Page		page;
 
 		/*
-		 * We don't bump the LSN of the heap page when setting the visibility
-		 * map bit, because that would generate an unworkable volume of
-		 * full-page writes.  This exposes us to torn page hazards, but since
-		 * we're not inspecting the existing page contents in any way, we
-		 * don't care.
-		 *
-		 * However, all operations that clear the visibility map bit *do* bump
-		 * the LSN, and those operations will only be replayed if the XLOG LSN
-		 * follows the page LSN.  Thus, if the page LSN has advanced past our
-		 * XLOG record's LSN, we mustn't mark the page all-visible, because
-		 * the subsequent update won't be replayed to clear the flag.
+		 * Read the heap page, if it still exists. If the heap file has been
+		 * dropped or truncated later in recovery, we don't need to update the
+		 * page, but we'd better still update the visibility map.
 		 */
-		if (lsn > PageGetLSN(page))
+		buffer = XLogReadBufferExtended(xlrec->node, MAIN_FORKNUM,
+										xlrec->block, RBM_NORMAL);
+		if (BufferIsValid(buffer))
 		{
-			PageSetAllVisible(page);
-			MarkBufferDirty(buffer);
-		}
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 
-		/* Done with heap page. */
-		UnlockReleaseBuffer(buffer);
+			page = (Page) BufferGetPage(buffer);
+
+			/*
+			 * We don't bump the LSN of the heap page when setting the
+			 * visibility map bit (unless checksums are enabled, in which case
+			 * we must), because that would generate an unworkable volume of
+			 * full-page writes.  This exposes us to torn page hazards, but
+			 * since we're not inspecting the existing page contents in any
+			 * way, we don't care.
+			 *
+			 * However, all operations that clear the visibility map bit *do*
+			 * bump the LSN, and those operations will only be replayed if the
+			 * XLOG LSN follows the page LSN.  Thus, if the page LSN has
+			 * advanced past our XLOG record's LSN, we mustn't mark the page
+			 * all-visible, because the subsequent update won't be replayed to
+			 * clear the flag.
+			 */
+			if (lsn > PageGetLSN(page))
+			{
+				PageSetAllVisible(page);
+				MarkBufferDirty(buffer);
+			}
+
+			/* Done with heap page. */
+			UnlockReleaseBuffer(buffer);
+		}
 	}
 
 	/*
@@ -6227,7 +6250,7 @@ heap_xlog_visible(XLogRecPtr lsn, XLogRecord *record)
 		 * real harm is done; and the next VACUUM will fix it.
 		 */
 		if (lsn > PageGetLSN(BufferGetPage(vmbuffer)))
-			visibilitymap_set(reln, xlrec->block, lsn, vmbuffer,
+			visibilitymap_set(reln, xlrec->block, InvalidBuffer, lsn, vmbuffer,
 							  xlrec->cutoff_xid);
 
 		ReleaseBuffer(vmbuffer);
@@ -6259,13 +6282,12 @@ heap_xlog_newpage(XLogRecPtr lsn, XLogRecord *record)
 	memcpy(page, (char *) xlrec + SizeOfHeapNewpage, BLCKSZ);
 
 	/*
-	 * The page may be uninitialized. If so, we can't set the LSN and TLI
-	 * because that would corrupt the page.
+	 * The page may be uninitialized. If so, we can't set the LSN because that
+	 * would corrupt the page.
 	 */
 	if (!PageIsNew(page))
 	{
 		PageSetLSN(page, lsn);
-		PageSetTLI(page, ThisTimeLineID);
 	}
 
 	MarkBufferDirty(buffer);
@@ -6371,7 +6393,6 @@ heap_xlog_delete(XLogRecPtr lsn, XLogRecord *record)
 	/* Make sure there is no forward chain link in t_ctid */
 	htup->t_ctid = xlrec->target.tid;
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(buffer);
 	UnlockReleaseBuffer(buffer);
 }
@@ -6470,7 +6491,6 @@ heap_xlog_insert(XLogRecPtr lsn, XLogRecord *record)
 	freespace = PageGetHeapFreeSpace(page);		/* needed to update FSM below */
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 
 	if (xlrec->all_visible_cleared)
 		PageClearAllVisible(page);
@@ -6617,7 +6637,6 @@ heap_xlog_multi_insert(XLogRecPtr lsn, XLogRecord *record)
 	freespace = PageGetHeapFreeSpace(page);		/* needed to update FSM below */
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 
 	if (xlrec->all_visible_cleared)
 		PageClearAllVisible(page);
@@ -6759,7 +6778,6 @@ heap_xlog_update(XLogRecPtr lsn, XLogRecord *record, bool hot_update)
 	}
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(obuffer);
 
 	/* Deal with new tuple */
@@ -6806,7 +6824,11 @@ newt:;
 								 ItemPointerGetBlockNumber(&(xlrec->newtid)),
 								 false);
 		if (!BufferIsValid(nbuffer))
+		{
+			if (BufferIsValid(obuffer))
+				UnlockReleaseBuffer(obuffer);
 			return;
+		}
 		page = (Page) BufferGetPage(nbuffer);
 
 		if (lsn <= PageGetLSN(page))	/* changes are applied */
@@ -6858,7 +6880,6 @@ newsame:;
 	freespace = PageGetHeapFreeSpace(page);		/* needed to update FSM below */
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(nbuffer);
 	UnlockReleaseBuffer(nbuffer);
 
@@ -6933,7 +6954,6 @@ heap_xlog_lock(XLogRecPtr lsn, XLogRecord *record)
 	/* Make sure there is no forward chain link in t_ctid */
 	htup->t_ctid = xlrec->target.tid;
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(buffer);
 	UnlockReleaseBuffer(buffer);
 }
@@ -6983,7 +7003,6 @@ heap_xlog_lock_updated(XLogRecPtr lsn, XLogRecord *record)
 	HeapTupleHeaderSetXmax(htup, xlrec->xmax);
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(buffer);
 	UnlockReleaseBuffer(buffer);
 }
@@ -7039,7 +7058,6 @@ heap_xlog_inplace(XLogRecPtr lsn, XLogRecord *record)
 		   newlen);
 
 	PageSetLSN(page, lsn);
-	PageSetTLI(page, ThisTimeLineID);
 	MarkBufferDirty(buffer);
 	UnlockReleaseBuffer(buffer);
 }
