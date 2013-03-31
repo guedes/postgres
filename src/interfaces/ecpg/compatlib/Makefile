@@ -21,7 +21,7 @@ override CPPFLAGS := -I../include -I$(top_srcdir)/src/interfaces/ecpg/include \
 	-I$(libpq_srcdir) -I$(top_srcdir)/src/include/utils $(CPPFLAGS)
 override CFLAGS += $(PTHREAD_CFLAGS)
 
-SHLIB_LINK = -L../ecpglib -lecpg -L../pgtypeslib -lpgtypes $(libpq) \
+SHLIB_LINK = -L../ecpglib -lecpg -L../pgtypeslib -lpgtypes \
 	$(filter -lintl -lm, $(LIBS)) $(PTHREAD_LIBS)
 SHLIB_PREREQS = submake-ecpglib submake-pgtypeslib
 
@@ -31,6 +31,8 @@ SHLIB_EXPORTS = exports.txt
 LIBS := $(filter-out -lpgport, $(LIBS))
 
 OBJS= informix.o $(filter snprintf.o, $(LIBOBJS))
+
+PKG_CONFIG_REQUIRES_PRIVATE = libecpg libpgtypes
 
 all: all-lib
 
