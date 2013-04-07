@@ -13,6 +13,7 @@ use Project;
 use Solution;
 use Cwd;
 use File::Copy;
+use File::Basename;
 use Config;
 use VSObjectFactory;
 use List::Util qw(first);
@@ -35,18 +36,21 @@ my @contrib_uselibpgport = (
 	'oid2name',      'pgbench',
 	'pg_standby',    'pg_archivecleanup',
 	'pg_test_fsync', 'pg_test_timing',
-	'pg_upgrade',    'vacuumlo');
+	'pg_upgrade',    'pg_xlogdump',
+	'vacuumlo');
 my @contrib_uselibpgcommon = (
 	'oid2name',      'pgbench',
 	'pg_standby',    'pg_archivecleanup',
 	'pg_test_fsync', 'pg_test_timing',
-	'pg_upgrade',    'vacuumlo');
+	'pg_upgrade',    'pg_xlogdump',
+	'vacuumlo');
 my $contrib_extralibs = { 'pgbench' => ['wsock32.lib'] };
 my $contrib_extraincludes =
   { 'tsearch2' => ['contrib/tsearch2'], 'dblink' => ['src/backend'] };
 my $contrib_extrasource = {
 	'cube' => [ 'cubescan.l', 'cubeparse.y' ],
-	'seg'  => [ 'segscan.l',  'segparse.y' ] };
+	'seg'  => [ 'segscan.l',  'segparse.y' ], 
+	};
 my @contrib_excludes = ('pgcrypto', 'intagg', 'sepgsql');
 
 sub mkvcbuild
@@ -65,8 +69,9 @@ sub mkvcbuild
 	  chklocale.c crypt.c fls.c fseeko.c getrusage.c inet_aton.c random.c
 	  srandom.c getaddrinfo.c gettimeofday.c inet_net_ntop.c kill.c open.c
 	  erand48.c snprintf.c strlcat.c strlcpy.c dirmod.c exec.c noblock.c path.c
-	  pgcheckdir.c pg_crc.c pgmkdirp.c pgsleep.c pgstrcasecmp.c qsort.c qsort_arg.c quotes.c
-	  sprompt.c tar.c thread.c getopt.c getopt_long.c dirent.c rint.c win32env.c
+	  pgcheckdir.c pg_crc.c pgmkdirp.c pgsleep.c pgstrcasecmp.c pqsignal.c
+	  qsort.c qsort_arg.c quotes.c
+	  sprompt.c tar.c thread.c wait_error.c getopt.c getopt_long.c dirent.c rint.c win32env.c
 	  win32error.c win32setlocale.c);
 
 	our @pgcommonallfiles = qw(
@@ -390,6 +395,7 @@ sub mkvcbuild
 	$psql->AddIncludeDir('src\bin\pg_dump');
 	$psql->AddIncludeDir('src\backend');
 	$psql->AddFile('src\bin\psql\psqlscan.l');
+	$psql->AddLibrary('ws2_32.lib');
 
 	my $pgdump = AddSimpleFrontend('pg_dump', 1);
 	$pgdump->AddIncludeDir('src\backend');
@@ -398,6 +404,7 @@ sub mkvcbuild
 	$pgdump->AddFile('src\bin\pg_dump\pg_dump_sort.c');
 	$pgdump->AddFile('src\bin\pg_dump\keywords.c');
 	$pgdump->AddFile('src\backend\parser\kwlookup.c');
+	$pgdump->AddLibrary('ws2_32.lib');
 
 	my $pgdumpall = AddSimpleFrontend('pg_dump', 1);
 
@@ -414,6 +421,7 @@ sub mkvcbuild
 	$pgdumpall->AddFile('src\bin\pg_dump\dumputils.c');
 	$pgdumpall->AddFile('src\bin\pg_dump\keywords.c');
 	$pgdumpall->AddFile('src\backend\parser\kwlookup.c');
+	$pgdumpall->AddLibrary('ws2_32.lib');
 
 	my $pgrestore = AddSimpleFrontend('pg_dump', 1);
 	$pgrestore->{name} = 'pg_restore';
@@ -421,6 +429,7 @@ sub mkvcbuild
 	$pgrestore->AddFile('src\bin\pg_dump\pg_restore.c');
 	$pgrestore->AddFile('src\bin\pg_dump\keywords.c');
 	$pgrestore->AddFile('src\backend\parser\kwlookup.c');
+	$pgrestore->AddLibrary('ws2_32.lib');
 
 	my $zic = $solution->AddProject('zic', 'exe', 'utils');
 	$zic->AddFiles('src\timezone', 'zic.c', 'ialloc.c', 'scheck.c',
@@ -567,6 +576,7 @@ sub mkvcbuild
 		$proj->AddIncludeDir('src\bin\psql');
 		$proj->AddReference($libpq, $libpgport, $libpgcommon);
 		$proj->AddResourceFile('src\bin\scripts', 'PostgreSQL Utility');
+		$proj->AddLibrary('ws2_32.lib');
 	}
 
 	# Regression DLL and EXE
@@ -580,6 +590,20 @@ sub mkvcbuild
 	$pgregress->AddIncludeDir('src\port');
 	$pgregress->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$pgregress->AddReference($libpgport, $libpgcommon);
+
+	# fix up pg_xlogdump once it's been set up
+	# files symlinked on Unix are copied on windows
+	my $pg_xlogdump = (grep {$_->{name} eq 'pg_xlogdump'} 
+					   @{$solution->{projects}->{contrib}} )[0];
+	$pg_xlogdump->AddDefine('FRONTEND');
+	foreach my $xf (glob('src/backend/access/rmgrdesc/*desc.c') )
+	{
+		my $bf = basename $xf;
+		copy($xf,"contrib/pg_xlogdump/$bf");
+		$pg_xlogdump->AddFile("contrib\\pg_xlogdump\\$bf");
+	}
+	copy('src/backend/access/transam/xlogreader.c',
+		 'contrib/pg_xlogdump/xlogreader.c'); 
 
 	$solution->Save();
 	return $solution->{vcver};

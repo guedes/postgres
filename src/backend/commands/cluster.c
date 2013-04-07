@@ -27,8 +27,10 @@
 #include "catalog/heap.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
+#include "catalog/objectaccess.h"
 #include "catalog/toasting.h"
 #include "commands/cluster.h"
+#include "commands/matview.h"
 #include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
@@ -379,6 +381,19 @@ cluster_rel(Oid tableOid, Oid indexOid, bool recheck, bool verbose,
 		check_index_is_clusterable(OldHeap, indexOid, recheck, AccessExclusiveLock);
 
 	/*
+	 * Quietly ignore the request if the a materialized view is not scannable.
+	 * No harm is done because there is nothing no data to deal with, and we
+	 * don't want to throw an error if this is part of a multi-relation
+	 * request -- for example, CLUSTER was run on the entire database.
+	 */
+	if (OldHeap->rd_rel->relkind == RELKIND_MATVIEW &&
+		!OldHeap->rd_isscannable)
+	{
+		relation_close(OldHeap, AccessExclusiveLock);
+		return;
+	}
+
+	/*
 	 * All predicate locks on the tuples or pages are about to be made
 	 * invalid, because we move tuples around.	Promote them to relation
 	 * locks.  Predicate locks on indexes will be promoted when they are
@@ -467,7 +482,7 @@ check_index_is_clusterable(Relation OldHeap, Oid indexOid, bool recheck, LOCKMOD
  * otherwise concurrent executions of RelationGetIndexList could miss indexes.
  */
 void
-mark_index_clustered(Relation rel, Oid indexOid)
+mark_index_clustered(Relation rel, Oid indexOid, bool is_internal)
 {
 	HeapTuple	indexTuple;
 	Form_pg_index indexForm;
@@ -527,6 +542,10 @@ mark_index_clustered(Relation rel, Oid indexOid)
 			simple_heap_update(pg_index, &indexTuple->t_self, indexTuple);
 			CatalogUpdateIndexes(pg_index, indexTuple);
 		}
+
+		InvokeObjectPostAlterHookArg(IndexRelationId, thisIndexOid, 0,
+									 InvalidOid, is_internal);
+
 		heap_freetuple(indexTuple);
 	}
 
@@ -555,7 +574,7 @@ rebuild_relation(Relation OldHeap, Oid indexOid,
 
 	/* Mark the correct index as clustered */
 	if (OidIsValid(indexOid))
-		mark_index_clustered(OldHeap, indexOid);
+		mark_index_clustered(OldHeap, indexOid, true);
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -576,7 +595,8 @@ rebuild_relation(Relation OldHeap, Oid indexOid,
 	 * rebuild the target's indexes and throw away the transient table.
 	 */
 	finish_heap_swap(tableOid, OIDNewHeap, is_system_catalog,
-					 swap_toast_by_content, false, frozenXid, frozenMulti);
+					 swap_toast_by_content, false, true,
+					 frozenXid, frozenMulti);
 }
 
 
@@ -901,6 +921,10 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 						get_namespace_name(RelationGetNamespace(OldHeap)),
 						RelationGetRelationName(OldHeap))));
 
+	if (OldHeap->rd_rel->relkind == RELKIND_MATVIEW)
+		/* Make sure the heap looks good even if no rows are written. */
+		SetRelationIsScannable(NewHeap);
+
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
 	 * copy each tuple into the NewHeap, or transiently to the tuplesort
@@ -1102,6 +1126,7 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 static void
 swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 					bool swap_toast_by_content,
+					bool is_internal,
 					TransactionId frozenXid,
 					MultiXactId frozenMulti,
 					Oid *mapped_tables)
@@ -1266,6 +1291,15 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 	}
 
 	/*
+	 * Post alter hook for modified relations. The change to r2 is always
+	 * internal, but r1 depends on the invocation context.
+	 */
+	InvokeObjectPostAlterHookArg(RelationRelationId, r1, 0,
+								 InvalidOid, is_internal);
+	InvokeObjectPostAlterHookArg(RelationRelationId, r2, 0,
+								 InvalidOid, true);
+
+	/*
 	 * If we have toast tables associated with the relations being swapped,
 	 * deal with them too.
 	 */
@@ -1280,6 +1314,7 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 									relform2->reltoastrelid,
 									target_is_pg_class,
 									swap_toast_by_content,
+									is_internal,
 									frozenXid,
 									frozenMulti,
 									mapped_tables);
@@ -1370,6 +1405,7 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 							relform2->reltoastidxid,
 							target_is_pg_class,
 							swap_toast_by_content,
+							is_internal,
 							InvalidTransactionId,
 							InvalidMultiXactId,
 							mapped_tables);
@@ -1409,6 +1445,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 				 bool is_system_catalog,
 				 bool swap_toast_by_content,
 				 bool check_constraints,
+				 bool is_internal,
 				 TransactionId frozenXid,
 				 MultiXactId frozenMulti)
 {
@@ -1426,8 +1463,8 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	 */
 	swap_relation_files(OIDOldHeap, OIDNewHeap,
 						(OIDOldHeap == RelationRelationId),
-						swap_toast_by_content, frozenXid, frozenMulti,
-						mapped_tables);
+						swap_toast_by_content, is_internal,
+						frozenXid, frozenMulti, mapped_tables);
 
 	/*
 	 * If it's a system catalog, queue an sinval message to flush all
@@ -1508,13 +1545,13 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 			snprintf(NewToastName, NAMEDATALEN, "pg_toast_%u",
 					 OIDOldHeap);
 			RenameRelationInternal(newrel->rd_rel->reltoastrelid,
-								   NewToastName);
+								   NewToastName, true);
 
 			/* ... and its index too */
 			snprintf(NewToastName, NAMEDATALEN, "pg_toast_%u_index",
 					 OIDOldHeap);
 			RenameRelationInternal(toastidx,
-								   NewToastName);
+								   NewToastName, true);
 		}
 		relation_close(newrel, NoLock);
 	}

@@ -179,6 +179,7 @@ _copyModifyTable(const ModifyTable *from)
 	COPY_SCALAR_FIELD(resultRelIndex);
 	COPY_NODE_FIELD(plans);
 	COPY_NODE_FIELD(returningLists);
+	COPY_NODE_FIELD(fdwPrivLists);
 	COPY_NODE_FIELD(rowMarks);
 	COPY_SCALAR_FIELD(epqParam);
 
@@ -1032,6 +1033,7 @@ _copyIntoClause(const IntoClause *from)
 	COPY_SCALAR_FIELD(onCommit);
 	COPY_STRING_FIELD(tableSpaceName);
 	COPY_SCALAR_FIELD(skipData);
+	COPY_SCALAR_FIELD(relkind);
 
 	return newnode;
 }
@@ -1970,6 +1972,7 @@ _copyRangeTblEntry(const RangeTblEntry *from)
 	COPY_SCALAR_FIELD(rtekind);
 	COPY_SCALAR_FIELD(relid);
 	COPY_SCALAR_FIELD(relkind);
+	COPY_SCALAR_FIELD(isResultRel);
 	COPY_NODE_FIELD(subquery);
 	COPY_SCALAR_FIELD(security_barrier);
 	COPY_SCALAR_FIELD(jointype);
@@ -2703,6 +2706,7 @@ _copyCopyStmt(const CopyStmt *from)
 	COPY_NODE_FIELD(query);
 	COPY_NODE_FIELD(attlist);
 	COPY_SCALAR_FIELD(is_from);
+	COPY_SCALAR_FIELD(is_program);
 	COPY_STRING_FIELD(filename);
 	COPY_NODE_FIELD(options);
 
@@ -3227,7 +3231,19 @@ _copyCreateTableAsStmt(const CreateTableAsStmt *from)
 
 	COPY_NODE_FIELD(query);
 	COPY_NODE_FIELD(into);
+	COPY_SCALAR_FIELD(relkind);
 	COPY_SCALAR_FIELD(is_select_into);
+
+	return newnode;
+}
+
+static RefreshMatViewStmt *
+_copyRefreshMatViewStmt(const RefreshMatViewStmt *from)
+{
+	RefreshMatViewStmt *newnode = makeNode(RefreshMatViewStmt);
+
+	COPY_SCALAR_FIELD(skipData);
+	COPY_NODE_FIELD(relation);
 
 	return newnode;
 }
@@ -4301,6 +4317,9 @@ copyObject(const void *from)
 			break;
 		case T_CreateTableAsStmt:
 			retval = _copyCreateTableAsStmt(from);
+			break;
+		case T_RefreshMatViewStmt:
+			retval = _copyRefreshMatViewStmt(from);
 			break;
 		case T_CreateSeqStmt:
 			retval = _copyCreateSeqStmt(from);

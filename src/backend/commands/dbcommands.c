@@ -524,8 +524,7 @@ createdb(const CreatedbStmt *stmt)
 	copyTemplateDependencies(src_dboid, dboid);
 
 	/* Post creation hook for new database */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   DatabaseRelationId, dboid, 0, NULL);
+	InvokeObjectPostCreateHook(DatabaseRelationId, dboid, 0);
 
 	/*
 	 * Force a checkpoint before starting the copy. This will force dirty
@@ -816,14 +815,7 @@ dropdb(const char *dbname, bool missing_ok)
 					   dbname);
 
 	/* DROP hook for the database being removed */
-	if (object_access_hook)
-	{
-		ObjectAccessDrop drop_arg;
-
-		memset(&drop_arg, 0, sizeof(ObjectAccessDrop));
-		InvokeObjectAccessHook(OAT_DROP,
-							   DatabaseRelationId, db_id, 0, &drop_arg);
-	}
+	InvokeObjectDropHook(DatabaseRelationId, db_id, 0);
 
 	/*
 	 * Disallow dropping a DB that is marked istemplate.  This is just to
@@ -1004,6 +996,8 @@ RenameDatabase(const char *oldname, const char *newname)
 	namestrcpy(&(((Form_pg_database) GETSTRUCT(newtup))->datname), newname);
 	simple_heap_update(rel, &newtup->t_self, newtup);
 	CatalogUpdateIndexes(rel, newtup);
+
+	InvokeObjectPostAlterHook(DatabaseRelationId, db_id, 0);
 
 	/*
 	 * Close pg_database, but keep lock till commit.
@@ -1242,6 +1236,9 @@ movedb(const char *dbname, const char *tblspcname)
 		/* Update indexes */
 		CatalogUpdateIndexes(pgdbrel, newtuple);
 
+		InvokeObjectPostAlterHook(DatabaseRelationId,
+								  HeapTupleGetOid(newtuple), 0);
+
 		systable_endscan(sysscan);
 
 		/*
@@ -1439,6 +1436,9 @@ AlterDatabase(AlterDatabaseStmt *stmt, bool isTopLevel)
 	/* Update indexes */
 	CatalogUpdateIndexes(rel, newtuple);
 
+	InvokeObjectPostAlterHook(DatabaseRelationId,
+							  HeapTupleGetOid(newtuple), 0);
+
 	systable_endscan(scan);
 
 	/* Close pg_database, but keep lock till commit */
@@ -1577,6 +1577,8 @@ AlterDatabaseOwner(const char *dbname, Oid newOwnerId)
 		changeDependencyOnOwner(DatabaseRelationId, HeapTupleGetOid(tuple),
 								newOwnerId);
 	}
+
+	InvokeObjectPostAlterHook(DatabaseRelationId, HeapTupleGetOid(tuple), 0);
 
 	systable_endscan(scan);
 

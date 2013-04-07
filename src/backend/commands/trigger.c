@@ -446,7 +446,8 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 											  NULL,
 											  true,		/* islocal */
 											  0,		/* inhcount */
-											  true);	/* isnoinherit */
+											  true,		/* isnoinherit */
+											  isInternal);	/* is_internal */
 	}
 
 	/*
@@ -742,8 +743,8 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 							   DEPENDENCY_NORMAL);
 
 	/* Post creation hook for new trigger */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   TriggerRelationId, trigoid, 0, NULL);
+	InvokeObjectPostCreateHookArg(TriggerRelationId, trigoid, 0,
+								  isInternal);
 
 	/* Keep lock on target rel until end of xact */
 	heap_close(rel, NoLock);
@@ -1277,6 +1278,9 @@ renametrig(RenameStmt *stmt)
 		/* keep system catalog indexes current */
 		CatalogUpdateIndexes(tgrel, tuple);
 
+		InvokeObjectPostAlterHook(TriggerRelationId,
+								  HeapTupleGetOid(tuple), 0);
+
 		/*
 		 * Invalidate relation's relcache entry so that other backends (and
 		 * this one too!) are sent SI message to make them rebuild relcache
@@ -1392,6 +1396,9 @@ EnableDisableTrigger(Relation rel, const char *tgname,
 
 			changed = true;
 		}
+
+		InvokeObjectPostAlterHook(TriggerRelationId,
+								  HeapTupleGetOid(tuple), 0);
 	}
 
 	systable_endscan(tgscan);

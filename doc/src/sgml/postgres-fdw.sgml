@@ -61,7 +61,10 @@
 
  <para>
   Now you need only <command>SELECT</> from a foreign table to access
-  the data stored in its underlying remote table.
+  the data stored in its underlying remote table.  You can also modify
+  the remote table using <command>INSERT</>, <command>UPDATE</>, or
+  <command>DELETE</>.  (Of course, the remote user you have specified
+  in your user mapping must have privileges to do these things.)
  </para>
 
  <para>
@@ -312,6 +315,26 @@
   <para>
    The query that is actually sent to the remote server for execution can
    be examined using <command>EXPLAIN VERBOSE</>.
+  </para>
+ </sect2>
+
+ <sect2>
+  <title>Cross-Version Compatibility</title>
+
+  <para>
+   <filename>postgres_fdw</> can be used with remote servers dating back
+   to <productname>PostgreSQL</> 8.3.  Read-only capability is available
+   back to 8.1.  A limitation however is that <filename>postgres_fdw</>
+   generally assumes that immutable built-in functions and operators are
+   safe to send to the remote server for execution, if they appear in a
+   <literal>WHERE</> clause for a foreign table.  Thus, a built-in
+   function that was added since the remote server's release might be sent
+   to it for execution, resulting in <quote>function does not exist</> or
+   a similar error.  This type of failure can be worked around by
+   rewriting the query, for example by embedding the foreign table
+   reference in a sub-<literal>SELECT</> with <literal>OFFSET 0</> as an
+   optimization fence, and placing the problematic function or operator
+   outside the sub-<literal>SELECT</>.
   </para>
  </sect2>
 

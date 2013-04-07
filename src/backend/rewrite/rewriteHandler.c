@@ -16,6 +16,7 @@
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "foreign/fdwapi.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
@@ -1156,6 +1157,7 @@ rewriteValuesRTE(RangeTblEntry *rte, Relation target_relation, List *attrnos)
  * is a regular table, the junk TLE emits the ctid attribute of the original
  * row.  When the target relation is a view, there is no ctid, so we instead
  * emit a whole-row Var that will contain the "old" values of the view row.
+ * If it's a foreign table, we let the FDW decide what to add.
  *
  * For UPDATE queries, this is applied after rewriteTargetListIU.  The
  * ordering isn't actually critical at the moment.
@@ -1168,7 +1170,8 @@ rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
 	const char *attrname;
 	TargetEntry *tle;
 
-	if (target_relation->rd_rel->relkind == RELKIND_RELATION)
+	if (target_relation->rd_rel->relkind == RELKIND_RELATION ||
+		target_relation->rd_rel->relkind == RELKIND_MATVIEW)
 	{
 		/*
 		 * Emit CTID so that executor can find the row to update or delete.
@@ -1181,6 +1184,21 @@ rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
 					  0);
 
 		attrname = "ctid";
+	}
+	else if (target_relation->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		/*
+		 * Let the foreign table's FDW add whatever junk TLEs it wants.
+		 */
+		FdwRoutine *fdwroutine;
+
+		fdwroutine = GetFdwRoutineForRelation(target_relation, false);
+
+		if (fdwroutine->AddForeignUpdateTargets != NULL)
+			fdwroutine->AddForeignUpdateTargets(parsetree, target_rte,
+												target_relation);
+
+		return;
 	}
 	else
 	{
@@ -1443,17 +1461,13 @@ markQueryForLocking(Query *qry, Node *jtnode,
 
 		if (rte->rtekind == RTE_RELATION)
 		{
-			/* ignore foreign tables */
-			if (rte->relkind != RELKIND_FOREIGN_TABLE)
-			{
-				applyLockingClause(qry, rti, strength, noWait, pushedDown);
-				rte->requiredPerms |= ACL_SELECT_FOR_UPDATE;
-			}
+			applyLockingClause(qry, rti, strength, noWait, pushedDown);
+			rte->requiredPerms |= ACL_SELECT_FOR_UPDATE;
 		}
 		else if (rte->rtekind == RTE_SUBQUERY)
 		{
 			applyLockingClause(qry, rti, strength, noWait, pushedDown);
-			/* FOR [KEY] UPDATE/SHARE of subquery is propagated to subquery's rels */
+			/* FOR UPDATE/SHARE of subquery is propagated to subquery's rels */
 			markQueryForLocking(rte->subquery, (Node *) rte->subquery->jointree,
 								strength, noWait, true);
 		}
@@ -1589,6 +1603,23 @@ fireRIRrules(Query *parsetree, List *activeRIRs, bool forUpdatePushedDown)
 		 * AcquireRewriteLocks should have locked the rel already.
 		 */
 		rel = heap_open(rte->relid, NoLock);
+
+		/*
+		 * Ignore RIR rules for a materialized view, if it is scannable.
+		 *
+		 * NOTE: This is assuming that if an MV is scannable then we always
+		 * want to use the existing contents, and if it is not scannable we
+		 * cannot have gotten to this point unless it is being populated
+		 * (otherwise an error should be thrown).  It would be nice to have
+		 * some way to confirm that we're doing the right thing here, but rule
+		 * expansion doesn't give us a lot to work with, so we are trusting
+		 * earlier validations to throw error if needed.
+		 */
+		if (rel->rd_rel->relkind == RELKIND_MATVIEW && rel->rd_isscannable)
+		{
+			heap_close(rel, NoLock);
+			continue;
+		}
 
 		/*
 		 * Collect the RIR rules that we must apply

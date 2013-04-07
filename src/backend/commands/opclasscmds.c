@@ -309,8 +309,7 @@ CreateOpFamily(char *amname, char *opfname, Oid namespaceoid, Oid amoid)
 	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* Post creation hook for new operator family */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   OperatorFamilyRelationId, opfamilyoid, 0, NULL);
+	InvokeObjectPostCreateHook(OperatorFamilyRelationId, opfamilyoid, 0);
 
 	heap_close(rel, RowExclusiveLock);
 
@@ -710,8 +709,7 @@ DefineOpClass(CreateOpClassStmt *stmt)
 	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* Post creation hook for new operator class */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   OperatorClassRelationId, opclassoid, 0, NULL);
+	InvokeObjectPostCreateHook(OperatorClassRelationId, opclassoid, 0);
 
 	heap_close(rel, RowExclusiveLock);
 
@@ -1376,6 +1374,9 @@ storeOperators(List *opfamilyname, Oid amoid,
 			referenced.objectSubId = 0;
 			recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 		}
+		/* Post create hook of this access method operator */
+		InvokeObjectPostCreateHook(AccessMethodOperatorRelationId,
+								   entryoid, 0);
 	}
 
 	heap_close(rel, RowExclusiveLock);
@@ -1475,6 +1476,9 @@ storeProcedures(List *opfamilyname, Oid amoid,
 			referenced.objectSubId = 0;
 			recordDependencyOn(&myself, &referenced, DEPENDENCY_AUTO);
 		}
+		/* Post create hook of access method procedure */
+		InvokeObjectPostCreateHook(AccessMethodProcedureRelationId,
+								   entryoid, 0);
 	}
 
 	heap_close(rel, RowExclusiveLock);

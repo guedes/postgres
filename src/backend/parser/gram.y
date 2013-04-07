@@ -121,6 +121,13 @@ typedef struct PrivTarget
 #define CAS_NOT_VALID				0x10
 #define CAS_NO_INHERIT				0x20
 
+/*
+ * In the IntoClause structure there is a char value which will eventually be
+ * set to RELKIND_RELATION or RELKIND_MATVIEW based on the relkind field in
+ * the statement-level structure, which is an ObjectType. Define the default
+ * here, which should always be overridden later.
+ */
+#define INTO_CLAUSE_RELKIND_DEFAULT	'\0'
 
 #define parser_yyerror(msg)  scanner_yyerror(msg, yyscanner)
 #define parser_errposition(pos)  scanner_errposition(pos, yyscanner)
@@ -248,6 +255,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 		DeallocateStmt PrepareStmt ExecuteStmt
 		DropOwnedStmt ReassignOwnedStmt
 		AlterTSConfigurationStmt AlterTSDictionaryStmt
+		CreateMatViewStmt RefreshMatViewStmt
 
 %type <node>	select_no_parens select_with_parens select_clause
 				simple_select values_clause
@@ -322,7 +330,6 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <list>	stmtblock stmtmulti
 				OptTableElementList TableElementList OptInherit definition
 				OptTypedTableElementList TypedTableElementList
-				OptForeignTableElementList ForeignTableElementList
 				reloptions opt_reloptions
 				OptWith opt_distinct opt_definition func_args func_args_list
 				func_args_with_defaults func_args_with_defaults_list
@@ -351,7 +358,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <defelt>	fdw_option
 
 %type <range>	OptTempTableName
-%type <into>	into_clause create_as_target
+%type <into>	into_clause create_as_target create_mv_target
 
 %type <defelt>	createfunc_opt_item common_func_opt_item dostmt_opt_item
 %type <fun_param> func_arg func_arg_with_default table_func_column
@@ -360,6 +367,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 %type <boolean>  opt_trusted opt_restart_seqs
 %type <ival>	 OptTemp
+%type <ival>	 OptNoLog
 %type <oncommit> OnCommitOption
 
 %type <ival>	for_locking_strength
@@ -381,7 +389,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <boolean> opt_freeze opt_default opt_recheck
 %type <defelt>	opt_binary opt_oids copy_delimiter
 
-%type <boolean> copy_from
+%type <boolean> copy_from opt_program
 
 %type <ival>	opt_column event cursor_options opt_hold opt_set_data
 %type <objtype>	reindex_type drop_type comment_type security_label_type
@@ -399,7 +407,6 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <vsetstmt> set_rest set_rest_more SetResetClause FunctionSetResetClause
 
 %type <node>	TableElement TypedTableElement ConstraintElem TableFuncElement
-				ForeignTableElement
 %type <node>	columnDef columnOptions
 %type <defelt>	def_elem reloption_elem old_aggr_elem
 %type <node>	def_arg columnElem where_clause where_or_current_clause
@@ -557,7 +564,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL
 	LOCALTIME LOCALTIMESTAMP LOCATION LOCK_P
 
-	MAPPING MATCH MAXVALUE MINUTE_P MINVALUE MODE MONTH_P MOVE
+	MAPPING MATCH MATERIALIZED MAXVALUE MINUTE_P MINVALUE MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NEXT NO NONE
 	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
@@ -568,11 +575,11 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	PARSER PARTIAL PARTITION PASSING PASSWORD PLACING PLANS POSITION
 	PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
-	PRIOR PRIVILEGES PROCEDURAL PROCEDURE
+	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROGRAM
 
 	QUOTE
 
-	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF REFERENCES REINDEX
+	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF REFERENCES REFRESH REINDEX
 	RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA
 	RESET RESTART RESTRICT RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK
 	ROW ROWS RULE
@@ -745,6 +752,7 @@ stmt :
 			| CreateForeignTableStmt
 			| CreateFunctionStmt
 			| CreateGroupStmt
+			| CreateMatViewStmt
 			| CreateOpClassStmt
 			| CreateOpFamilyStmt
 			| AlterOpFamilyStmt
@@ -790,6 +798,7 @@ stmt :
 			| IndexStmt
 			| InsertStmt
 			| ListenStmt
+			| RefreshMatViewStmt
 			| LoadStmt
 			| LockStmt
 			| NotifyStmt
@@ -1704,9 +1713,9 @@ DiscardStmt:
 
 /*****************************************************************************
  *
- *	ALTER [ TABLE | INDEX | SEQUENCE | VIEW ] variations
+ *	ALTER [ TABLE | INDEX | SEQUENCE | VIEW | MATERIALIZED VIEW ] variations
  *
- * Note: we accept all subcommands for each of the four variants, and sort
+ * Note: we accept all subcommands for each of the five variants, and sort
  * out what's really legal at execution time.
  *****************************************************************************/
 
@@ -1780,6 +1789,24 @@ AlterTableStmt:
 					n->relation = $5;
 					n->cmds = $6;
 					n->relkind = OBJECT_VIEW;
+					n->missing_ok = true;
+					$$ = (Node *)n;
+				}
+		|	ALTER MATERIALIZED VIEW qualified_name alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $4;
+					n->cmds = $5;
+					n->relkind = OBJECT_MATVIEW;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+		|	ALTER MATERIALIZED VIEW IF_P EXISTS qualified_name alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $6;
+					n->cmds = $7;
+					n->relkind = OBJECT_MATVIEW;
 					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
@@ -2309,7 +2336,10 @@ ClosePortalStmt:
  *
  *		QUERY :
  *				COPY relname [(columnList)] FROM/TO file [WITH] [(options)]
- *				COPY ( SELECT ... ) TO file [WITH] [(options)]
+ *				COPY ( SELECT ... ) TO file	[WITH] [(options)]
+ *
+ *				where 'file' can be one of:
+ *				{ PROGRAM 'command' | STDIN | STDOUT | 'filename' }
  *
  *				In the preferred syntax the options are comma-separated
  *				and use generic identifiers instead of keywords.  The pre-9.0
@@ -2324,14 +2354,21 @@ ClosePortalStmt:
  *****************************************************************************/
 
 CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
-			copy_from copy_file_name copy_delimiter opt_with copy_options
+			copy_from opt_program copy_file_name copy_delimiter opt_with copy_options
 				{
 					CopyStmt *n = makeNode(CopyStmt);
 					n->relation = $3;
 					n->query = NULL;
 					n->attlist = $4;
 					n->is_from = $6;
-					n->filename = $7;
+					n->is_program = $7;
+					n->filename = $8;
+
+					if (n->is_program && n->filename == NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("STDIN/STDOUT not allowed with PROGRAM"),
+								 parser_errposition(@8)));
 
 					n->options = NIL;
 					/* Concatenate user-supplied flags */
@@ -2339,21 +2376,29 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
 						n->options = lappend(n->options, $2);
 					if ($5)
 						n->options = lappend(n->options, $5);
-					if ($8)
-						n->options = lappend(n->options, $8);
-					if ($10)
-						n->options = list_concat(n->options, $10);
+					if ($9)
+						n->options = lappend(n->options, $9);
+					if ($11)
+						n->options = list_concat(n->options, $11);
 					$$ = (Node *)n;
 				}
-			| COPY select_with_parens TO copy_file_name opt_with copy_options
+			| COPY select_with_parens TO opt_program copy_file_name opt_with copy_options
 				{
 					CopyStmt *n = makeNode(CopyStmt);
 					n->relation = NULL;
 					n->query = $2;
 					n->attlist = NIL;
 					n->is_from = false;
-					n->filename = $4;
-					n->options = $6;
+					n->is_program = $4;
+					n->filename = $5;
+					n->options = $7;
+
+					if (n->is_program && n->filename == NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("STDIN/STDOUT not allowed with PROGRAM"),
+								 parser_errposition(@5)));
+
 					$$ = (Node *)n;
 				}
 		;
@@ -2361,6 +2406,11 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
 copy_from:
 			FROM									{ $$ = TRUE; }
 			| TO									{ $$ = FALSE; }
+		;
+
+opt_program:
+			PROGRAM									{ $$ = TRUE; }
+			| /* EMPTY */							{ $$ = FALSE; }
 		;
 
 /*
@@ -3163,6 +3213,7 @@ CreateAsStmt:
 					CreateTableAsStmt *ctas = makeNode(CreateTableAsStmt);
 					ctas->query = $6;
 					ctas->into = $4;
+					ctas->relkind = OBJECT_TABLE;
 					ctas->is_select_into = false;
 					/* cram additional flags into the IntoClause */
 					$4->rel->relpersistence = $2;
@@ -3181,6 +3232,7 @@ create_as_target:
 					$$->onCommit = $4;
 					$$->tableSpaceName = $5;
 					$$->skipData = false;		/* might get changed later */
+					$$->relkind = INTO_CLAUSE_RELKIND_DEFAULT;
 				}
 		;
 
@@ -3188,6 +3240,65 @@ opt_with_data:
 			WITH DATA_P								{ $$ = TRUE; }
 			| WITH NO DATA_P						{ $$ = FALSE; }
 			| /*EMPTY*/								{ $$ = TRUE; }
+		;
+
+
+/*****************************************************************************
+ *
+ *		QUERY :
+ *				CREATE MATERIALIZED VIEW relname AS SelectStmt
+ *
+ *****************************************************************************/
+
+CreateMatViewStmt:
+		CREATE OptNoLog MATERIALIZED VIEW create_mv_target AS SelectStmt opt_with_data
+				{
+					CreateTableAsStmt *ctas = makeNode(CreateTableAsStmt);
+					ctas->query = $7;
+					ctas->into = $5;
+					ctas->relkind = OBJECT_MATVIEW;
+					ctas->is_select_into = false;
+					/* cram additional flags into the IntoClause */
+					$5->rel->relpersistence = $2;
+					$5->skipData = !($8);
+					$$ = (Node *) ctas;
+				}
+		;
+
+create_mv_target:
+			qualified_name opt_column_list opt_reloptions OptTableSpace
+				{
+					$$ = makeNode(IntoClause);
+					$$->rel = $1;
+					$$->colNames = $2;
+					$$->options = $3;
+					$$->onCommit = ONCOMMIT_NOOP;
+					$$->tableSpaceName = $4;
+					$$->skipData = false;		/* might get changed later */
+					$$->relkind = INTO_CLAUSE_RELKIND_DEFAULT;
+				}
+		;
+
+OptNoLog:	UNLOGGED					{ $$ = RELPERSISTENCE_UNLOGGED; }
+			| /*EMPTY*/					{ $$ = RELPERSISTENCE_PERMANENT; }
+		;
+
+
+/*****************************************************************************
+ *
+ *		QUERY :
+ *				REFRESH MATERIALIZED VIEW qualified_name
+ *
+ *****************************************************************************/
+
+RefreshMatViewStmt:
+			REFRESH MATERIALIZED VIEW qualified_name opt_with_data
+				{
+					RefreshMatViewStmt *n = makeNode(RefreshMatViewStmt);
+					n->relation = $4;
+					n->skipData = !($5);
+					$$ = (Node *) n;
+				}
 		;
 
 
@@ -3708,6 +3819,15 @@ AlterExtensionContentsStmt:
 					n->objname = $6;
 					$$ = (Node *)n;
 				}
+			| ALTER EXTENSION name add_drop MATERIALIZED VIEW any_name
+				{
+					AlterExtensionContentsStmt *n = makeNode(AlterExtensionContentsStmt);
+					n->extname = $3;
+					n->action = $4;
+					n->objtype = OBJECT_MATVIEW;
+					n->objname = $7;
+					$$ = (Node *)n;
+				}
 			| ALTER EXTENSION name add_drop FOREIGN TABLE any_name
 				{
 					AlterExtensionContentsStmt *n = makeNode(AlterExtensionContentsStmt);
@@ -4015,55 +4135,35 @@ AlterForeignServerStmt: ALTER SERVER name foreign_server_version alter_generic_o
 
 CreateForeignTableStmt:
 		CREATE FOREIGN TABLE qualified_name
-			OptForeignTableElementList
+			'(' OptTableElementList ')'
 			SERVER name create_generic_options
 				{
 					CreateForeignTableStmt *n = makeNode(CreateForeignTableStmt);
 					$4->relpersistence = RELPERSISTENCE_PERMANENT;
 					n->base.relation = $4;
-					n->base.tableElts = $5;
+					n->base.tableElts = $6;
 					n->base.inhRelations = NIL;
 					n->base.if_not_exists = false;
 					/* FDW-specific data */
-					n->servername = $7;
-					n->options = $8;
+					n->servername = $9;
+					n->options = $10;
 					$$ = (Node *) n;
 				}
 		| CREATE FOREIGN TABLE IF_P NOT EXISTS qualified_name
-			OptForeignTableElementList
+			'(' OptTableElementList ')'
 			SERVER name create_generic_options
 				{
 					CreateForeignTableStmt *n = makeNode(CreateForeignTableStmt);
 					$7->relpersistence = RELPERSISTENCE_PERMANENT;
 					n->base.relation = $7;
-					n->base.tableElts = $8;
+					n->base.tableElts = $9;
 					n->base.inhRelations = NIL;
 					n->base.if_not_exists = true;
 					/* FDW-specific data */
-					n->servername = $10;
-					n->options = $11;
+					n->servername = $12;
+					n->options = $13;
 					$$ = (Node *) n;
 				}
-		;
-
-OptForeignTableElementList:
-			'(' ForeignTableElementList ')'			{ $$ = $2; }
-			| '(' ')'								{ $$ = NIL; }
-		;
-
-ForeignTableElementList:
-			ForeignTableElement
-				{
-					$$ = list_make1($1);
-				}
-			| ForeignTableElementList ',' ForeignTableElement
-				{
-					$$ = lappend($1, $3);
-				}
-		;
-
-ForeignTableElement:
-			columnDef					{ $$ = $1; }
 		;
 
 /*****************************************************************************
@@ -4378,7 +4478,6 @@ DropTrigStmt:
  *
  *		QUERIES :
  *				CREATE EVENT TRIGGER ...
- *				DROP EVENT TRIGGER ...
  *				ALTER EVENT TRIGGER ...
  *
  *****************************************************************************/
@@ -5034,6 +5133,7 @@ DropStmt:	DROP drop_type IF_P EXISTS any_name_list opt_drop_behavior
 drop_type:	TABLE									{ $$ = OBJECT_TABLE; }
 			| SEQUENCE								{ $$ = OBJECT_SEQUENCE; }
 			| VIEW									{ $$ = OBJECT_VIEW; }
+			| MATERIALIZED VIEW						{ $$ = OBJECT_MATVIEW; }
 			| INDEX									{ $$ = OBJECT_INDEX; }
 			| FOREIGN TABLE							{ $$ = OBJECT_FOREIGN_TABLE; }
 			| EVENT TRIGGER 						{ $$ = OBJECT_EVENT_TRIGGER; }
@@ -5094,19 +5194,25 @@ opt_restart_seqs:
  *	The COMMENT ON statement can take different forms based upon the type of
  *	the object associated with the comment. The form of the statement is:
  *
- *	COMMENT ON [ [ DATABASE | DOMAIN | INDEX | SEQUENCE | TABLE | TYPE | VIEW |
- *				   COLLATION | CONVERSION | LANGUAGE | OPERATOR CLASS |
- *				   LARGE OBJECT | CAST | COLUMN | SCHEMA | TABLESPACE |
- *				   EXTENSION | ROLE | TEXT SEARCH PARSER |
- *				   TEXT SEARCH DICTIONARY | TEXT SEARCH TEMPLATE |
- *				   TEXT SEARCH CONFIGURATION | FOREIGN TABLE |
- *				   FOREIGN DATA WRAPPER | SERVER | EVENT TRIGGER ] <objname> |
+ *	COMMENT ON [ [ CONVERSION | COLLATION | DATABASE | DOMAIN |
+ *                 EXTENSION | EVENT TRIGGER | FOREIGN DATA WRAPPER |
+ *                 FOREIGN TABLE | INDEX | [PROCEDURAL] LANGUAGE |
+ *                 MATERIALIZED VIEW | ROLE | SCHEMA | SEQUENCE |
+ *                 SERVER | TABLE | TABLESPACE |
+ *                 TEXT SEARCH CONFIGURATION | TEXT SEARCH DICTIONARY |
+ *                 TEXT SEARCH PARSER | TEXT SEARCH TEMPLATE | TYPE |
+ *                 VIEW] <objname> |
  *				 AGGREGATE <aggname> (arg1, ...) |
- *				 FUNCTION <funcname> (arg1, arg2, ...) |
- *				 OPERATOR <op> (leftoperand_typ, rightoperand_typ) |
- *				 TRIGGER <triggername> ON <relname> |
+ *				 CAST (<src type> AS <dst type>) |
+ *				 COLUMN <relname>.<colname> |
  *				 CONSTRAINT <constraintname> ON <relname> |
- *				 RULE <rulename> ON <relname> ]
+ *				 FUNCTION <funcname> (arg1, arg2, ...) |
+ *				 LARGE OBJECT <oid> |
+ *				 OPERATOR <op> (leftoperand_typ, rightoperand_typ) |
+ *				 OPERATOR CLASS <name> USING <access-method> |
+ *				 OPERATOR FAMILY <name> USING <access-method> |
+ *				 RULE <rulename> ON <relname> |
+ *				 TRIGGER <triggername> ON <relname> ]
  *			   IS 'text'
  *
  *****************************************************************************/
@@ -5230,38 +5336,6 @@ CommentStmt:
 					n->comment = $7;
 					$$ = (Node *) n;
 				}
-			| COMMENT ON TEXT_P SEARCH PARSER any_name IS comment_text
-				{
-					CommentStmt *n = makeNode(CommentStmt);
-					n->objtype = OBJECT_TSPARSER;
-					n->objname = $6;
-					n->comment = $8;
-					$$ = (Node *) n;
-				}
-			| COMMENT ON TEXT_P SEARCH DICTIONARY any_name IS comment_text
-				{
-					CommentStmt *n = makeNode(CommentStmt);
-					n->objtype = OBJECT_TSDICTIONARY;
-					n->objname = $6;
-					n->comment = $8;
-					$$ = (Node *) n;
-				}
-			| COMMENT ON TEXT_P SEARCH TEMPLATE any_name IS comment_text
-				{
-					CommentStmt *n = makeNode(CommentStmt);
-					n->objtype = OBJECT_TSTEMPLATE;
-					n->objname = $6;
-					n->comment = $8;
-					$$ = (Node *) n;
-				}
-			| COMMENT ON TEXT_P SEARCH CONFIGURATION any_name IS comment_text
-				{
-					CommentStmt *n = makeNode(CommentStmt);
-					n->objtype = OBJECT_TSCONFIGURATION;
-					n->objname = $6;
-					n->comment = $8;
-					$$ = (Node *) n;
-				}
 		;
 
 comment_type:
@@ -5274,6 +5348,7 @@ comment_type:
 			| DOMAIN_P							{ $$ = OBJECT_DOMAIN; }
 			| TYPE_P							{ $$ = OBJECT_TYPE; }
 			| VIEW								{ $$ = OBJECT_VIEW; }
+			| MATERIALIZED VIEW					{ $$ = OBJECT_MATVIEW; }
 			| COLLATION							{ $$ = OBJECT_COLLATION; }
 			| CONVERSION_P						{ $$ = OBJECT_CONVERSION; }
 			| TABLESPACE						{ $$ = OBJECT_TABLESPACE; }
@@ -5283,6 +5358,10 @@ comment_type:
 			| SERVER							{ $$ = OBJECT_FOREIGN_SERVER; }
 			| FOREIGN DATA_P WRAPPER			{ $$ = OBJECT_FDW; }
 			| EVENT TRIGGER						{ $$ = OBJECT_EVENT_TRIGGER; }
+			| TEXT_P SEARCH CONFIGURATION		{ $$ = OBJECT_TSCONFIGURATION; }
+			| TEXT_P SEARCH DICTIONARY			{ $$ = OBJECT_TSDICTIONARY; }
+			| TEXT_P SEARCH PARSER				{ $$ = OBJECT_TSPARSER; }
+			| TEXT_P SEARCH TEMPLATE			{ $$ = OBJECT_TSTEMPLATE; }
 		;
 
 comment_text:
@@ -5375,6 +5454,7 @@ security_label_type:
 			| TABLESPACE						{ $$ = OBJECT_TABLESPACE; }
 			| TYPE_P							{ $$ = OBJECT_TYPE; }
 			| VIEW								{ $$ = OBJECT_VIEW; }
+			| MATERIALIZED VIEW					{ $$ = OBJECT_MATVIEW; }
 		;
 
 security_label:	Sconst				{ $$ = $1; }
@@ -6917,6 +6997,26 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
+			| ALTER MATERIALIZED VIEW qualified_name RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_MATVIEW;
+					n->relation = $4;
+					n->subname = NULL;
+					n->newname = $7;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER MATERIALIZED VIEW IF_P EXISTS qualified_name RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_MATVIEW;
+					n->relation = $6;
+					n->subname = NULL;
+					n->newname = $9;
+					n->missing_ok = true;
+					$$ = (Node *)n;
+				}
 			| ALTER INDEX qualified_name RENAME TO name
 				{
 					RenameStmt *n = makeNode(RenameStmt);
@@ -6976,6 +7076,28 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $5;
 					n->subname = $8;
 					n->newname = $10;
+					n->missing_ok = true;
+					$$ = (Node *)n;
+				}
+			| ALTER MATERIALIZED VIEW qualified_name RENAME opt_column name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_COLUMN;
+					n->relationType = OBJECT_MATVIEW;
+					n->relation = $4;
+					n->subname = $7;
+					n->newname = $9;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER MATERIALIZED VIEW IF_P EXISTS qualified_name RENAME opt_column name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_COLUMN;
+					n->relationType = OBJECT_MATVIEW;
+					n->relation = $6;
+					n->subname = $9;
+					n->newname = $11;
 					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
@@ -7331,6 +7453,24 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_VIEW;
 					n->relation = $5;
 					n->newschema = $8;
+					n->missing_ok = true;
+					$$ = (Node *)n;
+				}
+			| ALTER MATERIALIZED VIEW qualified_name SET SCHEMA name
+				{
+					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
+					n->objectType = OBJECT_MATVIEW;
+					n->relation = $4;
+					n->newschema = $7;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER MATERIALIZED VIEW IF_P EXISTS qualified_name SET SCHEMA name
+				{
+					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
+					n->objectType = OBJECT_MATVIEW;
+					n->relation = $6;
+					n->newschema = $9;
 					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
@@ -8512,6 +8652,8 @@ ExplainableStmt:
 			| DeleteStmt
 			| DeclareCursorStmt
 			| CreateAsStmt
+			| CreateMatViewStmt
+			| RefreshMatViewStmt
 			| ExecuteStmt					/* by default all are $$=$1 */
 		;
 
@@ -8596,6 +8738,7 @@ ExecuteStmt: EXECUTE name execute_param_clause
 					n->params = $8;
 					ctas->query = (Node *) n;
 					ctas->into = $4;
+					ctas->relkind = OBJECT_TABLE;
 					ctas->is_select_into = false;
 					/* cram additional flags into the IntoClause */
 					$4->rel->relpersistence = $2;
@@ -9143,6 +9286,7 @@ into_clause:
 					$$->onCommit = ONCOMMIT_NOOP;
 					$$->tableSpaceName = NULL;
 					$$->skipData = false;
+					$$->relkind = INTO_CLAUSE_RELKIND_DEFAULT;
 				}
 			| /*EMPTY*/
 				{ $$ = NULL; }
@@ -12629,6 +12773,7 @@ unreserved_keyword:
 			| LOCK_P
 			| MAPPING
 			| MATCH
+			| MATERIALIZED
 			| MAXVALUE
 			| MINUTE_P
 			| MINVALUE
@@ -12666,6 +12811,7 @@ unreserved_keyword:
 			| PRIVILEGES
 			| PROCEDURAL
 			| PROCEDURE
+			| PROGRAM
 			| QUOTE
 			| RANGE
 			| READ
@@ -12673,6 +12819,7 @@ unreserved_keyword:
 			| RECHECK
 			| RECURSIVE
 			| REF
+			| REFRESH
 			| REINDEX
 			| RELATIVE_P
 			| RELEASE

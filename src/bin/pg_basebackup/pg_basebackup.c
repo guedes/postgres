@@ -126,6 +126,7 @@ usage(void)
 	printf(_("  -V, --version          output version information, then exit\n"));
 	printf(_("  -?, --help             show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
+	printf(_("  -d, --dbname=CONNSTR   connection string\n"));
 	printf(_("  -h, --host=HOSTNAME    database server host or socket directory\n"));
 	printf(_("  -p, --port=PORT        database server port number\n"));
 	printf(_("  -s, --status-interval=INTERVAL\n"
@@ -1133,14 +1134,14 @@ GenerateRecoveryConf(PGconn *conn)
 	recoveryconfcontents = createPQExpBuffer();
 	if (!recoveryconfcontents)
 	{
-		fprintf(stderr, _("%s: out of memory"), progname);
+		fprintf(stderr, _("%s: out of memory\n"), progname);
 		disconnect_and_exit(1);
 	}
 
 	connOptions = PQconninfo(conn);
 	if (connOptions == NULL)
 	{
-		fprintf(stderr, _("%s: out of memory"), progname);
+		fprintf(stderr, _("%s: out of memory\n"), progname);
 		disconnect_and_exit(1);
 	}
 
@@ -1178,7 +1179,7 @@ GenerateRecoveryConf(PGconn *conn)
 	appendPQExpBufferStr(recoveryconfcontents, "'\n");
 	if (PQExpBufferBroken(recoveryconfcontents))
 	{
-		fprintf(stderr, _("%s: out of memory"), progname);
+		fprintf(stderr, _("%s: out of memory\n"), progname);
 		disconnect_and_exit(1);
 	}
 
@@ -1201,7 +1202,7 @@ WriteRecoveryConf(void)
 	cf = fopen(filename, "w");
 	if (cf == NULL)
 	{
-		fprintf(stderr, _("%s: could not create file %s: %s"), progname, filename, strerror(errno));
+		fprintf(stderr, _("%s: could not create file \"%s\": %s\n"), progname, filename, strerror(errno));
 		disconnect_and_exit(1);
 	}
 
@@ -1222,12 +1223,16 @@ BaseBackup(void)
 {
 	PGresult   *res;
 	char	   *sysidentifier;
+	uint32		latesttli;
 	uint32		starttli;
 	char		current_path[MAXPGPATH];
 	char		escaped_label[MAXPGPATH];
 	int			i;
 	char		xlogstart[64];
 	char		xlogend[64];
+	int			minServerMajor,
+				maxServerMajor;
+	int			serverMajor;
 
 	/*
 	 * Connect in replication mode to the server
@@ -1236,6 +1241,31 @@ BaseBackup(void)
 	if (!conn)
 		/* Error message already written in GetConnection() */
 		exit(1);
+
+	/*
+	 * Check server version. BASE_BACKUP command was introduced in 9.1, so
+	 * we can't work with servers older than 9.1.
+	 */
+	minServerMajor = 901;
+	maxServerMajor = PG_VERSION_NUM / 100;
+	serverMajor = PQserverVersion(conn) / 100;
+	if (serverMajor < minServerMajor || serverMajor > maxServerMajor)
+	{
+		const char *serverver = PQparameterStatus(conn, "server_version");
+		fprintf(stderr, _("%s: incompatible server version %s\n"),
+				progname, serverver ? serverver : "'unknown'");
+		disconnect_and_exit(1);
+	}
+
+	/*
+	 * If WAL streaming was requested, also check that the server is new
+	 * enough for that.
+	 */
+	if (streamwal && !CheckServerVersionForStreaming(conn))
+	{
+		/* Error message already written in CheckServerVersionForStreaming() */
+		disconnect_and_exit(1);
+	}
 
 	/*
 	 * Build contents of recovery.conf if requested
@@ -1261,6 +1291,7 @@ BaseBackup(void)
 		disconnect_and_exit(1);
 	}
 	sysidentifier = pg_strdup(PQgetvalue(res, 0, 0));
+	latesttli = atoi(PQgetvalue(res, 0, 1));
 	PQclear(res);
 
 	/*
@@ -1292,7 +1323,7 @@ BaseBackup(void)
 				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
-	if (PQntuples(res) != 1 || PQnfields(res) < 2)
+	if (PQntuples(res) != 1)
 	{
 		fprintf(stderr,
 				_("%s: server returned unexpected response to BASE_BACKUP command; got %d rows and %d fields, expected %d rows and %d fields\n"),
@@ -1301,8 +1332,14 @@ BaseBackup(void)
 	}
 
 	strcpy(xlogstart, PQgetvalue(res, 0, 0));
-	starttli = atoi(PQgetvalue(res, 0, 1));
-
+	/*
+	 * 9.3 and later sends the TLI of the starting point. With older servers,
+	 * assume it's the same as the latest timeline reported by IDENTIFY_SYSTEM.
+	 */
+	if (PQnfields(res) >= 2)
+		starttli = atoi(PQgetvalue(res, 0, 1));
+	else
+		starttli = latesttli;
 	PQclear(res);
 	MemSet(xlogend, 0, sizeof(xlogend));
 
@@ -1540,6 +1577,7 @@ main(int argc, char **argv)
 		{"gzip", no_argument, NULL, 'z'},
 		{"compress", required_argument, NULL, 'Z'},
 		{"label", required_argument, NULL, 'l'},
+		{"dbname", required_argument, NULL, 'd'},
 		{"host", required_argument, NULL, 'h'},
 		{"port", required_argument, NULL, 'p'},
 		{"username", required_argument, NULL, 'U'},
@@ -1572,7 +1610,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "D:F:RxX:l:zZ:c:h:p:U:s:wWvP",
+	while ((c = getopt_long(argc, argv, "D:F:RxX:l:zZ:d:c:h:p:U:s:wWvP",
 							long_options, &option_index)) != -1)
 	{
 		switch (c)
@@ -1662,6 +1700,9 @@ main(int argc, char **argv)
 							progname, optarg);
 					exit(1);
 				}
+				break;
+			case 'd':
+				connection_string = pg_strdup(optarg);
 				break;
 			case 'h':
 				dbhost = pg_strdup(optarg);
