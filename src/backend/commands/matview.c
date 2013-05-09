@@ -14,12 +14,11 @@
  */
 #include "postgres.h"
 
-#include "access/heapam_xlog.h"
+#include "access/htup_details.h"
 #include "access/multixact.h"
-#include "access/relscan.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
-#include "catalog/heap.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "commands/cluster.h"
 #include "commands/matview.h"
@@ -27,10 +26,11 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "rewrite/rewriteHandler.h"
-#include "storage/lmgr.h"
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 
 
 typedef struct
@@ -52,38 +52,45 @@ static void refresh_matview_datafill(DestReceiver *dest, Query *query,
 									 const char *queryString);
 
 /*
- * SetMatViewToPopulated
- *		Indicate that the materialized view has been populated by its query.
- *
- * NOTE: The heap starts out in a state that doesn't look scannable, and can
- * only transition from there to scannable at the time a new heap is created.
+ * SetMatViewPopulatedState
+ *		Mark a materialized view as populated, or not.
  *
  * NOTE: caller must be holding an appropriate lock on the relation.
  */
 void
-SetMatViewToPopulated(Relation relation)
+SetMatViewPopulatedState(Relation relation, bool newstate)
 {
-	Page        page;
+	Relation	pgrel;
+	HeapTuple	tuple;
 
 	Assert(relation->rd_rel->relkind == RELKIND_MATVIEW);
-	Assert(relation->rd_ispopulated == false);
 
-	page = (Page) palloc(BLCKSZ);
-	PageInit(page, BLCKSZ, 0);
+	/*
+	 * Update relation's pg_class entry.  Crucial side-effect: other backends
+	 * (and this one too!) are sent SI message to make them rebuild relcache
+	 * entries.
+	 */
+	pgrel = heap_open(RelationRelationId, RowExclusiveLock);
+	tuple = SearchSysCacheCopy1(RELOID,
+								ObjectIdGetDatum(RelationGetRelid(relation)));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u",
+			 RelationGetRelid(relation));
 
-	if (RelationNeedsWAL(relation))
-		log_newpage(&(relation->rd_node), MAIN_FORKNUM, 0, page);
+	((Form_pg_class) GETSTRUCT(tuple))->relispopulated = newstate;
 
-	RelationOpenSmgr(relation);
+	simple_heap_update(pgrel, &tuple->t_self, tuple);
 
-	PageSetChecksumInplace(page, 0);
-	smgrextend(relation->rd_smgr, MAIN_FORKNUM, 0, (char *) page, true);
+	CatalogUpdateIndexes(pgrel, tuple);
 
-	pfree(page);
+	heap_freetuple(tuple);
+	heap_close(pgrel, RowExclusiveLock);
 
-	smgrimmedsync(relation->rd_smgr, MAIN_FORKNUM);
-
-	RelationCacheInvalidateEntry(relation->rd_id);
+	/*
+	 * Advance command counter to make the updated pg_class row locally
+	 * visible.
+	 */
+	CommandCounterIncrement();
 }
 
 /*
@@ -97,14 +104,14 @@ SetMatViewToPopulated(Relation relation)
  * If WITH NO DATA was specified, this is effectively like a TRUNCATE;
  * otherwise it is like a TRUNCATE followed by an INSERT using the SELECT
  * statement associated with the materialized view.  The statement node's
- * skipData field is used to indicate that the clause was used.
+ * skipData field shows whether the clause was used.
  *
  * Indexes are rebuilt too, via REINDEX. Since we are effectively bulk-loading
  * the new heap, it's better to create the indexes afterwards than to fill them
  * incrementally while we load.
  *
- * The scannable state is changed based on whether the contents reflect the
- * result set of the materialized view's query.
+ * The matview's "populated" state is changed based on whether the contents
+ * reflect the result set of the materialized view's query.
  */
 void
 ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
@@ -184,6 +191,12 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 	 */
 	CheckTableNotInUse(matviewRel, "REFRESH MATERIALIZED VIEW");
 
+	/*
+	 * Tentatively mark the matview as populated or not (this will roll back
+	 * if we fail later).
+	 */
+	SetMatViewPopulatedState(matviewRel, !stmt->skipData);
+
 	tableSpace = matviewRel->rd_rel->reltablespace;
 
 	heap_close(matviewRel, NoLock);
@@ -192,6 +205,7 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 	OIDNewHeap = make_new_heap(matviewOid, tableSpace);
 	dest = CreateTransientRelDestReceiver(OIDNewHeap);
 
+	/* Generate the data, if wanted. */
 	if (!stmt->skipData)
 		refresh_matview_datafill(dest, dataQuery, queryString);
 
@@ -215,10 +229,8 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 	List       *rewritten;
 	PlannedStmt *plan;
 	QueryDesc  *queryDesc;
-	List	   *rtable;
-	RangeTblEntry	*initial_rte;
-	RangeTblEntry	*second_rte;
 
+	/* Rewrite, copying the given Query to make sure it's not changed */
 	rewritten = QueryRewrite((Query *) copyObject(query));
 
 	/* SELECT should never rewrite to more or less than one SELECT query */
@@ -228,26 +240,6 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 
 	/* Check for user-requested abort. */
 	CHECK_FOR_INTERRUPTS();
-
-	/*
-	 * Kludge here to allow refresh of a materialized view which is invalid
-	 * (that is, it was created or refreshed WITH NO DATA. We flag the first
-	 * two RangeTblEntry list elements, which were added to the front of the
-	 * rewritten Query to keep the rules system happy, with the isResultRel
-	 * flag to indicate that it is OK if they are flagged as invalid. See
-	 * UpdateRangeTableOfViewParse() for details.
-	 *
-	 * NOTE: The rewrite has switched the frist two RTEs, but they are still
-	 * in the first two positions. If that behavior changes, the asserts here
-	 * will fail.
-	 */
-	rtable = query->rtable;
-	initial_rte = ((RangeTblEntry *) linitial(rtable));
-	Assert(strcmp(initial_rte->alias->aliasname, "new"));
-	initial_rte->isResultRel = true;
-	second_rte = ((RangeTblEntry *) lsecond(rtable));
-	Assert(strcmp(second_rte->alias->aliasname, "old"));
-	second_rte->isResultRel = true;
 
 	/* Plan the query which will generate data for the refresh. */
 	plan = pg_plan_query(query, 0, NULL);
@@ -321,8 +313,6 @@ transientrel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	if (!XLogIsNeeded())
 		myState->hi_options |= HEAP_INSERT_SKIP_WAL;
 	myState->bistate = GetBulkInsertState();
-
-	SetMatViewToPopulated(transientrel);
 
 	/* Not using WAL requires smgr_targblock be initially invalid */
 	Assert(RelationGetTargetBlock(transientrel) == InvalidBlockNumber);
