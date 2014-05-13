@@ -328,7 +328,7 @@ arow RECORD;
     <para>
      The general syntax of a variable declaration is:
 <synopsis>
-<replaceable>name</replaceable> <optional> CONSTANT </optional> <replaceable>type</replaceable> <optional> COLLATE <replaceable>collation_name</replaceable> </optional> <optional> NOT NULL </optional> <optional> { DEFAULT | := } <replaceable>expression</replaceable> </optional>;
+<replaceable>name</replaceable> <optional> CONSTANT </optional> <replaceable>type</replaceable> <optional> COLLATE <replaceable>collation_name</replaceable> </optional> <optional> NOT NULL </optional> <optional> { DEFAULT | := | = } <replaceable>expression</replaceable> </optional>;
 </synopsis>
       The <literal>DEFAULT</> clause, if given, specifies the initial value assigned
       to the variable when the block is entered.  If the <literal>DEFAULT</> clause
@@ -343,6 +343,8 @@ arow RECORD;
       is specified, an assignment of a null value results in a run-time
       error. All variables declared as <literal>NOT NULL</>
       must have a nonnull default value specified.
+      Equal (<literal>=</>) can be used instead of PL/SQL-compliant
+      <literal>:=</>.
      </para>
 
      <para>
@@ -386,9 +388,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 </programlisting>
-      The other way, which was the only way available before
-      <productname>PostgreSQL</productname> 8.0, is to explicitly
-      declare an alias, using the declaration syntax
+      The other way is to explicitly declare an alias, using the
+      declaration syntax
 
 <synopsis>
 <replaceable>name</replaceable> ALIAS FOR $<replaceable>n</replaceable>;
@@ -866,7 +867,7 @@ PREPARE <replaceable>statement_name</>(integer, integer) AS SELECT $1 &lt; $2;
      An assignment of a value to a <application>PL/pgSQL</application>
      variable is written as:
 <synopsis>
-<replaceable>variable</replaceable> := <replaceable>expression</replaceable>;
+<replaceable>variable</replaceable> { := | = } <replaceable>expression</replaceable>;
 </synopsis>
      As explained previously, the expression in such a statement is evaluated
      by means of an SQL <command>SELECT</> command sent to the main
@@ -874,7 +875,8 @@ PREPARE <replaceable>statement_name</>(integer, integer) AS SELECT $1 &lt; $2;
      a row value, if the variable is a row or record variable).  The target
      variable can be a simple variable (optionally qualified with a block
      name), a field of a row or record variable, or an element of an array
-     that is a simple variable or field.
+     that is a simple variable or field.  Equal (<literal>=</>) can be
+     used instead of PL/SQL-compliant <literal>:=</>.
     </para>
 
     <para>
@@ -1074,6 +1076,30 @@ END;
 </programlisting>
      Successful execution of a command with <literal>STRICT</>
      always sets <literal>FOUND</literal> to true.
+    </para>
+
+    <para>
+     If <literal>print_strict_params</> is enabled for the function,
+     you will get information about the parameters passed to the
+     query in the <literal>DETAIL</> part of the error message produced
+     when the requirements of STRICT are not met.  You can change this
+     setting on a system-wide basis by setting
+     <varname>plpgsql.print_strict_params</>, though only subsequent
+     function compilations will be affected.  You can also enable it
+     on a per-function basis by using a compiler option:
+<programlisting>
+CREATE FUNCTION get_userid(username text) RETURNS int
+AS $$
+#print_strict_params on
+DECLARE
+userid int;
+BEGIN
+    SELECT users.userid INTO STRICT userid
+        FROM users WHERE users.username = get_userid.username;
+    RETURN userid;
+END
+$$ LANGUAGE plpgsql;
+</programlisting>
     </para>
 
     <para>
@@ -1292,7 +1318,7 @@ EXECUTE 'UPDATE tbl SET '
     </para>
 
     <para>
-     Because <function>quote_literal</function> is labelled
+     Because <function>quote_literal</function> is labeled
      <literal>STRICT</literal>, it will always return null when called with a
      null argument.  In the above example, if <literal>newvalue</> or
      <literal>keyvalue</> were null, the entire dynamic query string would
@@ -1387,7 +1413,7 @@ EXECUTE format('UPDATE tbl SET %I = $1 WHERE key = $2', colname)
      command, which has the form:
 
 <synopsis>
-GET <optional> CURRENT </optional> DIAGNOSTICS <replaceable>variable</replaceable> = <replaceable>item</replaceable> <optional> , ... </optional>;
+GET <optional> CURRENT </optional> DIAGNOSTICS <replaceable>variable</replaceable> { = | := } <replaceable>item</replaceable> <optional> , ... </optional>;
 </synopsis>
 
      This command allows retrieval of system status indicators.  Each
@@ -1401,6 +1427,8 @@ GET <optional> CURRENT </optional> DIAGNOSTICS <replaceable>variable</replaceabl
      <acronym>SQL</acronym> command.  Note that <varname>RESULT_OID</>
      is only useful after an <command>INSERT</command> command into a
      table containing OIDs.
+     Colon-equal (<literal>:=</>) can be used instead of SQL-standard
+     <literal>=</> for <command>GET DIAGNOSTICS</>.
     </para>
 
     <para>
@@ -2107,11 +2135,11 @@ EXIT <optional> <replaceable>label</replaceable> </optional> <optional> WHEN <re
         When used with a
         <literal>BEGIN</literal> block, <literal>EXIT</literal> passes
         control to the next statement after the end of the block.
-        Note that a label must be used for this purpose; an unlabelled
+        Note that a label must be used for this purpose; an unlabeled
         <literal>EXIT</literal> is never considered to match a
         <literal>BEGIN</literal> block.  (This is a change from
         pre-8.4 releases of <productname>PostgreSQL</productname>, which
-        would allow an unlabelled <literal>EXIT</literal> to match
+        would allow an unlabeled <literal>EXIT</literal> to match
         a <literal>BEGIN</literal> block.)
        </para>
 
@@ -2613,6 +2641,15 @@ SELECT merge_db(1, 'dennis');
      expected.
     </para>
     </example>
+  </sect2>
+
+   <sect2 id="plpgsql-diagnostics">
+    <title>Getting Diagnostics Information</title>
+
+    <indexterm>
+     <primary>diagnostics</primary>
+     <secondary>in PL/pgSQL</secondary>
+    </indexterm>
 
    <sect3 id="plpgsql-exception-diagnostics">
     <title>Obtaining information about an error</title>
@@ -2639,7 +2676,7 @@ SELECT merge_db(1, 'dennis');
      <command>GET STACKED DIAGNOSTICS</command> command, which has the form:
 
 <synopsis>
-GET STACKED DIAGNOSTICS <replaceable>variable</replaceable> = <replaceable>item</replaceable> <optional> , ... </optional>;
+GET STACKED DIAGNOSTICS <replaceable>variable</replaceable> { = | := } <replaceable>item</replaceable> <optional> , ... </optional>;
 </synopsis>
 
      Each <replaceable>item</replaceable> is a key word identifying a status
@@ -2665,9 +2702,34 @@ GET STACKED DIAGNOSTICS <replaceable>variable</replaceable> = <replaceable>item<
          <entry>the SQLSTATE error code of the exception</entry>
         </row>
         <row>
+         <entry><literal>COLUMN_NAME</literal></entry>
+         <entry>text</entry>
+         <entry>the name of column related to exception</entry>
+        </row>
+        <row>
+         <entry><literal>CONSTRAINT_NAME</literal></entry>
+         <entry>text</entry>
+         <entry>the name of constraint related to exception</entry>
+        </row>
+        <row>
+         <entry><literal>PG_DATATYPE_NAME</literal></entry>
+         <entry>text</entry>
+         <entry>the name of datatype related to exception</entry>
+        </row>
+        <row>
          <entry><literal>MESSAGE_TEXT</literal></entry>
          <entry>text</entry>
          <entry>the text of the exception's primary message</entry>
+        </row>
+        <row>
+         <entry><literal>TABLE_NAME</literal></entry>
+         <entry>text</entry>
+         <entry>the name of table related to exception</entry>
+        </row>
+        <row>
+         <entry><literal>SCHEMA_NAME</literal></entry>
+         <entry>text</entry>
+         <entry>the name of schema related to exception</entry>
         </row>
         <row>
          <entry><literal>PG_EXCEPTION_DETAIL</literal></entry>
@@ -2711,6 +2773,54 @@ END;
 </programlisting>
     </para>
    </sect3>
+
+  <sect3 id="plpgsql-get-diagnostics-context">
+   <title>Obtaining the call stack context information</title>
+
+   <para>
+
+<synopsis>
+GET <optional> CURRENT </optional> DIAGNOSTICS <replaceable>variable</replaceable> { = | := } <replaceable>PG_CONTEXT</replaceable> <optional> , ... </optional>;
+</synopsis>
+
+
+    Calling <command>GET DIAGNOSTICS</command> with status
+    item <varname>PG_CONTEXT</> will return a text string with line(s) of
+    text describing the call stack.  The first row refers to the
+    current function and currently executing <command>GET DIAGNOSTICS</command>
+    command.  The second and any subsequent rows refer to the calling functions
+    up the call stack.
+
+<programlisting>
+CREATE OR REPLACE FUNCTION public.outer_func() RETURNS integer AS $$
+BEGIN
+  RETURN inner_func();
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.inner_func() RETURNS integer AS  $$
+DECLARE
+  stack text;
+BEGIN
+  GET DIAGNOSTICS stack = PG_CONTEXT;
+  RAISE NOTICE E'--- Call Stack ---\n%', stack;
+  RETURN 1;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT outer_func();
+
+NOTICE:  --- Call Stack ---
+PL/pgSQL function inner_func() line 4 at GET DIAGNOSTICS
+PL/pgSQL function outer_func() line 3 at RETURN
+ outer_func
+ ------------
+           1
+(1 row)
+</programlisting>
+
+   </para>
+  </sect3>
   </sect2>
   </sect1>
 
@@ -3353,6 +3463,17 @@ RAISE NOTICE 'Calling cs_create_job(%)', v_job_id;
        <para>Specifies the error code (SQLSTATE) to report, either by condition
         name, as shown in <xref linkend="errcodes-appendix">, or directly as a
         five-character SQLSTATE code.</para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><literal>COLUMN</literal></term>
+      <term><literal>CONSTRAINT</literal></term>
+      <term><literal>DATATYPE</literal></term>
+      <term><literal>TABLE</literal></term>
+      <term><literal>SCHEMA</literal></term>
+      <listitem>
+       <para>Supplies the name of a related object.</para>
       </listitem>
      </varlistentry>
     </variablelist>
@@ -4590,6 +4711,56 @@ a_output := a_output || $$ if v_$$ || referrer_keys.kind || $$ like '$$
   </variablelist>
 
   </sect2>
+  <sect2 id="plpgsql-extra-checks">
+   <title>Additional compile-time checks</title>
+
+   <para>
+    To aid the user in finding instances of simple but common problems before
+    they cause harm, <application>PL/PgSQL</> provides additional
+    <replaceable>checks</>. When enabled, depending on the configuration, they
+    can be used to emit either a <literal>WARNING</> or an <literal>ERROR</>
+    during the compilation of a function. A function which has received
+    a <literal>WARNING</> can be executed without producing further messages,
+    so you are advised to test in a separate development environment.
+   </para>
+
+ <para>
+  These additional checks are enabled through the configuration variables
+  <varname>plpgsql.extra_warnings</> for warnings and 
+  <varname>plpgsql.extra_errors</> for errors. Both can be set either to
+  a comma-separated list of checks, <literal>"none"</> or <literal>"all"</>.
+  The default is <literal>"none"</>. Currently the list of available checks
+  includes only one:
+  <variablelist>
+   <varlistentry>
+    <term><varname>shadowed_variables</varname></term>
+    <listitem>
+     <para>
+      Checks if a declaration shadows a previously defined variable. 
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+
+  The following example shows the effect of <varname>plpgsql.extra_warnings</>
+  set to <varname>shadowed_variables</>:
+<programlisting>
+SET plpgsql.extra_warnings TO 'shadowed_variables';
+
+CREATE FUNCTION foo(f1 int) RETURNS int AS $$
+DECLARE
+f1 int;
+BEGIN
+RETURN f1;
+END
+$$ LANGUAGE plpgsql;
+WARNING:  variable "f1" shadows a previously defined variable
+LINE 3: f1 int;
+        ^
+CREATE FUNCTION
+</programlisting>
+ </para>
+ </sect2>
  </sect1>
 
   <!-- **** Porting from Oracle PL/SQL **** -->

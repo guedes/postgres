@@ -13,7 +13,7 @@
  * come from different tuples. In theory, the standard scalar selectivity
  * functions could be used with the combined histogram.
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -27,10 +27,11 @@
 #include "catalog/pg_operator.h"
 #include "commands/vacuum.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/rangetypes.h"
 
-static int float8_qsort_cmp(const void *a1, const void *a2);
-static int range_bound_qsort_cmp(const void *a1, const void *a2, void *arg);
+static int	float8_qsort_cmp(const void *a1, const void *a2);
+static int	range_bound_qsort_cmp(const void *a1, const void *a2, void *arg);
 static void compute_range_stats(VacAttrStats *stats,
 		   AnalyzeAttrFetchFunc fetchfunc, int samplerows, double totalrows);
 
@@ -44,11 +45,11 @@ range_typanalyze(PG_FUNCTION_ARGS)
 	TypeCacheEntry *typcache;
 	Form_pg_attribute attr = stats->attr;
 
-	/* Get information about range type */
-	typcache = range_get_typcache(fcinfo, stats->attrtypid);
+	/* Get information about range type; note column might be a domain */
+	typcache = range_get_typcache(fcinfo, getBaseType(stats->attrtypid));
 
 	if (attr->attstattarget < 0)
-        attr->attstattarget = default_statistics_target;
+		attr->attstattarget = default_statistics_target;
 
 	stats->compute_stats = compute_range_stats;
 	stats->extra_data = typcache;
@@ -81,9 +82,9 @@ float8_qsort_cmp(const void *a1, const void *a2)
 static int
 range_bound_qsort_cmp(const void *a1, const void *a2, void *arg)
 {
-	RangeBound *b1 = (RangeBound *)a1;
-	RangeBound *b2 = (RangeBound *)a2;
-	TypeCacheEntry *typcache = (TypeCacheEntry *)arg;
+	RangeBound *b1 = (RangeBound *) a1;
+	RangeBound *b2 = (RangeBound *) a2;
+	TypeCacheEntry *typcache = (TypeCacheEntry *) arg;
 
 	return range_cmp_bounds(typcache, b1, b2);
 }
@@ -106,7 +107,8 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 	int			num_bins = stats->attr->attstattarget;
 	int			num_hist;
 	float8	   *lengths;
-	RangeBound *lowers, *uppers;
+	RangeBound *lowers,
+			   *uppers;
 	double		total_width = 0;
 
 	/* Allocate memory to hold range bounds and lengths of the sample ranges. */
@@ -163,9 +165,9 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 				 * and lower bound values.
 				 */
 				length = DatumGetFloat8(FunctionCall2Coll(
-											&typcache->rng_subdiff_finfo,
-											typcache->rng_collation,
-											upper.val, lower.val));
+												&typcache->rng_subdiff_finfo,
+													 typcache->rng_collation,
+													  upper.val, lower.val));
 			}
 			else
 			{
@@ -227,13 +229,13 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			/*
 			 * The object of this loop is to construct ranges from first and
 			 * last entries in lowers[] and uppers[] along with evenly-spaced
-			 * values in between. So the i'th value is a range of
-			 * lowers[(i * (nvals - 1)) / (num_hist - 1)] and
-			 * uppers[(i * (nvals - 1)) / (num_hist - 1)]. But computing that
-			 * subscript directly risks integer overflow when the stats target
-			 * is more than a couple thousand.  Instead we add
-			 * (nvals - 1) / (num_hist - 1) to pos at each step, tracking the
-			 * integral and fractional parts of the sum separately.
+			 * values in between. So the i'th value is a range of lowers[(i *
+			 * (nvals - 1)) / (num_hist - 1)] and uppers[(i * (nvals - 1)) /
+			 * (num_hist - 1)]. But computing that subscript directly risks
+			 * integer overflow when the stats target is more than a couple
+			 * thousand.  Instead we add (nvals - 1) / (num_hist - 1) to pos
+			 * at each step, tracking the integral and fractional parts of the
+			 * sum separately.
 			 */
 			delta = (non_empty_cnt - 1) / (num_hist - 1);
 			deltafrac = (non_empty_cnt - 1) % (num_hist - 1);
@@ -242,7 +244,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			for (i = 0; i < num_hist; i++)
 			{
 				bound_hist_values[i] = PointerGetDatum(range_serialize(
-								typcache, &lowers[pos], &uppers[pos], false));
+							   typcache, &lowers[pos], &uppers[pos], false));
 				pos += delta;
 				posfrac += deltafrac;
 				if (posfrac >= (num_hist - 1))
@@ -281,10 +283,10 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 			 * The object of this loop is to copy the first and last lengths[]
 			 * entries along with evenly-spaced values in between. So the i'th
 			 * value is lengths[(i * (nvals - 1)) / (num_hist - 1)]. But
-			 * computing that subscript directly risks integer overflow when the
-			 * stats target is more than a couple thousand.  Instead we add
-			 * (nvals - 1) / (num_hist - 1) to pos at each step, tracking the
-			 * integral and fractional parts of the sum separately.
+			 * computing that subscript directly risks integer overflow when
+			 * the stats target is more than a couple thousand.  Instead we
+			 * add (nvals - 1) / (num_hist - 1) to pos at each step, tracking
+			 * the integral and fractional parts of the sum separately.
 			 */
 			delta = (non_empty_cnt - 1) / (num_hist - 1);
 			deltafrac = (non_empty_cnt - 1) % (num_hist - 1);
@@ -342,9 +344,10 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,
 		/* We found only nulls; assume the column is entirely null */
 		stats->stats_valid = true;
 		stats->stanullfrac = 1.0;
-		stats->stawidth = 0;		/* "unknown" */
-		stats->stadistinct = 0.0;	/* "unknown" */
+		stats->stawidth = 0;	/* "unknown" */
+		stats->stadistinct = 0.0;		/* "unknown" */
 	}
+
 	/*
 	 * We don't need to bother cleaning up any of our temporary palloc's. The
 	 * hashtable should also go away, as it used a child memory context.

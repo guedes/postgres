@@ -2,7 +2,7 @@
  * SQL Information Schema
  * as defined in ISO/IEC 9075-11:2011
  *
- * Copyright (c) 2003-2013, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2014, PostgreSQL Global Development Group
  *
  * src/backend/catalog/information_schema.sql
  */
@@ -731,7 +731,8 @@ CREATE VIEW columns AS
            CAST(null AS character_data) AS generation_expression,
 
            CAST(CASE WHEN c.relkind = 'r' OR
-                          (c.relkind = 'v' AND pg_view_is_updatable(c.oid))
+                          (c.relkind IN ('v', 'f') AND
+                           pg_column_is_updatable(c.oid, a.attnum, false))
                 THEN 'YES' ELSE 'NO' END AS yes_or_no) AS is_updatable
 
     FROM (pg_attribute a LEFT JOIN pg_attrdef ad ON attrelid = adrelid AND attnum = adnum)
@@ -1132,10 +1133,15 @@ CREATE VIEW parameters AS
            CAST(null AS sql_identifier) AS scope_schema,
            CAST(null AS sql_identifier) AS scope_name,
            CAST(null AS cardinal_number) AS maximum_cardinality,
-           CAST((ss.x).n AS sql_identifier) AS dtd_identifier
+           CAST((ss.x).n AS sql_identifier) AS dtd_identifier,
+           CAST(
+             CASE WHEN pg_has_role(proowner, 'USAGE')
+                  THEN pg_get_function_arg_default(p_oid, (ss.x).n)
+                  ELSE NULL END
+             AS character_data) AS parameter_default
 
     FROM pg_type t, pg_namespace nt,
-         (SELECT n.nspname AS n_nspname, p.proname, p.oid AS p_oid,
+         (SELECT n.nspname AS n_nspname, p.proname, p.oid AS p_oid, p.proowner,
                  p.proargnames, p.proargmodes,
                  _pg_expandarray(coalesce(p.proallargtypes, p.proargtypes::oid[])) AS x
           FROM pg_namespace n, pg_proc p
@@ -1501,7 +1507,9 @@ CREATE VIEW schemata AS
            CAST(null AS sql_identifier) AS default_character_set_name,
            CAST(null AS character_data) AS sql_path
     FROM pg_namespace n, pg_authid u
-    WHERE n.nspowner = u.oid AND pg_has_role(n.nspowner, 'USAGE');
+    WHERE n.nspowner = u.oid
+          AND (pg_has_role(n.nspowner, 'USAGE')
+               OR has_schema_privilege(n.oid, 'CREATE, USAGE'));
 
 GRANT SELECT ON schemata TO PUBLIC;
 
@@ -1895,7 +1903,9 @@ CREATE VIEW tables AS
            CAST(t.typname AS sql_identifier) AS user_defined_type_name,
 
            CAST(CASE WHEN c.relkind = 'r' OR
-                          (c.relkind = 'v' AND pg_view_is_insertable(c.oid))
+                          (c.relkind IN ('v', 'f') AND
+                           -- 1 << CMD_INSERT
+                           pg_relation_is_updatable(c.oid, false) & 8 = 8)
                 THEN 'YES' ELSE 'NO' END AS yes_or_no) AS is_insertable_into,
 
            CAST(CASE WHEN t.typname IS NOT NULL THEN 'YES' ELSE 'NO' END AS yes_or_no) AS is_typed,
@@ -2491,14 +2501,24 @@ CREATE VIEW views AS
                   ELSE null END
              AS character_data) AS view_definition,
 
-           CAST('NONE' AS character_data) AS check_option,
+           CAST(
+             CASE WHEN 'check_option=cascaded' = ANY (c.reloptions)
+                  THEN 'CASCADED'
+                  WHEN 'check_option=local' = ANY (c.reloptions)
+                  THEN 'LOCAL'
+                  ELSE 'NONE' END
+             AS character_data) AS check_option,
 
            CAST(
-             CASE WHEN pg_view_is_updatable(c.oid) THEN 'YES' ELSE 'NO' END
+             -- (1 << CMD_UPDATE) + (1 << CMD_DELETE)
+             CASE WHEN pg_relation_is_updatable(c.oid, false) & 20 = 20
+                  THEN 'YES' ELSE 'NO' END
              AS yes_or_no) AS is_updatable,
 
            CAST(
-             CASE WHEN pg_view_is_insertable(c.oid) THEN 'YES' ELSE 'NO' END
+             -- 1 << CMD_INSERT
+             CASE WHEN pg_relation_is_updatable(c.oid, false) & 8 = 8
+                  THEN 'YES' ELSE 'NO' END
              AS yes_or_no) AS is_insertable_into,
 
            CAST(

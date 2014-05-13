@@ -2,7 +2,7 @@
  * NFA utilities.
  * This file is #included by regcomp.c.
  *
- * Copyright (c) 1998, 1999 Henry Spencer.	All rights reserved.
+ * Copyright (c) 1998, 1999 Henry Spencer.  All rights reserved.
  *
  * Development of this software was funded, in part, by Cray Research Inc.,
  * UUNET Communications Services Inc., Sun Microsystems Inc., and Scriptics
@@ -174,11 +174,23 @@ newstate(struct nfa * nfa)
 {
 	struct state *s;
 
+	/*
+	 * This is a handy place to check for operation cancel during regex
+	 * compilation, since no code path will go very long without making a new
+	 * state.
+	 */
+	if (CANCEL_REQUESTED(nfa->v->re))
+	{
+		NERR(REG_CANCEL);
+		return NULL;
+	}
+
 	if (TooManyStates(nfa))
 	{
 		NERR(REG_ETOOBIG);
 		return NULL;
 	}
+
 	if (nfa->free != NULL)
 	{
 		s = nfa->free;
@@ -1292,7 +1304,7 @@ fixempties(struct nfa * nfa,
 	}
 
 	/*
-	 * And remove any states that have become useless.	(This cleanup is not
+	 * And remove any states that have become useless.  (This cleanup is not
 	 * very thorough, and would be even less so if we tried to combine it with
 	 * the previous step; but cleanup() will take care of anything we miss.)
 	 */
@@ -1360,7 +1372,7 @@ replaceempty(struct nfa * nfa,
 	 * non-EMPTY out-arcs), we must keep it so, so always push forward in that
 	 * case.
 	 *
-	 * The fan-out/fan-in comparison should count only non-EMPTY arcs.	If
+	 * The fan-out/fan-in comparison should count only non-EMPTY arcs.  If
 	 * "from" is doomed, we can skip counting "to"'s arcs, since we want to
 	 * force taking the copyins path in that case.
 	 */
@@ -1506,7 +1518,7 @@ compact(struct nfa * nfa,
 	for (s = nfa->states; s != NULL; s = s->next)
 	{
 		nstates++;
-		narcs += s->nouts + 1;		/* need one extra for endmarker */
+		narcs += s->nouts + 1;	/* need one extra for endmarker */
 	}
 
 	cnfa->stflags = (char *) MALLOC(nstates * sizeof(char));
@@ -1810,7 +1822,7 @@ dumpcstate(int st,
 		   struct cnfa * cnfa,
 		   FILE *f)
 {
-	struct carc * ca;
+	struct carc *ca;
 	int			pos;
 
 	fprintf(f, "%d%s", st, (cnfa->stflags[st] & CNFA_NOPROGRESS) ? ":" : ".");

@@ -20,7 +20,7 @@
  * step 2 ...
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_resetxlog/pg_resetxlog.c
@@ -31,7 +31,7 @@
 /*
  * We have to use postgres.h not postgres_fe.h here, because there's so much
  * backend-only stuff in the XLOG include files we need.  But we need a
- * frontend-ish environment otherwise.	Hence this ugly hack.
+ * frontend-ish environment otherwise.  Hence this ugly hack.
  */
 #define FRONTEND 1
 
@@ -44,9 +44,6 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
-#ifdef HAVE_GETOPT_H
-#include <getopt.h>
-#endif
 
 #include "access/transam.h"
 #include "access/tuptoaster.h"
@@ -55,19 +52,25 @@
 #include "catalog/catversion.h"
 #include "catalog/pg_control.h"
 #include "common/fe_memutils.h"
-
-extern int	optind;
-extern char *optarg;
+#include "pg_getopt.h"
 
 
 static ControlFileData ControlFile;		/* pg_control values */
 static XLogSegNo newXlogSegNo;	/* new XLOG segment # */
 static bool guessed = false;	/* T if we had to guess at any values */
 static const char *progname;
+static uint32 set_xid_epoch = (uint32) -1;
+static TransactionId set_xid = 0;
+static Oid	set_oid = 0;
+static MultiXactId set_mxid = 0;
+static MultiXactOffset set_mxoff = (MultiXactOffset) -1;
+static uint32 minXlogTli = 0;
+static XLogSegNo minXlogSegNo = 0;
 
 static bool ReadControlFile(void);
 static void GuessControlValues(void);
 static void PrintControlValues(bool guessed);
+static void PrintNewControlValues(void);
 static void RewriteControlFile(void);
 static void FindEndOfXLOG(void);
 static void KillExistingXLOG(void);
@@ -82,14 +85,7 @@ main(int argc, char *argv[])
 	int			c;
 	bool		force = false;
 	bool		noupdate = false;
-	uint32		set_xid_epoch = (uint32) -1;
-	TransactionId set_xid = 0;
-	Oid			set_oid = 0;
-	MultiXactId set_mxid = 0;
 	MultiXactId set_oldestmxid = 0;
-	MultiXactOffset set_mxoff = (MultiXactOffset) -1;
-	uint32		minXlogTli = 0;
-	XLogSegNo	minXlogSegNo = 0;
 	char	   *endptr;
 	char	   *endptr2;
 	char	   *DataDir;
@@ -192,6 +188,7 @@ main(int argc, char *argv[])
 					fprintf(stderr, _("%s: multitransaction ID (-m) must not be 0\n"), progname);
 					exit(1);
 				}
+
 				/*
 				 * XXX It'd be nice to have more sanity checks here, e.g. so
 				 * that oldest is not wrapped around w.r.t. nextMulti.
@@ -301,6 +298,13 @@ main(int argc, char *argv[])
 	FindEndOfXLOG();
 
 	/*
+	 * If we're not going to proceed with the reset, print the current control
+	 * file parameters.
+	 */
+	if ((guessed && !force) || noupdate)
+		PrintControlValues(guessed);
+
+	/*
 	 * Adjust fields if required by switches.  (Do this now so that printout,
 	 * if any, includes these values.)
 	 */
@@ -355,7 +359,7 @@ main(int argc, char *argv[])
 	 */
 	if ((guessed && !force) || noupdate)
 	{
-		PrintControlValues(guessed);
+		PrintNewControlValues();
 		if (!noupdate)
 		{
 			printf(_("\nIf these values seem acceptable, use -f to force reset.\n"));
@@ -516,7 +520,9 @@ GuessControlValues(void)
 	/* minRecoveryPoint, backupStartPoint and backupEndPoint can be left zero */
 
 	ControlFile.wal_level = WAL_LEVEL_MINIMAL;
+	ControlFile.wal_log_hints = false;
 	ControlFile.MaxConnections = 100;
+	ControlFile.max_worker_processes = 8;
 	ControlFile.max_prepared_xacts = 0;
 	ControlFile.max_locks_per_xact = 64;
 
@@ -554,12 +560,11 @@ static void
 PrintControlValues(bool guessed)
 {
 	char		sysident_str[32];
-	char		fname[MAXFNAMELEN];
 
 	if (guessed)
 		printf(_("Guessed pg_control values:\n\n"));
 	else
-		printf(_("pg_control values:\n\n"));
+		printf(_("Current pg_control values:\n\n"));
 
 	/*
 	 * Format system_identifier separately to keep platform-dependent format
@@ -568,10 +573,6 @@ PrintControlValues(bool guessed)
 	snprintf(sysident_str, sizeof(sysident_str), UINT64_FORMAT,
 			 ControlFile.system_identifier);
 
-	XLogFileName(fname, ControlFile.checkPointCopy.ThisTimeLineID, newXlogSegNo);
-
-	printf(_("First log segment after reset:        %s\n"),
-		   fname);
 	printf(_("pg_control version number:            %u\n"),
 		   ControlFile.pg_control_version);
 	printf(_("Catalog version number:               %u\n"),
@@ -630,6 +631,60 @@ PrintControlValues(bool guessed)
 
 
 /*
+ * Print the values to be changed.
+ */
+static void
+PrintNewControlValues()
+{
+	char		fname[MAXFNAMELEN];
+
+	/* This will be always printed in order to keep format same. */
+	printf(_("\n\nValues to be changed:\n\n"));
+
+	XLogFileName(fname, ControlFile.checkPointCopy.ThisTimeLineID, newXlogSegNo);
+	printf(_("First log segment after reset:        %s\n"), fname);
+
+	if (set_mxid != 0)
+	{
+		printf(_("NextMultiXactId:                      %u\n"),
+			   ControlFile.checkPointCopy.nextMulti);
+		printf(_("OldestMultiXid:                       %u\n"),
+			   ControlFile.checkPointCopy.oldestMulti);
+		printf(_("OldestMulti's DB:                     %u\n"),
+			   ControlFile.checkPointCopy.oldestMultiDB);
+	}
+
+	if (set_mxoff != -1)
+	{
+		printf(_("NextMultiOffset:                      %u\n"),
+			   ControlFile.checkPointCopy.nextMultiOffset);
+	}
+
+	if (set_oid != 0)
+	{
+		printf(_("NextOID:                              %u\n"),
+			   ControlFile.checkPointCopy.nextOid);
+	}
+
+	if (set_xid != 0)
+	{
+		printf(_("NextXID:                              %u\n"),
+			   ControlFile.checkPointCopy.nextXid);
+		printf(_("OldestXID:                            %u\n"),
+			   ControlFile.checkPointCopy.oldestXid);
+		printf(_("OldestXID's DB:                       %u\n"),
+			   ControlFile.checkPointCopy.oldestXidDB);
+	}
+
+	if (set_xid_epoch != -1)
+	{
+		printf(_("NextXID Epoch:                        %u\n"),
+			   ControlFile.checkPointCopy.nextXidEpoch);
+	}
+}
+
+
+/*
  * Write out the new pg_control file.
  */
 static void
@@ -662,7 +717,9 @@ RewriteControlFile(void)
 	 * anyway at startup.
 	 */
 	ControlFile.wal_level = WAL_LEVEL_MINIMAL;
+	ControlFile.wal_log_hints = false;
 	ControlFile.MaxConnections = 100;
+	ControlFile.max_worker_processes = 8;
 	ControlFile.max_prepared_xacts = 0;
 	ControlFile.max_locks_per_xact = 64;
 
@@ -745,7 +802,7 @@ FindEndOfXLOG(void)
 
 	/*
 	 * Initialize the max() computation using the last checkpoint address from
-	 * old pg_control.	Note that for the moment we are working with segment
+	 * old pg_control.  Note that for the moment we are working with segment
 	 * numbering according to the old xlog seg size.
 	 */
 	segs_per_xlogid = (UINT64CONST(0x0000000100000000) / ControlFile.xlog_seg_size);
@@ -764,8 +821,7 @@ FindEndOfXLOG(void)
 		exit(1);
 	}
 
-	errno = 0;
-	while ((xlde = readdir(xldir)) != NULL)
+	while (errno = 0, (xlde = readdir(xldir)) != NULL)
 	{
 		if (strlen(xlde->d_name) == 24 &&
 			strspn(xlde->d_name, "0123456789ABCDEF") == 24)
@@ -787,25 +843,21 @@ FindEndOfXLOG(void)
 			if (segno > newXlogSegNo)
 				newXlogSegNo = segno;
 		}
-		errno = 0;
 	}
-#ifdef WIN32
-
-	/*
-	 * This fix is in mingw cvs (runtime/mingwex/dirent.c rev 1.4), but not in
-	 * released version
-	 */
-	if (GetLastError() == ERROR_NO_MORE_FILES)
-		errno = 0;
-#endif
 
 	if (errno)
 	{
-		fprintf(stderr, _("%s: could not read from directory \"%s\": %s\n"),
+		fprintf(stderr, _("%s: could not read directory \"%s\": %s\n"),
 				progname, XLOGDIR, strerror(errno));
 		exit(1);
 	}
-	closedir(xldir);
+
+	if (closedir(xldir))
+	{
+		fprintf(stderr, _("%s: could not close directory \"%s\": %s\n"),
+				progname, XLOGDIR, strerror(errno));
+		exit(1);
+	}
 
 	/*
 	 * Finally, convert to new xlog seg size, and advance by one to ensure we
@@ -835,8 +887,7 @@ KillExistingXLOG(void)
 		exit(1);
 	}
 
-	errno = 0;
-	while ((xlde = readdir(xldir)) != NULL)
+	while (errno = 0, (xlde = readdir(xldir)) != NULL)
 	{
 		if (strlen(xlde->d_name) == 24 &&
 			strspn(xlde->d_name, "0123456789ABCDEF") == 24)
@@ -849,25 +900,21 @@ KillExistingXLOG(void)
 				exit(1);
 			}
 		}
-		errno = 0;
 	}
-#ifdef WIN32
-
-	/*
-	 * This fix is in mingw cvs (runtime/mingwex/dirent.c rev 1.4), but not in
-	 * released version
-	 */
-	if (GetLastError() == ERROR_NO_MORE_FILES)
-		errno = 0;
-#endif
 
 	if (errno)
 	{
-		fprintf(stderr, _("%s: could not read from directory \"%s\": %s\n"),
+		fprintf(stderr, _("%s: could not read directory \"%s\": %s\n"),
 				progname, XLOGDIR, strerror(errno));
 		exit(1);
 	}
-	closedir(xldir);
+
+	if (closedir(xldir))
+	{
+		fprintf(stderr, _("%s: could not close directory \"%s\": %s\n"),
+				progname, XLOGDIR, strerror(errno));
+		exit(1);
+	}
 }
 
 
@@ -891,8 +938,7 @@ KillExistingArchiveStatus(void)
 		exit(1);
 	}
 
-	errno = 0;
-	while ((xlde = readdir(xldir)) != NULL)
+	while (errno = 0, (xlde = readdir(xldir)) != NULL)
 	{
 		if (strspn(xlde->d_name, "0123456789ABCDEF") == 24 &&
 			(strcmp(xlde->d_name + 24, ".ready") == 0 ||
@@ -906,25 +952,21 @@ KillExistingArchiveStatus(void)
 				exit(1);
 			}
 		}
-		errno = 0;
 	}
-#ifdef WIN32
-
-	/*
-	 * This fix is in mingw cvs (runtime/mingwex/dirent.c rev 1.4), but not in
-	 * released version
-	 */
-	if (GetLastError() == ERROR_NO_MORE_FILES)
-		errno = 0;
-#endif
 
 	if (errno)
 	{
-		fprintf(stderr, _("%s: could not read from directory \"%s\": %s\n"),
+		fprintf(stderr, _("%s: could not read directory \"%s\": %s\n"),
 				progname, ARCHSTATDIR, strerror(errno));
 		exit(1);
 	}
-	closedir(xldir);
+
+	if (closedir(xldir))
+	{
+		fprintf(stderr, _("%s: could not close directory \"%s\": %s\n"),
+				progname, ARCHSTATDIR, strerror(errno));
+		exit(1);
+	}
 }
 
 
@@ -1035,8 +1077,8 @@ usage(void)
 	printf(_("  -e XIDEPOCH      set next transaction ID epoch\n"));
 	printf(_("  -f               force update to be done\n"));
 	printf(_("  -l XLOGFILE      force minimum WAL starting location for new transaction log\n"));
-	printf(_("  -m XID,OLDEST    set next multitransaction ID and oldest value\n"));
-	printf(_("  -n               no update, just show extracted control values (for testing)\n"));
+	printf(_("  -m MXID,MXID     set next and oldest multitransaction ID\n"));
+	printf(_("  -n               no update, just show what would be done (for testing)\n"));
 	printf(_("  -o OID           set next OID\n"));
 	printf(_("  -O OFFSET        set next multitransaction offset\n"));
 	printf(_("  -V, --version    output version information, then exit\n"));

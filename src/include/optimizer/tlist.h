@@ -4,7 +4,7 @@
  *	  prototypes for tlist.c.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/tlist.h
@@ -19,6 +19,7 @@
 
 extern TargetEntry *tlist_member(Node *node, List *targetlist);
 extern TargetEntry *tlist_member_ignore_relabel(Node *node, List *targetlist);
+extern TargetEntry *tlist_member_match_var(Var *var, List *targetlist);
 
 extern List *flatten_tlist(List *tlist, PVCAggregateBehavior aggbehavior,
 			  PVCPlaceHolderBehavior phbehavior);

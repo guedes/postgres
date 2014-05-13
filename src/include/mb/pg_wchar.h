@@ -3,14 +3,14 @@
  * pg_wchar.h
  *	  multibyte-character support
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/mb/pg_wchar.h
  *
  *	NOTES
  *		This is used both by the backend and by libpq, but should not be
- *		included by libpq client programs.	In particular, a libpq client
+ *		included by libpq client programs.  In particular, a libpq client
  *		should not assume that the encoding IDs used by the version of libpq
  *		it's linked to match up with the IDs declared here.
  *
@@ -54,28 +54,28 @@ typedef unsigned int pg_wchar;
  * 1) 1-byte ASCII characters.  Each byte is below 0x80.
  *
  * 2) "Official" single byte charsets such as ISO-8859-1 (Latin1).
- *    Each MULE character consists of 2 bytes: LC1 + C1, where LC1 is
- *    an identifier for the charset (in the range 0x81 to 0x8d) and C1
- *    is the character code (in the range 0xa0 to 0xff).
+ *	  Each MULE character consists of 2 bytes: LC1 + C1, where LC1 is
+ *	  an identifier for the charset (in the range 0x81 to 0x8d) and C1
+ *	  is the character code (in the range 0xa0 to 0xff).
  *
  * 3) "Private" single byte charsets such as SISHENG.  Each MULE
- *    character consists of 3 bytes: LCPRV1 + LC12 + C1, where LCPRV1
- *    is a private-charset flag, LC12 is an identifier for the charset,
- *    and C1 is the character code (in the range 0xa0 to 0xff).
- *    LCPRV1 is either 0x9a (if LC12 is in the range 0xa0 to 0xdf)
- *    or 0x9b (if LC12 is in the range 0xe0 to 0xef).
+ *	  character consists of 3 bytes: LCPRV1 + LC12 + C1, where LCPRV1
+ *	  is a private-charset flag, LC12 is an identifier for the charset,
+ *	  and C1 is the character code (in the range 0xa0 to 0xff).
+ *	  LCPRV1 is either 0x9a (if LC12 is in the range 0xa0 to 0xdf)
+ *	  or 0x9b (if LC12 is in the range 0xe0 to 0xef).
  *
  * 4) "Official" multibyte charsets such as JIS X0208.  Each MULE
- *    character consists of 3 bytes: LC2 + C1 + C2, where LC2 is
- *    an identifier for the charset (in the range 0x90 to 0x99) and C1
- *    and C2 form the character code (each in the range 0xa0 to 0xff).
+ *	  character consists of 3 bytes: LC2 + C1 + C2, where LC2 is
+ *	  an identifier for the charset (in the range 0x90 to 0x99) and C1
+ *	  and C2 form the character code (each in the range 0xa0 to 0xff).
  *
  * 5) "Private" multibyte charsets such as CNS 11643-1992 Plane 3.
- *    Each MULE character consists of 4 bytes: LCPRV2 + LC22 + C1 + C2,
- *    where LCPRV2 is a private-charset flag, LC22 is an identifier for
- *    the charset, and C1 and C2 form the character code (each in the range
- *    0xa0 to 0xff).  LCPRV2 is either 0x9c (if LC22 is in the range 0xf0
- *    to 0xf4) or 0x9d (if LC22 is in the range 0xf5 to 0xfe).
+ *	  Each MULE character consists of 4 bytes: LCPRV2 + LC22 + C1 + C2,
+ *	  where LCPRV2 is a private-charset flag, LC22 is an identifier for
+ *	  the charset, and C1 and C2 form the character code (each in the range
+ *	  0xa0 to 0xff).  LCPRV2 is either 0x9c (if LC22 is in the range 0xf0
+ *	  to 0xf4) or 0x9d (if LC22 is in the range 0xf5 to 0xfe).
  *
  * "Official" encodings are those that have been assigned code numbers by
  * the XEmacs project; "private" encodings have Postgres-specific charset
@@ -133,7 +133,8 @@ typedef unsigned int pg_wchar;
 #define LC_JISX0212			0x94	/* Japanese Kanji (JIS X 0212) */
 #define LC_CNS11643_1		0x95	/* CNS 11643-1992 Plane 1 */
 #define LC_CNS11643_2		0x96	/* CNS 11643-1992 Plane 2 */
-#define LC_JISX0213_1		0x97	/* Japanese Kanji (JIS X 0213 Plane 1) (not supported) */
+#define LC_JISX0213_1		0x97/* Japanese Kanji (JIS X 0213 Plane 1) (not
+								 * supported) */
 #define LC_BIG5_1			0x98	/* Plane 1 Chinese traditional (not supported) */
 #define LC_BIG5_2			0x99	/* Plane 1 Chinese traditional (not supported) */
 
@@ -167,44 +168,44 @@ typedef unsigned int pg_wchar;
 /*
  * Charset IDs for private single byte encodings (0xa0-0xef)
  */
-#define LC_SISHENG			0xa0	/* Chinese SiSheng characters for
-									 * PinYin/ZhuYin (not supported) */
-#define LC_IPA				0xa1	/* IPA (International Phonetic Association)
-									 * (not supported) */
-#define LC_VISCII_LOWER		0xa2	/* Vietnamese VISCII1.1 lower-case (not
-									 * supported) */
-#define LC_VISCII_UPPER		0xa3	/* Vietnamese VISCII1.1 upper-case (not
-									 * supported) */
+#define LC_SISHENG			0xa0/* Chinese SiSheng characters for
+								 * PinYin/ZhuYin (not supported) */
+#define LC_IPA				0xa1/* IPA (International Phonetic Association)
+								 * (not supported) */
+#define LC_VISCII_LOWER		0xa2/* Vietnamese VISCII1.1 lower-case (not
+								 * supported) */
+#define LC_VISCII_UPPER		0xa3/* Vietnamese VISCII1.1 upper-case (not
+								 * supported) */
 #define LC_ARABIC_DIGIT		0xa4	/* Arabic digit (not supported) */
 #define LC_ARABIC_1_COLUMN	0xa5	/* Arabic 1-column (not supported) */
 #define LC_ASCII_RIGHT_TO_LEFT	0xa6	/* ASCII (left half of ISO8859-1) with
 										 * right-to-left direction (not
 										 * supported) */
-#define LC_LAO				0xa7	/* Lao characters (ISO10646 0E80..0EDF)
-									 * (not supported) */
+#define LC_LAO				0xa7/* Lao characters (ISO10646 0E80..0EDF) (not
+								 * supported) */
 #define LC_ARABIC_2_COLUMN	0xa8	/* Arabic 1-column (not supported) */
 
 /*
  * Charset IDs for private multibyte encodings (0xf0-0xff)
  */
-#define LC_INDIAN_1_COLUMN	0xf0	/* Indian charset for 1-column width glyphs
-									 * (not supported) */
-#define LC_TIBETAN_1_COLUMN 0xf1	/* Tibetan 1-column width glyphs
-									 * (not supported) */
-#define LC_UNICODE_SUBSET_2	0xf2	/* Unicode characters of the range U+2500..U+33FF.
-									 * (not supported) */  
-#define LC_UNICODE_SUBSET_3	0xf3	/* Unicode characters of the range U+E000..U+FFFF.
-									 * (not supported) */  
-#define LC_UNICODE_SUBSET	0xf4	/* Unicode characters of the range U+0100..U+24FF.
-									 * (not supported) */  
+#define LC_INDIAN_1_COLUMN	0xf0/* Indian charset for 1-column width glyphs
+								 * (not supported) */
+#define LC_TIBETAN_1_COLUMN 0xf1/* Tibetan 1-column width glyphs (not
+								 * supported) */
+#define LC_UNICODE_SUBSET_2 0xf2/* Unicode characters of the range
+								 * U+2500..U+33FF. (not supported) */
+#define LC_UNICODE_SUBSET_3 0xf3/* Unicode characters of the range
+								 * U+E000..U+FFFF. (not supported) */
+#define LC_UNICODE_SUBSET	0xf4/* Unicode characters of the range
+								 * U+0100..U+24FF. (not supported) */
 #define LC_ETHIOPIC			0xf5	/* Ethiopic characters (not supported) */
 #define LC_CNS11643_3		0xf6	/* CNS 11643-1992 Plane 3 */
 #define LC_CNS11643_4		0xf7	/* CNS 11643-1992 Plane 4 */
 #define LC_CNS11643_5		0xf8	/* CNS 11643-1992 Plane 5 */
 #define LC_CNS11643_6		0xf9	/* CNS 11643-1992 Plane 6 */
 #define LC_CNS11643_7		0xfa	/* CNS 11643-1992 Plane 7 */
-#define LC_INDIAN_2_COLUMN	0xfb	/* Indian charset for 2-column width glyphs
-									 * (not supported) */
+#define LC_INDIAN_2_COLUMN	0xfb/* Indian charset for 2-column width glyphs
+								 * (not supported) */
 #define LC_TIBETAN			0xfc	/* Tibetan (not supported) */
 /* #define FREE				0xfd	free (unused) */
 /* #define FREE				0xfe	free (unused) */
@@ -272,7 +273,7 @@ typedef enum pg_enc
 	/* PG_ENCODING_BE_LAST points to the above entry */
 
 	/* followings are for client encoding only */
-	PG_SJIS,					/* Shift JIS (Winindows-932) */
+	PG_SJIS,					/* Shift JIS (Windows-932) */
 	PG_BIG5,					/* Big5 (Windows-950) */
 	PG_GBK,						/* GBK (Windows-936) */
 	PG_UHC,						/* UHC (Windows-949) */
@@ -302,33 +303,23 @@ typedef enum pg_enc
 #define PG_VALID_FE_ENCODING(_enc)	PG_VALID_ENCODING(_enc)
 
 /*
- * Encoding names with all aliases
- */
-typedef struct pg_encname
-{
-	char	   *name;
-	pg_enc		encoding;
-} pg_encname;
-
-extern pg_encname pg_encname_tbl[];
-extern unsigned int pg_encname_tbl_sz;
-
-/*
- * Careful:
+ * Table for mapping an encoding number to official encoding name and
+ * possibly other subsidiary data.  Be careful to check encoding number
+ * before accessing a table entry!
  *
  * if (PG_VALID_ENCODING(encoding))
  *		pg_enc2name_tbl[ encoding ];
  */
 typedef struct pg_enc2name
 {
-	char	   *name;
+	const char *name;
 	pg_enc		encoding;
 #ifdef WIN32
 	unsigned	codepage;		/* codepage for WIN32 */
 #endif
 } pg_enc2name;
 
-extern pg_enc2name pg_enc2name_tbl[];
+extern const pg_enc2name pg_enc2name_tbl[];
 
 /*
  * Encoding names for gettext
@@ -339,14 +330,14 @@ typedef struct pg_enc2gettext
 	const char *name;
 } pg_enc2gettext;
 
-extern pg_enc2gettext pg_enc2gettext_tbl[];
+extern const pg_enc2gettext pg_enc2gettext_tbl[];
 
 /*
  * pg_wchar stuff
  */
 typedef int (*mb2wchar_with_len_converter) (const unsigned char *from,
-													pg_wchar *to,
-													int len);
+														pg_wchar *to,
+														int len);
 
 typedef int (*wchar2mb_with_len_converter) (const pg_wchar *from,
 														unsigned char *to,
@@ -362,17 +353,17 @@ typedef int (*mbverifier) (const unsigned char *mbstr, int len);
 
 typedef struct
 {
-	mb2wchar_with_len_converter mb2wchar_with_len;	/* convert a multibyte
-													 * string to a wchar */
-	wchar2mb_with_len_converter wchar2mb_with_len;	/* convert a wchar
-													 * string to a multibyte */
+	mb2wchar_with_len_converter mb2wchar_with_len;		/* convert a multibyte
+														 * string to a wchar */
+	wchar2mb_with_len_converter wchar2mb_with_len;		/* convert a wchar
+														 * string to a multibyte */
 	mblen_converter mblen;		/* get byte length of a char */
 	mbdisplaylen_converter dsplen;		/* get display width of a char */
 	mbverifier	mbverify;		/* verify multibyte sequence */
 	int			maxmblen;		/* max bytes for a char in this encoding */
 } pg_wchar_tbl;
 
-extern pg_wchar_tbl pg_wchar_table[];
+extern const pg_wchar_tbl pg_wchar_table[];
 
 /*
  * UTF-8 to local code conversion map
@@ -440,8 +431,6 @@ extern int	pg_valid_server_encoding_id(int encoding);
  * Remaining functions are not considered part of libpq's API, though many
  * of them do exist inside libpq.
  */
-extern pg_encname *pg_char_to_encname_struct(const char *name);
-
 extern int	pg_mb2wchar(const char *from, pg_wchar *to);
 extern int	pg_mb2wchar_with_len(const char *from, pg_wchar *to, int len);
 extern int pg_encoding_mb2wchar_with_len(int encoding,
@@ -480,8 +469,12 @@ extern const char *pg_get_client_encoding_name(void);
 extern void SetDatabaseEncoding(int encoding);
 extern int	GetDatabaseEncoding(void);
 extern const char *GetDatabaseEncodingName(void);
-extern int	GetPlatformEncoding(void);
-extern void pg_bind_textdomain_codeset(const char *domainname);
+extern void SetMessageEncoding(int encoding);
+extern int	GetMessageEncoding(void);
+
+#ifdef ENABLE_NLS
+extern int	pg_bind_textdomain_codeset(const char *domainname);
+#endif
 
 extern int	pg_valid_client_encoding(const char *name);
 extern int	pg_valid_server_encoding(const char *name);
@@ -523,7 +516,7 @@ extern void check_encoding_conversion_args(int src_encoding,
 
 extern void report_invalid_encoding(int encoding, const char *mbstr, int len) __attribute__((noreturn));
 extern void report_untranslatable_char(int src_encoding, int dest_encoding,
-						   const char *mbstr, int len) __attribute__((noreturn));
+					   const char *mbstr, int len) __attribute__((noreturn));
 
 extern void pg_ascii2mic(const unsigned char *l, unsigned char *p, int len);
 extern void pg_mic2ascii(const unsigned char *mic, unsigned char *p, int len);
@@ -541,7 +534,7 @@ extern void mic2latin_with_table(const unsigned char *mic, unsigned char *p,
 extern bool pg_utf8_islegal(const unsigned char *source, int length);
 
 #ifdef WIN32
-extern WCHAR *pgwin32_toUTF16(const char *str, int len, int *utf16len);
+extern WCHAR *pgwin32_message_to_UTF16(const char *str, int len, int *utf16len);
 #endif
 
 #endif   /* PG_WCHAR_H */

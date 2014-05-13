@@ -3,7 +3,7 @@
  * binaryheap.c
  *	  A simple binary heap implementaion
  *
- * Portions Copyright (c) 2012-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2014, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/lib/binaryheap.c
@@ -35,15 +35,29 @@ binaryheap_allocate(int capacity, binaryheap_comparator compare, void *arg)
 	int			sz;
 	binaryheap *heap;
 
-	sz = offsetof(binaryheap, bh_nodes) + sizeof(Datum) * capacity;
-	heap = palloc(sz);
-	heap->bh_size = 0;
+	sz = offsetof(binaryheap, bh_nodes) +sizeof(Datum) * capacity;
+	heap = (binaryheap *) palloc(sz);
 	heap->bh_space = capacity;
-	heap->bh_has_heap_property = true;
 	heap->bh_compare = compare;
 	heap->bh_arg = arg;
 
+	heap->bh_size = 0;
+	heap->bh_has_heap_property = true;
+
 	return heap;
+}
+
+/*
+ * binaryheap_reset
+ *
+ * Resets the heap to an empty state, losing its data content but not the
+ * parameters passed at allocation.
+ */
+void
+binaryheap_reset(binaryheap *heap)
+{
+	heap->bh_size = 0;
+	heap->bh_has_heap_property = true;
 }
 
 /*
@@ -203,7 +217,7 @@ binaryheap_replace_first(binaryheap *heap, Datum d)
 static inline void
 swap_nodes(binaryheap *heap, int a, int b)
 {
-	Datum	swap;
+	Datum		swap;
 
 	swap = heap->bh_nodes[a];
 	heap->bh_nodes[a] = heap->bh_nodes[b];

@@ -256,10 +256,12 @@ $ sudo semodule -r sepgsql-regtest
 
   <variablelist>
    <varlistentry id="guc-sepgsql-permissive" xreflabel="sepgsql.permissive">
-    <term><varname>sepgsql.permissive</> (<type>boolean</type>)</term>
-    <indexterm>
-     <primary><varname>sepgsql.permissive</> configuration parameter</primary>
-    </indexterm>
+    <term>
+     <varname>sepgsql.permissive</> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>sepgsql.permissive</> configuration parameter</primary>
+     </indexterm>
+    </term>
     <listitem>
      <para>
       This parameter enables <filename>sepgsql</> to function
@@ -278,10 +280,12 @@ $ sudo semodule -r sepgsql-regtest
 
    </varlistentry>
    <varlistentry id="guc-sepgsql-debug-audit" xreflabel="sepgsql.debug_audit">
-    <term><varname>sepgsql.debug_audit</> (<type>boolean</>)</>
-    <indexterm>
-     <primary><varname>sepgsql.debug_audit</> configuration parameter</>
-    </indexterm>
+    <term>
+     <varname>sepgsql.debug_audit</> (<type>boolean</>)
+     <indexterm>
+      <primary><varname>sepgsql.debug_audit</> configuration parameter</>
+     </indexterm>
+    </term>
     <listitem>
      <para>
       This parameter enables the printing of audit messages regardless of
@@ -315,7 +319,7 @@ $ sudo semodule -r sepgsql-regtest
     control rules as relationships between a subject entity (typically,
     a client of the database) and an object entity (such as a database
     object), each of which is
-    identified by a security label.  If access to an unlabelled object is
+    identified by a security label.  If access to an unlabeled object is
     attempted, the object is treated as if it were assigned the label
     <literal>unlabeled_t</>.
    </para>
@@ -397,7 +401,7 @@ UPDATE t1 SET x = 2, y = md5sum(y) WHERE z = 100;
     user tries to execute a function as a part of query, or using fast-path
     invocation. If this function is a trusted procedure, it also checks
     <literal>db_procedure:{entrypoint}</> permission to check whether it
-    can perform as entrypoint of trusted procedure.
+    can perform as entry point of trusted procedure.
    </para>
 
    <para>

@@ -5,7 +5,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_receivexlog.c
@@ -32,11 +32,11 @@
 #define RECONNECT_SLEEP_TIME 5
 
 /* Global options */
-char	   *basedir = NULL;
-int			verbose = 0;
-int			noloop = 0;
-int			standby_message_timeout = 10 * 1000;		/* 10 sec = default */
-volatile bool time_to_abort = false;
+static char *basedir = NULL;
+static int	verbose = 0;
+static int	noloop = 0;
+static int	standby_message_timeout = 10 * 1000;		/* 10 sec = default */
+static volatile bool time_to_abort = false;
 
 
 static void usage(void);
@@ -44,6 +44,13 @@ static XLogRecPtr FindStreamingStart(uint32 *tli);
 static void StreamLog();
 static bool stop_streaming(XLogRecPtr segendpos, uint32 timeline,
 			   bool segment_finished);
+
+#define disconnect_and_exit(code)				\
+	{											\
+	if (conn != NULL) PQfinish(conn);			\
+	exit(code);									\
+	}
+
 
 static void
 usage(void)
@@ -67,6 +74,7 @@ usage(void)
 	printf(_("  -U, --username=NAME    connect as specified database user\n"));
 	printf(_("  -w, --no-password      never prompt for password\n"));
 	printf(_("  -W, --password         force password prompt (should happen automatically)\n"));
+	printf(_("      --slot=SLOTNAME    replication slot to use\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));
 }
 
@@ -121,6 +129,7 @@ FindStreamingStart(uint32 *tli)
 	struct dirent *dirent;
 	XLogSegNo	high_segno = 0;
 	uint32		high_tli = 0;
+	bool		high_ispartial = false;
 
 	dir = opendir(basedir);
 	if (dir == NULL)
@@ -130,75 +139,101 @@ FindStreamingStart(uint32 *tli)
 		disconnect_and_exit(1);
 	}
 
-	while ((dirent = readdir(dir)) != NULL)
+	while (errno = 0, (dirent = readdir(dir)) != NULL)
 	{
-		char		fullpath[MAXPGPATH];
-		struct stat statbuf;
 		uint32		tli;
-		unsigned int log,
-					seg;
 		XLogSegNo	segno;
+		bool		ispartial;
 
 		/*
 		 * Check if the filename looks like an xlog file, or a .partial file.
 		 * Xlog files are always 24 characters, and .partial files are 32
 		 * characters.
 		 */
-		if (strlen(dirent->d_name) != 24 ||
-			!strspn(dirent->d_name, "0123456789ABCDEF") == 24)
+		if (strlen(dirent->d_name) == 24)
+		{
+			if (strspn(dirent->d_name, "0123456789ABCDEF") != 24)
+				continue;
+			ispartial = false;
+		}
+		else if (strlen(dirent->d_name) == 32)
+		{
+			if (strspn(dirent->d_name, "0123456789ABCDEF") != 24)
+				continue;
+			if (strcmp(&dirent->d_name[24], ".partial") != 0)
+				continue;
+			ispartial = true;
+		}
+		else
 			continue;
 
 		/*
 		 * Looks like an xlog file. Parse its position.
 		 */
-		if (sscanf(dirent->d_name, "%08X%08X%08X", &tli, &log, &seg) != 3)
-		{
-			fprintf(stderr,
-				 _("%s: could not parse transaction log file name \"%s\"\n"),
-					progname, dirent->d_name);
-			disconnect_and_exit(1);
-		}
-		segno = ((uint64) log) << 32 | seg;
+		XLogFromFileName(dirent->d_name, &tli, &segno);
 
-		/* Check if this is a completed segment or not */
-		snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, dirent->d_name);
-		if (stat(fullpath, &statbuf) != 0)
+		/*
+		 * Check that the segment has the right size, if it's supposed to be
+		 * completed.
+		 */
+		if (!ispartial)
 		{
-			fprintf(stderr, _("%s: could not stat file \"%s\": %s\n"),
-					progname, fullpath, strerror(errno));
-			disconnect_and_exit(1);
-		}
+			struct stat statbuf;
+			char		fullpath[MAXPGPATH];
 
-		if (statbuf.st_size == XLOG_SEG_SIZE)
-		{
-			/* Completed segment */
-			if (segno > high_segno || (segno == high_segno && tli > high_tli))
+			snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, dirent->d_name);
+			if (stat(fullpath, &statbuf) != 0)
 			{
-				high_segno = segno;
-				high_tli = tli;
+				fprintf(stderr, _("%s: could not stat file \"%s\": %s\n"),
+						progname, fullpath, strerror(errno));
+				disconnect_and_exit(1);
+			}
+
+			if (statbuf.st_size != XLOG_SEG_SIZE)
+			{
+				fprintf(stderr,
+						_("%s: segment file \"%s\" has incorrect size %d, skipping\n"),
+						progname, dirent->d_name, (int) statbuf.st_size);
 				continue;
 			}
 		}
-		else
+
+		/* Looks like a valid segment. Remember that we saw it. */
+		if ((segno > high_segno) ||
+			(segno == high_segno && tli > high_tli) ||
+			(segno == high_segno && tli == high_tli && high_ispartial && !ispartial))
 		{
-			fprintf(stderr,
-			  _("%s: segment file \"%s\" has incorrect size %d, skipping\n"),
-					progname, dirent->d_name, (int) statbuf.st_size);
-			continue;
+			high_segno = segno;
+			high_tli = tli;
+			high_ispartial = ispartial;
 		}
 	}
 
-	closedir(dir);
+	if (errno)
+	{
+		fprintf(stderr, _("%s: could not read directory \"%s\": %s\n"),
+				progname, basedir, strerror(errno));
+		disconnect_and_exit(1);
+	}
+
+	if (closedir(dir))
+	{
+		fprintf(stderr, _("%s: could not close directory \"%s\": %s\n"),
+				progname, basedir, strerror(errno));
+		disconnect_and_exit(1);
+	}
 
 	if (high_segno > 0)
 	{
 		XLogRecPtr	high_ptr;
 
 		/*
-		 * Move the starting pointer to the start of the next segment, since
-		 * the highest one we've seen was completed.
+		 * Move the starting pointer to the start of the next segment, if the
+		 * highest one we saw was completed. Otherwise start streaming from
+		 * the beginning of the .partial segment.
 		 */
-		high_segno++;
+		if (!high_ispartial)
+			high_segno++;
 
 		XLogSegNoOffsetToRecPtr(high_segno, 0, high_ptr);
 
@@ -252,10 +287,10 @@ StreamLog(void)
 				progname, "IDENTIFY_SYSTEM", PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
-	if (PQntuples(res) != 1 || PQnfields(res) != 3)
+	if (PQntuples(res) != 1 || PQnfields(res) < 3)
 	{
 		fprintf(stderr,
-				_("%s: could not identify system: got %d rows and %d fields, expected %d rows and %d fields\n"),
+				_("%s: could not identify system: got %d rows and %d fields, expected %d rows and %d or more fields\n"),
 				progname, PQntuples(res), PQnfields(res), 1, 3);
 		disconnect_and_exit(1);
 	}
@@ -328,6 +363,7 @@ main(int argc, char **argv)
 		{"no-password", no_argument, NULL, 'w'},
 		{"password", no_argument, NULL, 'W'},
 		{"status-interval", required_argument, NULL, 's'},
+		{"slot", required_argument, NULL, 'S'},
 		{"verbose", no_argument, NULL, 'v'},
 		{NULL, 0, NULL, 0}
 	};
@@ -394,6 +430,9 @@ main(int argc, char **argv)
 					exit(1);
 				}
 				break;
+			case 'S':
+				replication_slot = pg_strdup(optarg);
+				break;
 			case 'n':
 				noloop = 1;
 				break;
@@ -458,7 +497,7 @@ main(int argc, char **argv)
 		else
 		{
 			fprintf(stderr,
-					/* translator: check source for value for %d */
+			/* translator: check source for value for %d */
 					_("%s: disconnected; waiting %d seconds to try again\n"),
 					progname, RECONNECT_SLEEP_TIME);
 			pg_usleep(RECONNECT_SLEEP_TIME * 1000000);

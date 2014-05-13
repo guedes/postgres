@@ -6,7 +6,7 @@
  *	  changes should be made with care.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/gist.h
@@ -64,6 +64,7 @@
 #define F_FOLLOW_RIGHT		(1 << 3)	/* page to the right has no downlink */
 
 typedef XLogRecPtr GistNSN;
+
 /*
  * For on-disk compatibility with pre-9.3 servers, NSN is stored as two
  * 32-bit fields on disk, same as LSNs.
@@ -72,7 +73,7 @@ typedef PageXLogRecPtr PageGistNSN;
 
 typedef struct GISTPageOpaqueData
 {
-	PageGistNSN	nsn;			/* this value must change on page split */
+	PageGistNSN nsn;			/* this value must change on page split */
 	BlockNumber rightlink;		/* next page if any */
 	uint16		flags;			/* see bit definitions above */
 	uint16		gist_page_id;	/* for identification of GiST indexes */

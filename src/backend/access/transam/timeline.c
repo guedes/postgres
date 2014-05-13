@@ -15,13 +15,13 @@
  * <parentTLI> <switchpoint> <reason>
  *
  *	parentTLI	ID of the parent timeline
- *	switchpoint	XLogRecPtr of the WAL position where the switch happened
+ *	switchpoint XLogRecPtr of the WAL position where the switch happened
  *	reason		human-readable explanation of why the timeline was changed
  *
  * The fields are separated by tabs. Lines beginning with # are comments, and
  * are ignored. Empty lines are also ignored.
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/timeline.c
@@ -49,7 +49,7 @@ restoreTimeLineHistoryFiles(TimeLineID begin, TimeLineID end)
 {
 	char		path[MAXPGPATH];
 	char		histfname[MAXFNAMELEN];
-	TimeLineID tli;
+	TimeLineID	tli;
 
 	for (tli = begin; tli < end; tli++)
 	{
@@ -66,7 +66,7 @@ restoreTimeLineHistoryFiles(TimeLineID begin, TimeLineID end)
  * Try to read a timeline's history file.
  *
  * If successful, return the list of component TLIs (the given TLI followed by
- * its ancestor TLIs).	If we can't find the history file, assume that the
+ * its ancestor TLIs).  If we can't find the history file, assume that the
  * timeline has no parents, and return a list of just the specified timeline
  * ID.
  */
@@ -150,7 +150,7 @@ readTimeLineHistory(TimeLineID targetTLI)
 		if (nfields != 3)
 			ereport(FATAL,
 					(errmsg("syntax error in history file: %s", fline),
-					 errhint("Expected an XLOG switchpoint location.")));
+			   errhint("Expected a transaction log switchpoint location.")));
 
 		if (result && tli <= lasttli)
 			ereport(FATAL,
@@ -179,8 +179,8 @@ readTimeLineHistory(TimeLineID targetTLI)
 			errhint("Timeline IDs must be less than child timeline's ID.")));
 
 	/*
-	 * Create one more entry for the "tip" of the timeline, which has no
-	 * entry in the history file.
+	 * Create one more entry for the "tip" of the timeline, which has no entry
+	 * in the history file.
 	 */
 	entry = (TimeLineHistoryEntry *) palloc(sizeof(TimeLineHistoryEntry));
 	entry->tli = targetTLI;
@@ -281,7 +281,7 @@ findNewestTimeLine(TimeLineID startTLI)
  *	reason: human-readable explanation of why the timeline was switched
  *
  * Currently this is only used at the end recovery, and so there are no locking
- * considerations.	But we should be just as tense as XLogFileInit to avoid
+ * considerations.  But we should be just as tense as XLogFileInit to avoid
  * emplacing a bogus file.
  */
 void
@@ -530,7 +530,7 @@ writeTimeLineHistoryFile(TimeLineID tli, char *content, int size)
 bool
 tliInHistory(TimeLineID tli, List *expectedTLEs)
 {
-	ListCell *cell;
+	ListCell   *cell;
 
 	foreach(cell, expectedTLEs)
 	{
@@ -548,11 +548,12 @@ tliInHistory(TimeLineID tli, List *expectedTLEs)
 TimeLineID
 tliOfPointInHistory(XLogRecPtr ptr, List *history)
 {
-	ListCell *cell;
+	ListCell   *cell;
 
 	foreach(cell, history)
 	{
 		TimeLineHistoryEntry *tle = (TimeLineHistoryEntry *) lfirst(cell);
+
 		if ((XLogRecPtrIsInvalid(tle->begin) || tle->begin <= ptr) &&
 			(XLogRecPtrIsInvalid(tle->end) || ptr < tle->end))
 		{
@@ -563,7 +564,7 @@ tliOfPointInHistory(XLogRecPtr ptr, List *history)
 
 	/* shouldn't happen. */
 	elog(ERROR, "timeline history was not contiguous");
-	return 0;	/* keep compiler quiet */
+	return 0;					/* keep compiler quiet */
 }
 
 /*
@@ -579,7 +580,7 @@ tliSwitchPoint(TimeLineID tli, List *history, TimeLineID *nextTLI)
 
 	if (nextTLI)
 		*nextTLI = 0;
-	foreach (cell, history)
+	foreach(cell, history)
 	{
 		TimeLineHistoryEntry *tle = (TimeLineHistoryEntry *) lfirst(cell);
 
@@ -592,5 +593,5 @@ tliSwitchPoint(TimeLineID tli, List *history, TimeLineID *nextTLI)
 	ereport(ERROR,
 			(errmsg("requested timeline %u is not in this server's history",
 					tli)));
-	return InvalidXLogRecPtr; /* keep compiler quiet */
+	return InvalidXLogRecPtr;	/* keep compiler quiet */
 }

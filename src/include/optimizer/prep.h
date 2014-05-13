@@ -4,7 +4,7 @@
  *	  prototypes for files in optimizer/prep/
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/prep.h
@@ -34,6 +34,11 @@ extern Relids get_relids_for_join(PlannerInfo *root, int joinrelid);
  */
 extern Node *negate_clause(Node *node);
 extern Expr *canonicalize_qual(Expr *qual);
+
+/*
+ * prototypes for prepsecurity.c
+ */
+extern void expand_security_quals(PlannerInfo *root, List *tlist);
 
 /*
  * prototypes for preptlist.c

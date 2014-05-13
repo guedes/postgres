@@ -21,8 +21,9 @@
  *
  * Replication is either synchronous or not synchronous (async). If it is
  * async, we just fastpath out of here. If it is sync, then we wait for
- * the write or flush location on the standby before releasing the waiting backend.
- * Further complexity in that interaction is expected in later releases.
+ * the write or flush location on the standby before releasing the waiting
+ * backend. Further complexity in that interaction is expected in later
+ * releases.
  *
  * The best performing way to manage the waiting backends is to have a
  * single ordered queue of waiting backends, so that we can avoid
@@ -34,7 +35,7 @@
  * take some time. Once caught up, the current highest priority standby
  * will release waiters from the queue.
  *
- * Portions Copyright (c) 2010-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2014, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/syncrep.c
@@ -116,8 +117,8 @@ SyncRepWaitForLSN(XLogRecPtr XactCommitLSN)
 	 * set.  See SyncRepUpdateSyncStandbysDefined.
 	 *
 	 * Also check that the standby hasn't already replied. Unlikely race
-	 * condition but we'll be fetching that cache line anyway so its likely to
-	 * be a low cost check.
+	 * condition but we'll be fetching that cache line anyway so it's likely
+	 * to be a low cost check.
 	 */
 	if (!WalSndCtl->sync_standbys_defined ||
 		XactCommitLSN <= WalSndCtl->lsn[mode])
@@ -443,7 +444,7 @@ SyncRepReleaseWaiters(void)
 
 	elog(DEBUG3, "released %d procs up to write %X/%X, %d procs up to flush %X/%X",
 		 numwrite, (uint32) (MyWalSnd->write >> 32), (uint32) MyWalSnd->write,
-		 numflush, (uint32) (MyWalSnd->flush >> 32), (uint32) MyWalSnd->flush);
+	   numflush, (uint32) (MyWalSnd->flush >> 32), (uint32) MyWalSnd->flush);
 
 	/*
 	 * If we are managing the highest priority standby, though we weren't
@@ -516,7 +517,7 @@ SyncRepGetStandbyPriority(void)
 }
 
 /*
- * Walk the specified queue from head.	Set the state of any backends that
+ * Walk the specified queue from head.  Set the state of any backends that
  * need to be woken, remove them from the queue, and then wake them.
  * Pass all = true to wake whole queue; otherwise, just wake up to
  * the walsender's LSN.

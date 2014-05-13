@@ -2,7 +2,7 @@
  *
  * UUID generation functions using the OSSP UUID library
  *
- * Copyright (c) 2007-2013, PostgreSQL Global Development Group
+ * Copyright (c) 2007-2014, PostgreSQL Global Development Group
  *
  * contrib/uuid-ossp/uuid-ossp.c
  *
@@ -37,19 +37,6 @@
 
 
 PG_MODULE_MAGIC;
-
-
-Datum		uuid_nil(PG_FUNCTION_ARGS);
-Datum		uuid_ns_dns(PG_FUNCTION_ARGS);
-Datum		uuid_ns_url(PG_FUNCTION_ARGS);
-Datum		uuid_ns_oid(PG_FUNCTION_ARGS);
-Datum		uuid_ns_x500(PG_FUNCTION_ARGS);
-
-Datum		uuid_generate_v1(PG_FUNCTION_ARGS);
-Datum		uuid_generate_v1mc(PG_FUNCTION_ARGS);
-Datum		uuid_generate_v3(PG_FUNCTION_ARGS);
-Datum		uuid_generate_v4(PG_FUNCTION_ARGS);
-Datum		uuid_generate_v5(PG_FUNCTION_ARGS);
 
 
 PG_FUNCTION_INFO_V1(uuid_nil);

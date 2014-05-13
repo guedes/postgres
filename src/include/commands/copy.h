@@ -4,7 +4,7 @@
  *	  Definitions for using the POSTGRES copy command.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/copy.h
@@ -22,7 +22,7 @@
 typedef struct CopyStateData *CopyState;
 
 extern Oid DoCopy(const CopyStmt *stmt, const char *queryString,
-				  uint64 *processed);
+	   uint64 *processed);
 
 extern void ProcessCopyOptions(CopyState cstate, bool is_from, List *options);
 extern CopyState BeginCopyFrom(Relation rel, const char *filename,

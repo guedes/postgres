@@ -18,6 +18,15 @@
   <ulink url="http://www.ossp.org/pkg/lib/uuid/"></ulink>.
  </para>
 
+ <note>
+  <para>
+   The OSSP UUID library is not well maintained, and is becoming increasingly
+   difficult to port to newer platforms.  If you only need randomly-generated
+   (version 4) UUIDs, consider using the <function>gen_random_uuid()</>
+   function from the <xref linkend="pgcrypto"> module instead.
+  </para>
+ </note>
+
  <sect2>
   <title><literal>uuid-ossp</literal> Functions</title>
 
@@ -42,7 +51,7 @@
     </thead>
     <tbody>
      <row>
-      <entry><literal>uuid_generate_v1()</literal></entry>
+      <entry><function>uuid_generate_v1()</function><indexterm><primary>uuid_generate_v1</primary></indexterm></entry>
       <entry>
        <para>
         This function generates a version 1 UUID.  This involves the MAC
@@ -54,7 +63,7 @@
       </entry>
      </row>
      <row>
-      <entry><literal>uuid_generate_v1mc()</literal></entry>
+      <entry><function>uuid_generate_v1mc()</function><indexterm><primary>uuid_generate_v1mc</primary></indexterm></entry>
       <entry>
        <para>
         This function generates a version 1 UUID but uses a random multicast
@@ -63,7 +72,7 @@
       </entry>
      </row>
      <row>
-      <entry><literal>uuid_generate_v3(namespace uuid, name text)</literal></entry>
+      <entry><function>uuid_generate_v3(namespace uuid, name text)</function><indexterm><primary>uuid_generate_v3</primary></indexterm></entry>
       <entry>
        <para>
         This function generates a version 3 UUID in the given namespace using

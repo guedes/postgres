@@ -236,11 +236,11 @@
 
    <para>
     When <literal>use_remote_estimate</literal> is true,
-    <filename>postgres_fdw</> obtains rowcount and cost estimates from the
+    <filename>postgres_fdw</> obtains row count and cost estimates from the
     remote server and then adds <literal>fdw_startup_cost</literal> and
     <literal>fdw_tuple_cost</literal> to the cost estimates.  When
     <literal>use_remote_estimate</literal> is false,
-    <filename>postgres_fdw</> performs local rowcount and cost estimation
+    <filename>postgres_fdw</> performs local row count and cost estimation
     and then adds <literal>fdw_startup_cost</literal> and
     <literal>fdw_tuple_cost</literal> to the cost estimates.  This local
     estimation is unlikely to be very accurate unless local copies of the
@@ -253,6 +253,43 @@
     frequently updated, the local statistics will soon be obsolete.
    </para>
 
+  </sect3>
+
+  <sect3>
+   <title>Updatability Options</title>
+
+   <para>
+    By default all foreign tables using <filename>postgres_fdw</> are assumed
+    to be updatable.  This may be overridden using the following option:
+   </para>
+
+   <variablelist>
+
+    <varlistentry>
+     <term><literal>updatable</literal></term>
+     <listitem>
+      <para>
+       This option controls whether <filename>postgres_fdw</> allows foreign
+       tables to be modified using <command>INSERT</>, <command>UPDATE</> and
+       <command>DELETE</> commands.  It can be specified for a foreign table
+       or a foreign server.  A table-level option overrides a server-level
+       option.
+       The default is <literal>true</>.
+      </para>
+
+      <para>
+       Of course, if the remote table is not in fact updatable, an error
+       would occur anyway.  Use of this option primarily allows the error to
+       be thrown locally without querying the remote server.  Note however
+       that the <literal>information_schema</> views will report a
+       <filename>postgres_fdw</> foreign table to be updatable (or not)
+       according to the setting of this option, without any check of the
+       remote server.
+      </para>
+     </listitem>
+    </varlistentry>
+
+   </variablelist>
   </sect3>
  </sect2>
 
@@ -335,6 +372,68 @@
    reference in a sub-<literal>SELECT</> with <literal>OFFSET 0</> as an
    optimization fence, and placing the problematic function or operator
    outside the sub-<literal>SELECT</>.
+  </para>
+ </sect2>
+
+ <sect2>
+  <title>Examples</title>
+
+  <para>
+   Here is an example of creating a foreign table with
+   <literal>postgres_fdw</>. First install the extension:
+  </para>
+
+<programlisting>
+CREATE EXTENSION postgres_fdw;
+</programlisting>
+
+  <para>
+   Then create a foreign server using <xref linkend="sql-createserver">.
+   In this example we wish to connect to a <productname>PostgreSQL</> server
+   on host <literal>192.83.123.89</literal> listening on
+   port <literal>5432</literal>.  The database to which the connection is made
+   is named <literal>foreign_db</literal> on the remote server:
+
+<programlisting>
+CREATE SERVER foreign_server
+        FOREIGN DATA WRAPPER postgres_fdw
+        OPTIONS (host '192.83.123.89', port '5432', dbname 'foreign_db');
+</programlisting>
+  </para>
+
+  <para>
+   A user mapping, defined with <xref linkend="sql-createusermapping">, is
+   needed as well to identify the role that will be used on the remote
+   server:
+
+<programlisting>
+CREATE USER MAPPING FOR local_user
+        SERVER foreign_server
+        OPTIONS (user 'foreign_user', password 'password');
+</programlisting>
+  </para>
+
+  <para>
+   Now it is possible to create a foreign table with
+   <xref linkend="sql-createforeigntable">.  In this example we
+   wish to access the table named <structname>some_schema.some_table</>
+   on the remote server.  The local name for it will
+   be <structname>foreign_table</>:
+
+<programlisting>
+CREATE FOREIGN TABLE foreign_table (
+        id serial NOT NULL,
+        data text
+)
+        SERVER foreign_server
+        OPTIONS (schema_name 'some_schema', table_name 'some_table');
+</programlisting>
+
+   It's essential that the data types and other properties of the columns
+   declared in <command>CREATE FOREIGN TABLE</> match the actual remote table.
+   Column names must match as well, unless you attach <literal>column_name</>
+   options to the individual columns to show how they are named in the remote
+   table.
   </para>
  </sect2>
 

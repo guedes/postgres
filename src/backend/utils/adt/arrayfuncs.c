@@ -3,7 +3,7 @@
  * arrayfuncs.c
  *	  Support functions for arrays.
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -425,8 +425,8 @@ ArrayCount(const char *str, int *dim, char typdelim)
 
 	for (i = 0; i < MAXDIM; ++i)
 	{
-		temp[i] = dim[i] = 0;
-		nelems_last[i] = nelems[i] = 1;
+		temp[i] = dim[i] = nelems_last[i] = 0;
+		nelems[i] = 1;
 	}
 
 	ptr = str;
@@ -540,8 +540,8 @@ ArrayCount(const char *str, int *dim, char typdelim)
 							errmsg("malformed array literal: \"%s\"", str)));
 						nest_level--;
 
-						if ((nelems_last[nest_level] != 1) &&
-							(nelems[nest_level] != nelems_last[nest_level]))
+						if (nelems_last[nest_level] != 0 &&
+							nelems[nest_level] != nelems_last[nest_level])
 							ereport(ERROR,
 							   (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 								errmsg("multidimensional arrays must have "
@@ -694,7 +694,7 @@ ReadArrayStr(char *arrayStr,
 
 	/*
 	 * We have to remove " and \ characters to create a clean item value to
-	 * pass to the datatype input routine.	We overwrite each item value
+	 * pass to the datatype input routine.  We overwrite each item value
 	 * in-place within arrayStr to do this.  srcptr is the current scan point,
 	 * and dstptr is where we are copying to.
 	 *
@@ -894,7 +894,7 @@ ReadArrayStr(char *arrayStr,
  * referenced by Datums after copying them.
  *
  * If the input data is of varlena type, the caller must have ensured that
- * the values are not toasted.	(Doing it here doesn't work since the
+ * the values are not toasted.  (Doing it here doesn't work since the
  * caller has already allocated space for the array...)
  */
 static void
@@ -1740,6 +1740,19 @@ array_length(PG_FUNCTION_ARGS)
 }
 
 /*
+ * array_cardinality:
+ *		returns the total number of elements in an array
+ */
+Datum
+array_cardinality(PG_FUNCTION_ARGS)
+{
+	ArrayType  *v = PG_GETARG_ARRAYTYPE_P(0);
+
+	PG_RETURN_INT32(ArrayGetNItems(ARR_NDIM(v), ARR_DIMS(v)));
+}
+
+
+/*
  * array_ref :
  *	  This routine takes an array pointer and a subscript array and returns
  *	  the referenced item as a Datum.  Note that for a pass-by-reference
@@ -1990,7 +2003,7 @@ array_get_slice(ArrayType *array,
 	memcpy(ARR_DIMS(newarray), span, ndim * sizeof(int));
 
 	/*
-	 * Lower bounds of the new array are set to 1.	Formerly (before 7.3) we
+	 * Lower bounds of the new array are set to 1.  Formerly (before 7.3) we
 	 * copied the given lowerIndx values ... but that seems confusing.
 	 */
 	newlb = ARR_LBOUND(newarray);
@@ -2622,7 +2635,7 @@ array_set_slice(ArrayType *array,
 /*
  * array_map()
  *
- * Map an array through an arbitrary function.	Return a new array with
+ * Map an array through an arbitrary function.  Return a new array with
  * same dimensions and each source element transformed by fn().  Each
  * source element is passed as the first argument to fn(); additional
  * arguments to be passed to fn() can be specified by the caller.
@@ -2637,9 +2650,9 @@ array_set_slice(ArrayType *array,
  *	 first argument position initially holds the input array value.
  * * inpType: OID of element type of input array.  This must be the same as,
  *	 or binary-compatible with, the first argument type of fn().
- * * retType: OID of element type of output array.	This must be the same as,
+ * * retType: OID of element type of output array.  This must be the same as,
  *	 or binary-compatible with, the result type of fn().
- * * amstate: workspace for array_map.	Must be zeroed by caller before
+ * * amstate: workspace for array_map.  Must be zeroed by caller before
  *	 first call, and not touched after that.
  *
  * It is legitimate to pass a freshly-zeroed ArrayMapState on each call,
@@ -3493,7 +3506,7 @@ array_cmp(FunctionCallInfo fcinfo)
 
 	/*
 	 * If arrays contain same data (up to end of shorter one), apply
-	 * additional rules to sort by dimensionality.	The relative significance
+	 * additional rules to sort by dimensionality.  The relative significance
 	 * of the different bits of information is historical; mainly we just care
 	 * that we don't say "equal" for arrays of different dimensionality.
 	 */
@@ -3755,7 +3768,7 @@ array_contain_compare(ArrayType *array1, ArrayType *array2, Oid collation,
 
 		/*
 		 * We assume that the comparison operator is strict, so a NULL can't
-		 * match anything.	XXX this diverges from the "NULL=NULL" behavior of
+		 * match anything.  XXX this diverges from the "NULL=NULL" behavior of
 		 * array_eq, should we act like that?
 		 */
 		if (isnull1)
@@ -4246,7 +4259,7 @@ array_copy(char *destptr, int nitems,
  *
  * Note: this could certainly be optimized using standard bitblt methods.
  * However, it's not clear that the typical Postgres array has enough elements
- * to make it worth worrying too much.	For the moment, KISS.
+ * to make it worth worrying too much.  For the moment, KISS.
  */
 void
 array_bitmap_copy(bits8 *destbitmap, int destoffset,
@@ -4443,7 +4456,7 @@ array_extract_slice(ArrayType *newarray,
  * Insert a slice into an array.
  *
  * ndim/dim[]/lb[] are dimensions of the original array.  A new array with
- * those same dimensions is to be constructed.	destArray must already
+ * those same dimensions is to be constructed.  destArray must already
  * have been allocated and its header initialized.
  *
  * st[]/endp[] identify the slice to be replaced.  Elements within the slice
@@ -5111,7 +5124,7 @@ array_unnest(PG_FUNCTION_ARGS)
 		 * Get the array value and detoast if needed.  We can't do this
 		 * earlier because if we have to detoast, we want the detoasted copy
 		 * to be in multi_call_memory_ctx, so it will go away when we're done
-		 * and not before.	(If no detoast happens, we assume the originally
+		 * and not before.  (If no detoast happens, we assume the originally
 		 * passed array will stick around till then.)
 		 */
 		arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -5250,8 +5263,8 @@ array_replace_internal(ArrayType *array,
 		if (!OidIsValid(typentry->eq_opr_finfo.fn_oid))
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_FUNCTION),
-					 errmsg("could not identify an equality operator for type %s",
-							format_type_be(element_type))));
+				errmsg("could not identify an equality operator for type %s",
+					   format_type_be(element_type))));
 		fcinfo->flinfo->fn_extra = (void *) typentry;
 	}
 	typlen = typentry->typlen;
@@ -5370,8 +5383,8 @@ array_replace_internal(ArrayType *array,
 				if (!AllocSizeIsValid(nbytes))
 					ereport(ERROR,
 							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-							 errmsg("array size exceeds the maximum allowed (%d)",
-									(int) MaxAllocSize)));
+						errmsg("array size exceeds the maximum allowed (%d)",
+							   (int) MaxAllocSize)));
 			}
 			nresult++;
 		}
@@ -5396,6 +5409,14 @@ array_replace_internal(ArrayType *array,
 		pfree(values);
 		pfree(nulls);
 		return array;
+	}
+
+	/* If all elements were removed return an empty array */
+	if (nresult == 0)
+	{
+		pfree(values);
+		pfree(nulls);
+		return construct_empty_array(element_type);
 	}
 
 	/* Allocate and initialize the result array */

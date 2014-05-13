@@ -4,7 +4,7 @@
  *	  utilities routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -456,7 +456,7 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 			{
 				/*
 				 * New best penalty for column.  Tentatively select this tuple
-				 * as the target, and record the best penalty.	Then reset the
+				 * as the target, and record the best penalty.  Then reset the
 				 * next column's penalty to "unknown" (and indirectly, the
 				 * same for all the ones to its right).  This will force us to
 				 * adopt this tuple's penalty values as the best for all the
@@ -475,7 +475,7 @@ gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 			{
 				/*
 				 * The current tuple is exactly as good for this column as the
-				 * best tuple seen so far.	The next iteration of this loop
+				 * best tuple seen so far.  The next iteration of this loop
 				 * will compare the next column.
 				 */
 			}
@@ -681,7 +681,7 @@ gistcheckpage(Relation rel, Buffer buf)
 	/*
 	 * ReadBuffer verifies that every newly-read page passes
 	 * PageHeaderIsValid, which means it either contains a reasonably sane
-	 * page header or is all-zero.	We have to defend against the all-zero
+	 * page header or is all-zero.  We have to defend against the all-zero
 	 * case, however.
 	 */
 	if (PageIsNew(page))
@@ -810,8 +810,8 @@ gistGetFakeLSN(Relation rel)
 	if (rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 	{
 		/*
-		 * Temporary relations are only accessible in our session, so a
-		 * simple backend-local counter will do.
+		 * Temporary relations are only accessible in our session, so a simple
+		 * backend-local counter will do.
 		 */
 		return counter++;
 	}

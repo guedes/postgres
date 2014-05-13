@@ -1,7 +1,7 @@
 /*
  *	pg_upgrade.h
  *
- *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2014, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/pg_upgrade.h
  */
 
@@ -73,24 +73,23 @@ extern char *output_files[];
 #define pg_copy_file		copy_file
 #define pg_mv_file			rename
 #define pg_link_file		link
-#define PATH_SEPARATOR      '/'
+#define PATH_SEPARATOR		'/'
 #define RM_CMD				"rm -f"
 #define RMDIR_CMD			"rm -rf"
 #define SCRIPT_EXT			"sh"
 #define ECHO_QUOTE	"'"
-#define ECHO_BLANK  ""
+#define ECHO_BLANK	""
 #else
 #define pg_copy_file		CopyFile
 #define pg_mv_file			pgrename
 #define pg_link_file		win32_pghardlink
-#define sleep(x)			Sleep(x * 1000)
-#define PATH_SEPARATOR      '\\'
+#define PATH_SEPARATOR		'\\'
 #define RM_CMD				"DEL /q"
 #define RMDIR_CMD			"RMDIR /s/q"
 #define SCRIPT_EXT			"bat"
 #define EXE_EXT				".exe"
 #define ECHO_QUOTE	""
-#define ECHO_BLANK  "."
+#define ECHO_BLANK	"."
 #endif
 
 #define CLUSTER_NAME(cluster)	((cluster) == &old_cluster ? "old" : \
@@ -122,12 +121,14 @@ extern char *output_files[];
 typedef struct
 {
 	/* Can't use NAMEDATALEN;  not guaranteed to fit on client */
-	char		*nspname;		/* namespace name */
-	char		*relname;		/* relation name */
+	char	   *nspname;		/* namespace name */
+	char	   *relname;		/* relation name */
 	Oid			reloid;			/* relation oid */
 	Oid			relfilenode;	/* relation relfile node */
 	/* relation tablespace path, or "" for the cluster default */
-	char		tablespace[MAXPGPATH];
+	char	   *tablespace;
+	bool		nsp_alloc;
+	bool		tblsp_alloc;
 } RelInfo;
 
 typedef struct
@@ -141,10 +142,10 @@ typedef struct
  */
 typedef struct
 {
-	char		old_tablespace[MAXPGPATH];
-	char		new_tablespace[MAXPGPATH];
-	char		old_tablespace_suffix[MAXPGPATH];
-	char		new_tablespace_suffix[MAXPGPATH];
+	const char *old_tablespace;
+	const char *new_tablespace;
+	const char *old_tablespace_suffix;
+	const char *new_tablespace_suffix;
 	Oid			old_db_oid;
 	Oid			new_db_oid;
 
@@ -155,8 +156,8 @@ typedef struct
 	Oid			old_relfilenode;
 	Oid			new_relfilenode;
 	/* the rest are used only for logging and error reporting */
-	char		*nspname;		/* namespaces */
-	char		*relname;
+	char	   *nspname;		/* namespaces */
+	char	   *relname;
 } FileNameMap;
 
 /*
@@ -165,8 +166,9 @@ typedef struct
 typedef struct
 {
 	Oid			db_oid;			/* oid of the database */
-	char		*db_name;		/* database name */
-	char		db_tblspace[MAXPGPATH]; /* database default tablespace path */
+	char	   *db_name;		/* database name */
+	char		db_tablespace[MAXPGPATH];		/* database default tablespace
+												 * path */
 	RelInfoArr	rel_arr;		/* array of all user relinfos */
 } DbInfo;
 
@@ -254,9 +256,9 @@ typedef struct
 	char		major_version_str[64];	/* string PG_VERSION of cluster */
 	uint32		bin_version;	/* version returned from pg_ctl */
 	Oid			pg_database_oid;	/* OID of pg_database relation */
-	Oid			install_role_oid;	/* OID of connected role */
-	Oid			role_count;			/* number of roles defined in the cluster */
-	char	   *tablespace_suffix;		/* directory specification */
+	Oid			install_role_oid;		/* OID of connected role */
+	Oid			role_count;		/* number of roles defined in the cluster */
+	const char *tablespace_suffix;		/* directory specification */
 } ClusterInfo;
 
 
@@ -291,6 +293,7 @@ typedef struct
 	const char *progname;		/* complete pathname for this program */
 	char	   *exec_path;		/* full path to my executable */
 	char	   *user;			/* username for clusters */
+	bool		user_specified; /* user specified on command-line */
 	char	  **old_tablespaces;	/* tablespaces */
 	int			num_old_tablespaces;
 	char	  **libraries;		/* loadable libraries */
@@ -312,12 +315,12 @@ extern OSInfo os_info;
 /* check.c */
 
 void		output_check_banner(bool live_check);
-void		check_and_dump_old_cluster(bool live_check,
-				  char **sequence_script_file_name);
+void check_and_dump_old_cluster(bool live_check,
+						   char **sequence_script_file_name);
 void		check_new_cluster(void);
 void		report_clusters_compatible(void);
 void		issue_warnings(char *sequence_script_file_name);
-void		output_completion_banner(char *analyze_script_file_name,
+void output_completion_banner(char *analyze_script_file_name,
 						 char *deletion_script_file_name);
 void		check_cluster_versions(void);
 void		check_cluster_compatibility(bool live_check);
@@ -413,11 +416,11 @@ void		get_sock_dir(ClusterInfo *cluster, bool live_check);
 /* relfilenode.c */
 
 void		get_pg_database_relfilenode(ClusterInfo *cluster);
-void		transfer_all_new_tablespaces(DbInfoArr *old_db_arr,
-				   DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata);
-void		transfer_all_new_dbs(DbInfoArr *old_db_arr,
+void transfer_all_new_tablespaces(DbInfoArr *old_db_arr,
+				  DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata);
+void transfer_all_new_dbs(DbInfoArr *old_db_arr,
 				   DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata,
-				   char *old_tablespace);
+					 char *old_tablespace);
 
 /* tablespace.c */
 
@@ -442,14 +445,17 @@ void		check_pghost_envvar(void);
 /* util.c */
 
 char	   *quote_identifier(const char *s);
-int			get_user_info(char **user_name);
+int			get_user_info(char **user_name_p);
 void		check_ok(void);
 void
 report_status(eLogType type, const char *fmt,...)
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 void
-pg_log(eLogType type, char *fmt,...)
+pg_log(eLogType type, const char *fmt,...)
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+void
+pg_fatal(const char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2), noreturn));
 void		end_progress_output(void);
 void
 prep_status(const char *fmt,...)
@@ -477,11 +483,11 @@ void old_8_3_invalidate_bpchar_pattern_ops_indexes(ClusterInfo *cluster,
 char	   *old_8_3_create_sequence_script(ClusterInfo *cluster);
 
 /* parallel.c */
-void		parallel_exec_prog(const char *log_file, const char *opt_log_file,
-		  const char *fmt,...)
+void
+parallel_exec_prog(const char *log_file, const char *opt_log_file,
+				   const char *fmt,...)
 __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
-void		parallel_transfer_all_new_dbs(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
-										  char *old_pgdata, char *new_pgdata,
-										  char *old_tablespace);
+void parallel_transfer_all_new_dbs(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
+							  char *old_pgdata, char *new_pgdata,
+							  char *old_tablespace);
 bool		reap_child(bool wait_for_child);
-

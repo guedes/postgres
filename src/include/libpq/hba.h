@@ -20,7 +20,6 @@ typedef enum UserAuth
 {
 	uaReject,
 	uaImplicitReject,
-	uaKrb5,
 	uaTrust,
 	uaIdent,
 	uaPassword,
@@ -76,7 +75,6 @@ typedef struct HbaLine
 	char	   *ldapprefix;
 	char	   *ldapsuffix;
 	bool		clientcert;
-	char	   *krb_server_hostname;
 	char	   *krb_realm;
 	bool		include_realm;
 	char	   *radiusserver;
@@ -87,12 +85,12 @@ typedef struct HbaLine
 
 typedef struct IdentLine
 {
-	int 		linenumber;
+	int			linenumber;
 
 	char	   *usermap;
 	char	   *ident_user;
 	char	   *pg_role;
-	regex_t 	re;
+	regex_t		re;
 } IdentLine;
 
 /* kluge to avoid including libpq/libpq-be.h here */

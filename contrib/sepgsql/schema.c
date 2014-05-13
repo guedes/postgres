@@ -4,7 +4,7 @@
  *
  * Routines corresponding to schema objects
  *
- * Copyright (c) 2010-2013, PostgreSQL Global Development Group
+ * Copyright (c) 2010-2014, PostgreSQL Global Development Group
  *
  * -------------------------------------------------------------------------
  */
@@ -81,6 +81,7 @@ sepgsql_schema_post_create(Oid namespaceId)
 									  tcontext,
 									  SEPG_CLASS_DB_SCHEMA,
 									  nsp_name);
+
 	/*
 	 * check db_schema:{create}
 	 */

@@ -19,14 +19,6 @@ PG_FUNCTION_INFO_V1(gbt_bit_consistent);
 PG_FUNCTION_INFO_V1(gbt_bit_penalty);
 PG_FUNCTION_INFO_V1(gbt_bit_same);
 
-Datum		gbt_bit_compress(PG_FUNCTION_ARGS);
-Datum		gbt_bit_union(PG_FUNCTION_ARGS);
-Datum		gbt_bit_picksplit(PG_FUNCTION_ARGS);
-Datum		gbt_bit_consistent(PG_FUNCTION_ARGS);
-Datum		gbt_bit_penalty(PG_FUNCTION_ARGS);
-Datum		gbt_bit_same(PG_FUNCTION_ARGS);
-
-
 
 /* define for comparison */
 
@@ -97,7 +89,6 @@ gbt_bit_xfrm(bytea *leaf)
 static GBT_VARKEY *
 gbt_bit_l2n(GBT_VARKEY *leaf)
 {
-
 	GBT_VARKEY *out = leaf;
 	GBT_VARKEY_R r = gbt_var_key_readable(leaf);
 	bytea	   *o;

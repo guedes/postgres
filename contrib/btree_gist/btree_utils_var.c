@@ -29,7 +29,6 @@ typedef struct
 
 
 PG_FUNCTION_INFO_V1(gbt_var_decompress);
-Datum		gbt_var_decompress(PG_FUNCTION_ARGS);
 
 
 Datum
@@ -56,7 +55,6 @@ gbt_var_decompress(PG_FUNCTION_ARGS)
 GBT_VARKEY_R
 gbt_var_key_readable(const GBT_VARKEY *k)
 {
-
 	GBT_VARKEY_R r;
 
 	r.lower = (bytea *) &(((char *) k)[VARHDRSZ]);
@@ -270,7 +268,6 @@ gbt_var_bin_union(Datum *u, GBT_VARKEY *e, Oid collation,
 GISTENTRY *
 gbt_var_compress(GISTENTRY *entry, const gbtree_vinfo *tinfo)
 {
-
 	GISTENTRY  *retval;
 
 	if (entry->leafkey)
@@ -299,7 +296,6 @@ GBT_VARKEY *
 gbt_var_union(const GistEntryVector *entryvec, int32 *size, Oid collation,
 			  const gbtree_vinfo *tinfo)
 {
-
 	int			i = 0,
 				numranges = entryvec->n;
 	GBT_VARKEY *cur;

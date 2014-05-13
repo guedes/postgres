@@ -3,7 +3,7 @@
  * jsonapi.h
  *	  Declarations for JSON API support.
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/jsonapi.h
@@ -30,8 +30,8 @@ typedef enum
 	JSON_TOKEN_TRUE,
 	JSON_TOKEN_FALSE,
 	JSON_TOKEN_NULL,
-	JSON_TOKEN_END,
-}	JsonTokenType;
+	JSON_TOKEN_END
+} JsonTokenType;
 
 
 /*
@@ -73,8 +73,12 @@ typedef void (*json_scalar_action) (void *state, char *token, JsonTokenType toke
  * point, Likewise, semstate can be NULL. Using an all-NULL structure amounts
  * to doing a pure parse with no side-effects, and is therefore exactly
  * what the json input routines do.
+ *
+ * The 'fname' and 'token' strings passed to these actions are palloc'd.
+ * They are not free'd or used further by the parser, so the action function
+ * is free to do what it wishes with them.
  */
-typedef struct jsonSemAction
+typedef struct JsonSemAction
 {
 	void	   *semstate;
 	json_struct_action object_start;
@@ -86,7 +90,7 @@ typedef struct jsonSemAction
 	json_aelem_action array_element_start;
 	json_aelem_action array_element_end;
 	json_scalar_action scalar;
-}	jsonSemAction, *JsonSemAction;
+} JsonSemAction;
 
 /*
  * parse_json will parse the string in the lex calling the
@@ -97,14 +101,20 @@ typedef struct jsonSemAction
  * points to. If the action pointers are NULL the parser
  * does nothing and just continues.
  */
-extern void pg_parse_json(JsonLexContext *lex, JsonSemAction sem);
+extern void pg_parse_json(JsonLexContext *lex, JsonSemAction *sem);
 
 /*
- * constructor for JsonLexContext, with or without strval element.
+ * constructors for JsonLexContext, with or without strval element.
  * If supplied, the strval element will contain a de-escaped version of
  * the lexeme. However, doing this imposes a performance penalty, so
  * it should be avoided if the de-escaped lexeme is not required.
+ *
+ * If you already have the json as a text* value, use the first of these
+ * functions, otherwise use  makeJsonLexContextCstringLen().
  */
 extern JsonLexContext *makeJsonLexContext(text *json, bool need_escapes);
+extern JsonLexContext *makeJsonLexContextCstringLen(char *json,
+							 int len,
+							 bool need_escapes);
 
 #endif   /* JSONAPI_H */

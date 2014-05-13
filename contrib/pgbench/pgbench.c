@@ -5,7 +5,7 @@
  * Originally written by Tatsuo Ishii and enhanced by many contributors.
  *
  * contrib/pgbench/pgbench.c
- * Copyright (c) 2000-2013, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2014, PostgreSQL Global Development Group
  * ALL RIGHTS RESERVED;
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -40,12 +40,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <signal.h>
-
-#ifndef WIN32
 #include <sys/time.h>
-#include <unistd.h>
-#endif   /* ! WIN32 */
-
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
 #endif
@@ -74,7 +69,7 @@ static int	pthread_join(pthread_t th, void **thread_return);
 #include <pthread.h>
 #else
 /* Use emulation with fork. Rename pthread identifiers to avoid conflicts */
-
+#define PTHREAD_FORK_EMULATION
 #include <sys/wait.h>
 
 #define pthread_t				pg_pthread_t
@@ -88,9 +83,6 @@ typedef int pthread_attr_t;
 static int	pthread_create(pthread_t *thread, pthread_attr_t *attr, void *(*start_routine) (void *), void *arg);
 static int	pthread_join(pthread_t th, void **thread_return);
 #endif
-
-extern char *optarg;
-extern int	optind;
 
 
 /********************************************************************
@@ -137,6 +129,12 @@ int			unlogged_tables = 0;
 double		sample_rate = 0.0;
 
 /*
+ * When threads are throttled to a given rate limit, this is the target delay
+ * to reach that rate in usec.  0 is the default and means no throttling.
+ */
+int64		throttle_delay = 0;
+
+/*
  * tablespace selection
  */
 char	   *tablespace = NULL;
@@ -162,7 +160,13 @@ char	   *index_tablespace = NULL;
 
 bool		use_log;			/* log transaction latencies to a file */
 bool		use_quiet;			/* quiet logging onto stderr */
-int			agg_interval;		/* log aggregates instead of individual transactions */
+int			agg_interval;		/* log aggregates instead of individual
+								 * transactions */
+int			progress = 0;		/* thread progress report every this seconds */
+int			progress_nclients = 0;		/* number of clients for progress
+										 * report */
+int			progress_nthreads = 0;		/* number of threads for progress
+										 * report */
 bool		is_connect;			/* establish connection for each transaction */
 bool		is_latencies;		/* report per-command latencies */
 int			main_pid;			/* main process id used in log filename */
@@ -199,11 +203,15 @@ typedef struct
 	int			listen;			/* 0 indicates that an async query has been
 								 * sent */
 	int			sleeping;		/* 1 indicates that the client is napping */
+	bool		throttling;		/* whether nap is for throttling */
 	int64		until;			/* napping until (usec) */
 	Variable   *variables;		/* array of variable definitions */
 	int			nvariables;
 	instr_time	txn_begin;		/* used for measuring transaction latencies */
 	instr_time	stmt_begin;		/* used for measuring statement latencies */
+	int64		txn_latencies;	/* cumulated latencies */
+	int64		txn_sqlats;		/* cumulated square latencies */
+	bool		is_throttled;	/* whether transaction throttling is done */
 	int			use_file;		/* index in sql_files for this client */
 	bool		prepared[MAX_FILES];
 } CState;
@@ -221,6 +229,9 @@ typedef struct
 	instr_time *exec_elapsed;	/* time spent executing cmds (per Command) */
 	int		   *exec_count;		/* number of cmd executions (per Command) */
 	unsigned short random_state[3];		/* separate randomness for each thread */
+	int64		throttle_trigger;		/* previous/next throttling (us) */
+	int64		throttle_lag;	/* total transaction lag behind throttling */
+	int64		throttle_lag_max;		/* max transaction lag */
 } TState;
 
 #define INVALID_THREAD		((pthread_t) 0)
@@ -229,6 +240,10 @@ typedef struct
 {
 	instr_time	conn_time;
 	int			xacts;
+	int64		latencies;
+	int64		sqlats;
+	int64		throttle_lag;
+	int64		throttle_lag_max;
 } TResult;
 
 /*
@@ -261,13 +276,14 @@ typedef struct
 typedef struct
 {
 
-	long	start_time;			/* when does the interval start */
-	int 	cnt;				/* number of transactions */
-	double	min_duration;		/* min/max durations */
-	double	max_duration;
-	double	sum;				/* sum(duration), sum(duration^2) - for estimates */
-	double	sum2;
-	
+	long		start_time;		/* when does the interval start */
+	int			cnt;			/* number of transactions */
+	double		min_duration;	/* min/max durations */
+	double		max_duration;
+	double		sum;			/* sum(duration), sum(duration^2) - for
+								 * estimates */
+	double		sum2;
+
 } AggVals;
 
 static Command **sql_files[MAX_FILES];	/* SQL script files */
@@ -327,48 +343,45 @@ usage(void)
 		   "Usage:\n"
 		   "  %s [OPTION]... [DBNAME]\n"
 		   "\nInitialization options:\n"
-		   "  -i           invokes initialization mode\n"
-		   "  -F NUM       fill factor\n"
-		   "  -n           do not run VACUUM after initialization\n"
-		   "  -q           quiet logging (one message each 5 seconds)\n"
-		   "  -s NUM       scaling factor\n"
-		   "  --foreign-keys\n"
-		   "               create foreign key constraints between tables\n"
+		   "  -i, --initialize         invokes initialization mode\n"
+		   "  -F, --fillfactor=NUM     set fill factor\n"
+		"  -n, --no-vacuum          do not run VACUUM after initialization\n"
+	"  -q, --quiet              quiet logging (one message each 5 seconds)\n"
+		   "  -s, --scale=NUM          scaling factor\n"
+		   "  --foreign-keys           create foreign key constraints between tables\n"
 		   "  --index-tablespace=TABLESPACE\n"
-		   "               create indexes in the specified tablespace\n"
-		   "  --tablespace=TABLESPACE\n"
-		   "               create tables in the specified tablespace\n"
-		   "  --unlogged-tables\n"
-		   "               create tables as unlogged tables\n"
+	"                           create indexes in the specified tablespace\n"
+	 "  --tablespace=TABLESPACE  create tables in the specified tablespace\n"
+		   "  --unlogged-tables        create tables as unlogged tables\n"
 		   "\nBenchmarking options:\n"
-		"  -c NUM       number of concurrent database clients (default: 1)\n"
-		   "  -C           establish new connection for each transaction\n"
-		   "  -D VARNAME=VALUE\n"
-		   "               define variable for use by custom script\n"
-		   "  -f FILENAME  read transaction script from FILENAME\n"
-		   "  -j NUM       number of threads (default: 1)\n"
-		   "  -l           write transaction times to log file\n"
-		   "  -M simple|extended|prepared\n"
-		   "               protocol for submitting queries to server (default: simple)\n"
-		   "  -n           do not run VACUUM before tests\n"
-		   "  -N           do not update tables \"pgbench_tellers\" and \"pgbench_branches\"\n"
-		   "  -r           report average latency per command\n"
-		   "  -s NUM       report this scale factor in output\n"
-		   "  -S           perform SELECT-only transactions\n"
-	 "  -t NUM       number of transactions each client runs (default: 10)\n"
-		   "  -T NUM       duration of benchmark test in seconds\n"
-		   "  -v           vacuum all four standard tables before tests\n"
-		   "  --aggregate-interval=NUM\n"
-		   "               aggregate data over NUM seconds\n"
-		   "  --sampling-rate=NUM\n"
-		   "               fraction of transactions to log (e.g. 0.01 for 1%% sample)\n"
+		   "  -c, --client=NUM         number of concurrent database clients (default: 1)\n"
+		   "  -C, --connect            establish new connection for each transaction\n"
+		   "  -D, --define=VARNAME=VALUE\n"
+	  "                           define variable for use by custom script\n"
+		 "  -f, --file=FILENAME      read transaction script from FILENAME\n"
+		   "  -j, --jobs=NUM           number of threads (default: 1)\n"
+		   "  -l, --log                write transaction times to log file\n"
+		   "  -M, --protocol=simple|extended|prepared\n"
+		   "                           protocol for submitting queries (default: simple)\n"
+		   "  -n, --no-vacuum          do not run VACUUM before tests\n"
+		   "  -N, --skip-some-updates  skip updates of pgbench_tellers and pgbench_branches\n"
+		   "  -P, --progress=NUM       show thread progress report every NUM seconds\n"
+		   "  -r, --report-latencies   report average latency per command\n"
+		"  -R, --rate=NUM           target rate in transactions per second\n"
+		   "  -s, --scale=NUM          report this scale factor in output\n"
+		   "  -S, --select-only        perform SELECT-only transactions\n"
+		   "  -t, --transactions=NUM   number of transactions each client runs (default: 10)\n"
+		 "  -T, --time=NUM           duration of benchmark test in seconds\n"
+		   "  -v, --vacuum-all         vacuum all four standard tables before tests\n"
+		   "  --aggregate-interval=NUM aggregate data over NUM seconds\n"
+		   "  --sampling-rate=NUM      fraction of transactions to log (e.g. 0.01 for 1%%)\n"
 		   "\nCommon options:\n"
-		   "  -d             print debugging output\n"
-		   "  -h HOSTNAME    database server host or socket directory\n"
-		   "  -p PORT        database server port number\n"
-		   "  -U USERNAME    connect as specified database user\n"
-		   "  -V, --version  output version information, then exit\n"
-		   "  -?, --help     show this help, then exit\n"
+		   "  -d, --debug              print debugging output\n"
+	  "  -h, --host=HOSTNAME      database server host or socket directory\n"
+		   "  -p, --port=PORT          database server port number\n"
+		   "  -U, --username=USERNAME  connect as specified database user\n"
+		 "  -V, --version            output version information, then exit\n"
+		   "  -?, --help               show this help, then exit\n"
 		   "\n"
 		   "Report bugs to <pgsql-bugs@postgresql.org>.\n",
 		   progname, progname);
@@ -402,7 +415,7 @@ strtoint64(const char *str)
 		ptr++;
 
 		/*
-		 * Do an explicit check for INT64_MIN.	Ugly though this is, it's
+		 * Do an explicit check for INT64_MIN.  Ugly though this is, it's
 		 * cleaner than trying to get the loop below to handle it portably.
 		 */
 		if (strncmp(ptr, "9223372036854775808", 19) == 0)
@@ -874,12 +887,13 @@ clientDone(CState *st, bool ok)
 }
 
 static
-void agg_vals_init(AggVals * aggs, instr_time start)
+void
+agg_vals_init(AggVals *aggs, instr_time start)
 {
 	/* basic counters */
-	aggs->cnt = 0;		/* number of transactions */
-	aggs->sum = 0;		/* SUM(duration) */
-	aggs->sum2 = 0;		/* SUM(duration*duration) */
+	aggs->cnt = 0;				/* number of transactions */
+	aggs->sum = 0;				/* SUM(duration) */
+	aggs->sum2 = 0;				/* SUM(duration*duration) */
 
 	/* min and max transaction duration */
 	aggs->min_duration = 0;
@@ -891,21 +905,71 @@ void agg_vals_init(AggVals * aggs, instr_time start)
 
 /* return false iff client should be disconnected */
 static bool
-doCustom(TState *thread, CState *st, instr_time *conn_time, FILE *logfile, AggVals * agg)
+doCustom(TState *thread, CState *st, instr_time *conn_time, FILE *logfile, AggVals *agg)
 {
 	PGresult   *res;
 	Command   **commands;
+	bool		trans_needs_throttle = false;
 
 top:
 	commands = sql_files[st->use_file];
 
+	/*
+	 * Handle throttling once per transaction by sleeping.  It is simpler to
+	 * do this here rather than at the end, because so much complicated logic
+	 * happens below when statements finish.
+	 */
+	if (throttle_delay && !st->is_throttled)
+	{
+		/*
+		 * Use inverse transform sampling to randomly generate a delay, such
+		 * that the series of delays will approximate a Poisson distribution
+		 * centered on the throttle_delay time.
+		 *
+		 * 10000 implies a 9.2 (-log(1/10000)) to 0.0 (log 1) delay
+		 * multiplier, and results in a 0.055 % target underestimation bias:
+		 *
+		 * SELECT 1.0/AVG(-LN(i/10000.0)) FROM generate_series(1,10000) AS i;
+		 * = 1.000552717032611116335474
+		 *
+		 * If transactions are too slow or a given wait is shorter than a
+		 * transaction, the next transaction will start right away.
+		 */
+		int64		wait = (int64) (throttle_delay *
+				  1.00055271703 * -log(getrand(thread, 1, 10000) / 10000.0));
+
+		thread->throttle_trigger += wait;
+
+		st->until = thread->throttle_trigger;
+		st->sleeping = 1;
+		st->throttling = true;
+		st->is_throttled = true;
+		if (debug)
+			fprintf(stderr, "client %d throttling " INT64_FORMAT " us\n",
+					st->id, wait);
+	}
+
 	if (st->sleeping)
 	{							/* are we sleeping? */
 		instr_time	now;
+		int64		now_us;
 
 		INSTR_TIME_SET_CURRENT(now);
-		if (st->until <= INSTR_TIME_GET_MICROSEC(now))
+		now_us = INSTR_TIME_GET_MICROSEC(now);
+		if (st->until <= now_us)
+		{
 			st->sleeping = 0;	/* Done sleeping, go ahead with next command */
+			if (st->throttling)
+			{
+				/* Measure lag of throttled transaction relative to target */
+				int64		lag = now_us - st->until;
+
+				thread->throttle_lag += lag;
+				if (lag > thread->throttle_lag_max)
+					thread->throttle_lag_max = lag;
+				st->throttling = false;
+			}
+		}
 		else
 			return true;		/* Still sleeping, nothing to do here */
 	}
@@ -940,6 +1004,27 @@ top:
 			thread->exec_count[cnum]++;
 		}
 
+		/* transaction finished: record latency under progress or throttling */
+		if ((progress || throttle_delay) && commands[st->state + 1] == NULL)
+		{
+			instr_time	diff;
+			int64		latency;
+
+			INSTR_TIME_SET_CURRENT(diff);
+			INSTR_TIME_SUBTRACT(diff, st->txn_begin);
+			latency = INSTR_TIME_GET_MICROSEC(diff);
+			st->txn_latencies += latency;
+
+			/*
+			 * XXX In a long benchmark run of high-latency transactions, this
+			 * int64 addition eventually overflows.  For example, 100 threads
+			 * running 10s transactions will overflow it in 2.56 hours.  With
+			 * a more-typical OLTP workload of .1s transactions, overflow
+			 * would take 256 hours.
+			 */
+			st->txn_sqlats += latency * latency;
+		}
+
 		/*
 		 * if transaction finished, record the time it took in the log
 		 */
@@ -964,32 +1049,44 @@ top:
 				/* should we aggregate the results or not? */
 				if (agg_interval > 0)
 				{
-					/* are we still in the same interval? if yes, accumulate the
-					* values (print them otherwise) */
+					/*
+					 * are we still in the same interval? if yes, accumulate
+					 * the values (print them otherwise)
+					 */
 					if (agg->start_time + agg_interval >= INSTR_TIME_GET_DOUBLE(now))
 					{
 						agg->cnt += 1;
-						agg->sum  += usec;
+						agg->sum += usec;
 						agg->sum2 += usec * usec;
 
 						/* first in this aggregation interval */
 						if ((agg->cnt == 1) || (usec < agg->min_duration))
-							agg->min_duration =  usec;
+							agg->min_duration = usec;
 
 						if ((agg->cnt == 1) || (usec > agg->max_duration))
 							agg->max_duration = usec;
 					}
 					else
 					{
-						/* Loop until we reach the interval of the current transaction (and
-						 * print all the empty intervals in between). */
+						/*
+						 * Loop until we reach the interval of the current
+						 * transaction (and print all the empty intervals in
+						 * between).
+						 */
 						while (agg->start_time + agg_interval < INSTR_TIME_GET_DOUBLE(now))
 						{
-							/* This is a non-Windows branch (thanks to the ifdef in usage), so
-							 * we don't need to handle this in a special way (see below). */
+							/*
+							 * This is a non-Windows branch (thanks to the
+							 * ifdef in usage), so we don't need to handle
+							 * this in a special way (see below).
+							 */
 							fprintf(logfile, "%ld %d %.0f %.0f %.0f %.0f\n",
-									agg->start_time, agg->cnt, agg->sum, agg->sum2,
-									agg->min_duration, agg->max_duration);
+									agg->start_time,
+									agg->cnt,
+									agg->sum,
+									agg->sum2,
+									agg->min_duration,
+									agg->max_duration);
 
 							/* move to the next inteval */
 							agg->start_time = agg->start_time + agg_interval;
@@ -1002,7 +1099,10 @@ top:
 							agg->sum2 = 0;
 						}
 
-						/* and now update the reset values (include the current) */
+						/*
+						 * and now update the reset values (include the
+						 * current)
+						 */
 						agg->cnt = 1;
 						agg->min_duration = usec;
 						agg->max_duration = usec;
@@ -1014,12 +1114,20 @@ top:
 				{
 					/* no, print raw transactions */
 #ifndef WIN32
-					/* This is more than we really ought to know about instr_time */
+
+					/*
+					 * This is more than we really ought to know about
+					 * instr_time
+					 */
 					fprintf(logfile, "%d %d %.0f %d %ld %ld\n",
 							st->id, st->cnt, usec, st->use_file,
 							(long) now.tv_sec, (long) now.tv_usec);
 #else
-					/* On Windows, instr_time doesn't provide a timestamp anyway */
+
+					/*
+					 * On Windows, instr_time doesn't provide a timestamp
+					 * anyway
+					 */
 					fprintf(logfile, "%d %d %.0f %d 0 0\n",
 							st->id, st->cnt, usec, st->use_file);
 #endif
@@ -1069,6 +1177,17 @@ top:
 			st->state = 0;
 			st->use_file = (int) getrand(thread, 0, num_files - 1);
 			commands = sql_files[st->use_file];
+			st->is_throttled = false;
+
+			/*
+			 * No transaction is underway anymore, which means there is
+			 * nothing to listen to right now.  When throttling rate limits
+			 * are active, a sleep will happen next, as the next transaction
+			 * starts.  And then in any case the next SQL command will set
+			 * listen back to 1.
+			 */
+			st->listen = 0;
+			trans_needs_throttle = (throttle_delay > 0);
 		}
 	}
 
@@ -1087,8 +1206,19 @@ top:
 		INSTR_TIME_ACCUM_DIFF(*conn_time, end, start);
 	}
 
-	/* Record transaction start time if logging is enabled */
-	if (logfile && st->state == 0)
+	/*
+	 * This ensures that a throttling delay is inserted before proceeding with
+	 * sql commands, after the first transaction. The first transaction
+	 * throttling is performed when first entering doCustom.
+	 */
+	if (trans_needs_throttle)
+	{
+		trans_needs_throttle = false;
+		goto top;
+	}
+
+	/* Record transaction start time under logging, progress or throttling */
+	if ((logfile || progress || throttle_delay) && st->state == 0)
 		INSTR_TIME_SET_CURRENT(st->txn_begin);
 
 	/* Record statement start time if per-command latencies are requested */
@@ -1234,11 +1364,11 @@ top:
 			}
 
 			/*
-			 * getrand() needs to be able to subtract max from min and add
-			 * one to the result without overflowing.  Since we know max > min,
-			 * we can detect overflow just by checking for a negative result.
-			 * But we must check both that the subtraction doesn't overflow,
-			 * and that adding one to the result doesn't overflow either.
+			 * getrand() needs to be able to subtract max from min and add one
+			 * to the result without overflowing.  Since we know max > min, we
+			 * can detect overflow just by checking for a negative result. But
+			 * we must check both that the subtraction doesn't overflow, and
+			 * that adding one to the result doesn't overflow either.
 			 */
 			if (max - min < 0 || (max - min) + 1 < 0)
 			{
@@ -1418,7 +1548,6 @@ disconnect_all(CState *state, int length)
 static void
 init(bool is_no_vacuum)
 {
-
 /* The scale factor at/beyond which 32bit integers are incapable of storing
  * 64bit values.
  *
@@ -1430,11 +1559,13 @@ init(bool is_no_vacuum)
 	/*
 	 * Note: TPC-B requires at least 100 bytes per row, and the "filler"
 	 * fields in these table declarations were intended to comply with that.
-	 * But because they default to NULLs, they don't actually take any space.
-	 * We could fix that by giving them non-null default values. However, that
+	 * The pgbench_accounts table complies with that because the "filler"
+	 * column is set to blank-padded empty string. But for all other tables
+	 * the column defaults to NULL and so don't actually take any space.  We
+	 * could fix that by giving them non-null default values.  However, that
 	 * would completely break comparability of pgbench results with prior
-	 * versions.  Since pgbench has never pretended to be fully TPC-B
-	 * compliant anyway, we stick with the historical behavior.
+	 * versions. Since pgbench has never pretended to be fully TPC-B compliant
+	 * anyway, we stick with the historical behavior.
 	 */
 	struct ddlinfo
 	{
@@ -1446,8 +1577,8 @@ init(bool is_no_vacuum)
 		{
 			"pgbench_history",
 			scale >= SCALE_32BIT_THRESHOLD
-				? "tid int,bid int,aid bigint,delta int,mtime timestamp,filler char(22)"
-				: "tid int,bid int,aid    int,delta int,mtime timestamp,filler char(22)",
+			? "tid int,bid int,aid bigint,delta int,mtime timestamp,filler char(22)"
+			: "tid int,bid int,aid    int,delta int,mtime timestamp,filler char(22)",
 			0
 		},
 		{
@@ -1458,8 +1589,8 @@ init(bool is_no_vacuum)
 		{
 			"pgbench_accounts",
 			scale >= SCALE_32BIT_THRESHOLD
-				? "aid bigint not null,bid int,abalance int,filler char(84)"
-				: "aid    int not null,bid int,abalance int,filler char(84)",
+			? "aid bigint not null,bid int,abalance int,filler char(84)"
+			: "aid    int not null,bid int,abalance int,filler char(84)",
 			1
 		},
 		{
@@ -1488,8 +1619,10 @@ init(bool is_no_vacuum)
 	int64		k;
 
 	/* used to track elapsed time and estimate of the remaining time */
-	instr_time	start, diff;
-	double		elapsed_sec, remaining_sec;
+	instr_time	start,
+				diff;
+	double		elapsed_sec,
+				remaining_sec;
 	int			log_interval = 1;
 
 	if ((con = doConnect()) == NULL)
@@ -1531,12 +1664,14 @@ init(bool is_no_vacuum)
 
 	for (i = 0; i < nbranches * scale; i++)
 	{
+		/* "filler" column defaults to NULL */
 		snprintf(sql, 256, "insert into pgbench_branches(bid,bbalance) values(%d,0)", i + 1);
 		executeStatement(con, sql);
 	}
 
 	for (i = 0; i < ntellers * scale; i++)
 	{
+		/* "filler" column defaults to NULL */
 		snprintf(sql, 256, "insert into pgbench_tellers(tid,bid,tbalance) values (%d,%d,0)",
 				 i + 1, i / ntellers + 1);
 		executeStatement(con, sql);
@@ -1566,6 +1701,7 @@ init(bool is_no_vacuum)
 	{
 		int64		j = k + 1;
 
+		/* "filler" column defaults to blank padded empty string */
 		snprintf(sql, 256, INT64_FORMAT "\t" INT64_FORMAT "\t%d\t\n", j, k / naccounts + 1, 0);
 		if (PQputline(con, sql))
 		{
@@ -1573,20 +1709,22 @@ init(bool is_no_vacuum)
 			exit(1);
 		}
 
-		/* If we want to stick with the original logging, print a message each
-		 * 100k inserted rows. */
-		if ((! use_quiet) && (j % 100000 == 0))
+		/*
+		 * If we want to stick with the original logging, print a message each
+		 * 100k inserted rows.
+		 */
+		if ((!use_quiet) && (j % 100000 == 0))
 		{
 			INSTR_TIME_SET_CURRENT(diff);
 			INSTR_TIME_SUBTRACT(diff, start);
 
 			elapsed_sec = INSTR_TIME_GET_DOUBLE(diff);
-			remaining_sec = (scale * naccounts - j) * elapsed_sec / j;
+			remaining_sec = ((double) scale * naccounts - j) * elapsed_sec / j;
 
 			fprintf(stderr, INT64_FORMAT " of " INT64_FORMAT " tuples (%d%%) done (elapsed %.2f s, remaining %.2f s).\n",
-							j, (int64)naccounts * scale,
-							(int) (((int64) j * 100) / (naccounts * scale)),
-							elapsed_sec, remaining_sec);
+					j, (int64) naccounts * scale,
+					(int) (((int64) j * 100) / (naccounts * (int64) scale)),
+					elapsed_sec, remaining_sec);
 		}
 		/* let's not call the timing for each row, but only each 100 rows */
 		else if (use_quiet && (j % 100 == 0))
@@ -1595,17 +1733,17 @@ init(bool is_no_vacuum)
 			INSTR_TIME_SUBTRACT(diff, start);
 
 			elapsed_sec = INSTR_TIME_GET_DOUBLE(diff);
-			remaining_sec = (scale * naccounts - j) * elapsed_sec / j;
+			remaining_sec = ((double) scale * naccounts - j) * elapsed_sec / j;
 
 			/* have we reached the next interval (or end)? */
-			if ((j == scale * naccounts) || (elapsed_sec >= log_interval * LOG_STEP_SECONDS)) {
-
+			if ((j == scale * naccounts) || (elapsed_sec >= log_interval * LOG_STEP_SECONDS))
+			{
 				fprintf(stderr, INT64_FORMAT " of " INT64_FORMAT " tuples (%d%%) done (elapsed %.2f s, remaining %.2f s).\n",
-						j, (int64)naccounts * scale,
-						(int) (((int64) j * 100) / (naccounts * scale)), elapsed_sec, remaining_sec);
+						j, (int64) naccounts * scale,
+						(int) (((int64) j * 100) / (naccounts * (int64) scale)), elapsed_sec, remaining_sec);
 
 				/* skip to the next interval */
-				log_interval = (int)ceil(elapsed_sec/LOG_STEP_SECONDS);
+				log_interval = (int) ceil(elapsed_sec / LOG_STEP_SECONDS);
 			}
 		}
 
@@ -1877,6 +2015,49 @@ process_commands(char *buf)
 	return my_commands;
 }
 
+/*
+ * Read a line from fd, and return it in a malloc'd buffer.
+ * Return NULL at EOF.
+ *
+ * The buffer will typically be larger than necessary, but we don't care
+ * in this program, because we'll free it as soon as we've parsed the line.
+ */
+static char *
+read_line_from_file(FILE *fd)
+{
+	char		tmpbuf[BUFSIZ];
+	char	   *buf;
+	size_t		buflen = BUFSIZ;
+	size_t		used = 0;
+
+	buf = (char *) palloc(buflen);
+	buf[0] = '\0';
+
+	while (fgets(tmpbuf, BUFSIZ, fd) != NULL)
+	{
+		size_t		thislen = strlen(tmpbuf);
+
+		/* Append tmpbuf to whatever we had already */
+		memcpy(buf + used, tmpbuf, thislen + 1);
+		used += thislen;
+
+		/* Done if we collected a newline */
+		if (thislen > 0 && tmpbuf[thislen - 1] == '\n')
+			break;
+
+		/* Else, enlarge buf to ensure we can append next bufferload */
+		buflen += BUFSIZ;
+		buf = (char *) pg_realloc(buf, buflen);
+	}
+
+	if (used > 0)
+		return buf;
+
+	/* Reached EOF */
+	free(buf);
+	return NULL;
+}
+
 static int
 process_file(char *filename)
 {
@@ -1885,7 +2066,7 @@ process_file(char *filename)
 	Command   **my_commands;
 	FILE	   *fd;
 	int			lineno;
-	char		buf[BUFSIZ];
+	char	   *buf;
 	int			alloc_num;
 
 	if (num_files >= MAX_FILES)
@@ -1907,11 +2088,14 @@ process_file(char *filename)
 
 	lineno = 0;
 
-	while (fgets(buf, sizeof(buf), fd) != NULL)
+	while ((buf = read_line_from_file(fd)) != NULL)
 	{
 		Command    *command;
 
 		command = process_commands(buf);
+
+		free(buf);
+
 		if (command == NULL)
 			continue;
 
@@ -1988,7 +2172,9 @@ process_builtin(char *tb)
 static void
 printResults(int ttype, int normal_xacts, int nclients,
 			 TState *threads, int nthreads,
-			 instr_time total_time, instr_time conn_total_time)
+			 instr_time total_time, instr_time conn_total_time,
+			 int64 total_latencies, int64 total_sqlats,
+			 int64 throttle_lag, int64 throttle_lag_max)
 {
 	double		time_include,
 				tps_include,
@@ -2026,6 +2212,36 @@ printResults(int ttype, int normal_xacts, int nclients,
 		printf("number of transactions actually processed: %d\n",
 			   normal_xacts);
 	}
+
+	if (throttle_delay || progress)
+	{
+		/* compute and show latency average and standard deviation */
+		double		latency = 0.001 * total_latencies / normal_xacts;
+		double		sqlat = (double) total_sqlats / normal_xacts;
+
+		printf("latency average: %.3f ms\n"
+			   "latency stddev: %.3f ms\n",
+			   latency, 0.001 * sqrt(sqlat - 1000000.0 * latency * latency));
+	}
+	else
+	{
+		/* only an average latency computed from the duration is available */
+		printf("latency average: %.3f ms\n",
+			   1000.0 * duration * nclients / normal_xacts);
+	}
+
+	if (throttle_delay)
+	{
+		/*
+		 * Report average transaction lag under rate limit throttling.  This
+		 * is the delay between scheduled and actual start times for the
+		 * transaction.  The measured lag may be caused by thread/client load,
+		 * the database load, or the Poisson throttling process.
+		 */
+		printf("rate limit schedule lag: avg %.3f (max %.3f) ms\n",
+			   0.001 * throttle_lag / normal_xacts, 0.001 * throttle_lag_max);
+	}
+
 	printf("tps = %f (including connections establishing)\n", tps_include);
 	printf("tps = %f (excluding connections establishing)\n", tps_exclude);
 
@@ -2080,12 +2296,38 @@ int
 main(int argc, char **argv)
 {
 	static struct option long_options[] = {
+		/* systematic long/short named options */
+		{"client", required_argument, NULL, 'c'},
+		{"connect", no_argument, NULL, 'C'},
+		{"debug", no_argument, NULL, 'd'},
+		{"define", required_argument, NULL, 'D'},
+		{"file", required_argument, NULL, 'f'},
+		{"fillfactor", required_argument, NULL, 'F'},
+		{"host", required_argument, NULL, 'h'},
+		{"initialize", no_argument, NULL, 'i'},
+		{"jobs", required_argument, NULL, 'j'},
+		{"log", no_argument, NULL, 'l'},
+		{"no-vacuum", no_argument, NULL, 'n'},
+		{"port", required_argument, NULL, 'p'},
+		{"progress", required_argument, NULL, 'P'},
+		{"protocol", required_argument, NULL, 'M'},
+		{"quiet", no_argument, NULL, 'q'},
+		{"report-latencies", no_argument, NULL, 'r'},
+		{"scale", required_argument, NULL, 's'},
+		{"select-only", no_argument, NULL, 'S'},
+		{"skip-some-updates", no_argument, NULL, 'N'},
+		{"time", required_argument, NULL, 'T'},
+		{"transactions", required_argument, NULL, 't'},
+		{"username", required_argument, NULL, 'U'},
+		{"vacuum-all", no_argument, NULL, 'v'},
+		/* long-named only options */
 		{"foreign-keys", no_argument, &foreign_keys, 1},
 		{"index-tablespace", required_argument, NULL, 3},
 		{"tablespace", required_argument, NULL, 2},
 		{"unlogged-tables", no_argument, &unlogged_tables, 1},
 		{"sampling-rate", required_argument, NULL, 4},
 		{"aggregate-interval", required_argument, NULL, 5},
+		{"rate", required_argument, NULL, 'R'},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -2107,7 +2349,11 @@ main(int argc, char **argv)
 	instr_time	start_time;		/* start up time */
 	instr_time	total_time;
 	instr_time	conn_total_time;
-	int			total_xacts;
+	int			total_xacts = 0;
+	int64		total_latencies = 0;
+	int64		total_sqlats = 0;
+	int64		throttle_lag = 0;
+	int64		throttle_lag_max = 0;
 
 	int			i;
 
@@ -2152,7 +2398,7 @@ main(int argc, char **argv)
 	state = (CState *) pg_malloc(sizeof(CState));
 	memset(state, 0, sizeof(CState));
 
-	while ((c = getopt_long(argc, argv, "ih:nvp:dqSNc:j:Crs:t:T:U:lf:D:F:M:", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "ih:nvp:dqSNc:j:Crs:t:T:U:lf:D:F:M:P:R:", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -2307,6 +2553,30 @@ main(int argc, char **argv)
 					exit(1);
 				}
 				break;
+			case 'P':
+				progress = atoi(optarg);
+				if (progress <= 0)
+				{
+					fprintf(stderr,
+						"thread progress delay (-P) must be positive (%s)\n",
+							optarg);
+					exit(1);
+				}
+				break;
+			case 'R':
+				{
+					/* get a double from the beginning of option value */
+					double		throttle_value = atof(optarg);
+
+					if (throttle_value <= 0.0)
+					{
+						fprintf(stderr, "invalid rate limit: %s\n", optarg);
+						exit(1);
+					}
+					/* Invert rate limit into a time offset */
+					throttle_delay = (int64) (1000000.0 / throttle_value);
+				}
+				break;
 			case 0:
 				/* This covers long options which take no argument. */
 				break;
@@ -2343,6 +2613,9 @@ main(int argc, char **argv)
 				break;
 		}
 	}
+
+	/* compute a per thread delay */
+	throttle_delay *= nthreads;
 
 	if (argc > optind)
 		dbName = argv[optind];
@@ -2393,17 +2666,20 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
-	if (agg_interval > 0 && (! use_log)) {
+	if (agg_interval > 0 && (!use_log))
+	{
 		fprintf(stderr, "log aggregation is allowed only when actually logging transactions\n");
 		exit(1);
 	}
 
-	if ((duration > 0) && (agg_interval > duration)) {
+	if ((duration > 0) && (agg_interval > duration))
+	{
 		fprintf(stderr, "number of seconds for aggregation (%d) must not be higher that test duration (%d)\n", agg_interval, duration);
 		exit(1);
 	}
 
-	if ((duration > 0) && (agg_interval > 0) && (duration % agg_interval != 0)) {
+	if ((duration > 0) && (agg_interval > 0) && (duration % agg_interval != 0))
+	{
 		fprintf(stderr, "duration (%d) must be a multiple of aggregation interval (%d)\n", duration, agg_interval);
 		exit(1);
 	}
@@ -2429,6 +2705,8 @@ main(int argc, char **argv)
 	 * changed after fork.
 	 */
 	main_pid = (int) getpid();
+	progress_nclients = nclients;
+	progress_nthreads = nthreads;
 
 	if (nclients > 1)
 	{
@@ -2508,6 +2786,20 @@ main(int argc, char **argv)
 		for (i = 0; i < nclients; i++)
 		{
 			if (!putVariable(&state[i], "startup", "scale", val))
+				exit(1);
+		}
+	}
+
+	/*
+	 * Define a :client_id variable that is unique per connection. But don't
+	 * override an explicit -D switch.
+	 */
+	if (getVariable(&state[0], "client_id") == NULL)
+	{
+		for (i = 0; i < nclients; i++)
+		{
+			snprintf(val, sizeof(val), "%d", i);
+			if (!putVariable(&state[i], "startup", "client_id", val))
 				exit(1);
 		}
 	}
@@ -2623,7 +2915,6 @@ main(int argc, char **argv)
 	}
 
 	/* wait for threads and accumulate results */
-	total_xacts = 0;
 	INSTR_TIME_SET_ZERO(conn_total_time);
 	for (i = 0; i < nthreads; i++)
 	{
@@ -2639,17 +2930,32 @@ main(int argc, char **argv)
 			TResult    *r = (TResult *) ret;
 
 			total_xacts += r->xacts;
+			total_latencies += r->latencies;
+			total_sqlats += r->sqlats;
+			throttle_lag += r->throttle_lag;
+			if (r->throttle_lag_max > throttle_lag_max)
+				throttle_lag_max = r->throttle_lag_max;
 			INSTR_TIME_ADD(conn_total_time, r->conn_time);
 			free(ret);
 		}
 	}
 	disconnect_all(state, nclients);
 
-	/* get end time */
+	/*
+	 * XXX We compute results as though every client of every thread started
+	 * and finished at the same time.  That model can diverge noticeably from
+	 * reality for a short benchmark run involving relatively many threads.
+	 * The first thread may process notably many transactions before the last
+	 * thread begins.  Improving the model alone would bring limited benefit,
+	 * because performance during those periods of partial thread count can
+	 * easily exceed steady state performance.  This is one of the many ways
+	 * short runs convey deceptive performance figures.
+	 */
 	INSTR_TIME_SET_CURRENT(total_time);
 	INSTR_TIME_SUBTRACT(total_time, start_time);
 	printResults(ttype, total_xacts, nclients, threads, nthreads,
-				 total_time, conn_total_time);
+				 total_time, conn_total_time, total_latencies, total_sqlats,
+				 throttle_lag, throttle_lag_max);
 
 	return 0;
 }
@@ -2667,10 +2973,30 @@ threadRun(void *arg)
 	int			remains = nstate;		/* number of remaining clients */
 	int			i;
 
+	/* for reporting progress: */
+	int64		thread_start = INSTR_TIME_GET_MICROSEC(thread->start_time);
+	int64		last_report = thread_start;
+	int64		next_report = last_report + (int64) progress * 1000000;
+	int64		last_count = 0,
+				last_lats = 0,
+				last_sqlats = 0,
+				last_lags = 0;
+
 	AggVals		aggs;
 
+	/*
+	 * Initialize throttling rate target for all of the thread's clients.  It
+	 * might be a little more accurate to reset thread->start_time here too.
+	 * The possible drift seems too small relative to typical throttle delay
+	 * times to worry about it.
+	 */
+	INSTR_TIME_SET_CURRENT(start);
+	thread->throttle_trigger = INSTR_TIME_GET_MICROSEC(start);
+	thread->throttle_lag = 0;
+	thread->throttle_lag_max = 0;
+
 	result = pg_malloc(sizeof(TResult));
-	
+
 	INSTR_TIME_SET_ZERO(result->conn_time);
 
 	/* open log file if requested */
@@ -2706,7 +3032,7 @@ threadRun(void *arg)
 	INSTR_TIME_SUBTRACT(result->conn_time, thread->start_time);
 
 	agg_vals_init(&aggs, thread->start_time);
-	
+
 	/* send start up queries in async manner */
 	for (i = 0; i < nstate; i++)
 	{
@@ -2744,25 +3070,38 @@ threadRun(void *arg)
 			Command   **commands = sql_files[st->use_file];
 			int			sock;
 
-			if (st->sleeping)
-			{
-				int			this_usec;
-
-				if (min_usec == INT64_MAX)
-				{
-					instr_time	now;
-
-					INSTR_TIME_SET_CURRENT(now);
-					now_usec = INSTR_TIME_GET_MICROSEC(now);
-				}
-
-				this_usec = st->until - now_usec;
-				if (min_usec > this_usec)
-					min_usec = this_usec;
-			}
-			else if (st->con == NULL)
+			if (st->con == NULL)
 			{
 				continue;
+			}
+			else if (st->sleeping)
+			{
+				if (st->throttling && timer_exceeded)
+				{
+					/* interrupt client which has not started a transaction */
+					remains--;
+					st->sleeping = 0;
+					st->throttling = false;
+					PQfinish(st->con);
+					st->con = NULL;
+					continue;
+				}
+				else	/* just a nap from the script */
+				{
+					int			this_usec;
+
+					if (min_usec == INT64_MAX)
+					{
+						instr_time	now;
+
+						INSTR_TIME_SET_CURRENT(now);
+						now_usec = INSTR_TIME_GET_MICROSEC(now);
+					}
+
+					this_usec = st->until - now_usec;
+					if (min_usec > this_usec)
+						min_usec = this_usec;
+				}
 			}
 			else if (commands[st->state]->type == META_COMMAND)
 			{
@@ -2829,14 +3168,141 @@ threadRun(void *arg)
 				st->con = NULL;
 			}
 		}
+
+#ifdef PTHREAD_FORK_EMULATION
+		/* each process reports its own progression */
+		if (progress)
+		{
+			instr_time	now_time;
+			int64		now;
+
+			INSTR_TIME_SET_CURRENT(now_time);
+			now = INSTR_TIME_GET_MICROSEC(now_time);
+			if (now >= next_report)
+			{
+				/* generate and show report */
+				int64		count = 0,
+							lats = 0,
+							sqlats = 0;
+				int64		lags = thread->throttle_lag;
+				int64		run = now - last_report;
+				double		tps,
+							total_run,
+							latency,
+							sqlat,
+							stdev,
+							lag;
+
+				for (i = 0; i < nstate; i++)
+				{
+					count += state[i].cnt;
+					lats += state[i].txn_latencies;
+					sqlats += state[i].txn_sqlats;
+				}
+
+				total_run = (now - thread_start) / 1000000.0;
+				tps = 1000000.0 * (count - last_count) / run;
+				latency = 0.001 * (lats - last_lats) / (count - last_count);
+				sqlat = 1.0 * (sqlats - last_sqlats) / (count - last_count);
+				stdev = 0.001 * sqrt(sqlat - 1000000.0 * latency * latency);
+				lag = 0.001 * (lags - last_lags) / (count - last_count);
+
+				if (throttle_delay)
+					fprintf(stderr,
+							"progress %d: %.1f s, %.1f tps, "
+							"lat %.3f ms stddev %.3f, lag %.3f ms\n",
+							thread->tid, total_run, tps, latency, stdev, lag);
+				else
+					fprintf(stderr,
+							"progress %d: %.1f s, %.1f tps, "
+							"lat %.3f ms stddev %.3f\n",
+							thread->tid, total_run, tps, latency, stdev);
+
+				last_count = count;
+				last_lats = lats;
+				last_sqlats = sqlats;
+				last_lags = lags;
+				last_report = now;
+				next_report += (int64) progress *1000000;
+			}
+		}
+#else
+		/* progress report by thread 0 for all threads */
+		if (progress && thread->tid == 0)
+		{
+			instr_time	now_time;
+			int64		now;
+
+			INSTR_TIME_SET_CURRENT(now_time);
+			now = INSTR_TIME_GET_MICROSEC(now_time);
+			if (now >= next_report)
+			{
+				/* generate and show report */
+				int64		count = 0,
+							lats = 0,
+							sqlats = 0,
+							lags = 0;
+				int64		run = now - last_report;
+				double		tps,
+							total_run,
+							latency,
+							sqlat,
+							lag,
+							stdev;
+
+				for (i = 0; i < progress_nclients; i++)
+				{
+					count += state[i].cnt;
+					lats += state[i].txn_latencies;
+					sqlats += state[i].txn_sqlats;
+				}
+
+				for (i = 0; i < progress_nthreads; i++)
+					lags += thread[i].throttle_lag;
+
+				total_run = (now - thread_start) / 1000000.0;
+				tps = 1000000.0 * (count - last_count) / run;
+				latency = 0.001 * (lats - last_lats) / (count - last_count);
+				sqlat = 1.0 * (sqlats - last_sqlats) / (count - last_count);
+				stdev = 0.001 * sqrt(sqlat - 1000000.0 * latency * latency);
+				lag = 0.001 * (lags - last_lags) / (count - last_count);
+
+				if (throttle_delay)
+					fprintf(stderr,
+							"progress: %.1f s, %.1f tps, "
+							"lat %.3f ms stddev %.3f, lag %.3f ms\n",
+							total_run, tps, latency, stdev, lag);
+				else
+					fprintf(stderr,
+							"progress: %.1f s, %.1f tps, "
+							"lat %.3f ms stddev %.3f\n",
+							total_run, tps, latency, stdev);
+
+				last_count = count;
+				last_lats = lats;
+				last_sqlats = sqlats;
+				last_lags = lags;
+				last_report = now;
+				next_report += (int64) progress *1000000;
+			}
+		}
+#endif   /* PTHREAD_FORK_EMULATION */
 	}
 
 done:
 	INSTR_TIME_SET_CURRENT(start);
 	disconnect_all(state, nstate);
 	result->xacts = 0;
+	result->latencies = 0;
+	result->sqlats = 0;
 	for (i = 0; i < nstate; i++)
+	{
 		result->xacts += state[i].cnt;
+		result->latencies += state[i].txn_latencies;
+		result->sqlats += state[i].txn_sqlats;
+	}
+	result->throttle_lag = thread->throttle_lag;
+	result->throttle_lag_max = thread->throttle_lag_max;
 	INSTR_TIME_SET_CURRENT(end);
 	INSTR_TIME_ACCUM_DIFF(result->conn_time, end, start);
 	if (logfile)
@@ -2883,6 +3349,7 @@ pthread_create(pthread_t *thread,
 {
 	fork_pthread *th;
 	void	   *ret;
+	int			rc;
 
 	th = (fork_pthread *) pg_malloc(sizeof(fork_pthread));
 	if (pipe(th->pipes) < 0)
@@ -2912,7 +3379,8 @@ pthread_create(pthread_t *thread,
 		setalarm(duration);
 
 	ret = start_routine(arg);
-	write(th->pipes[1], ret, sizeof(TResult));
+	rc = write(th->pipes[1], ret, sizeof(TResult));
+	(void) rc;
 	close(th->pipes[1]);
 	free(th);
 	exit(0);

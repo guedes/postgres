@@ -4,7 +4,7 @@
  *	 EXEC_BACKEND case; it might be extended to do so, but it would be
  *	 considerably more complex.
  *
- * Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2014, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/postmaster/fork_process.c
@@ -102,9 +102,9 @@ fork_process(void)
 
 		/*
 		 * Older Linux kernels have oom_adj not oom_score_adj.  This works
-		 * similarly except with a different scale of adjustment values.
-		 * If it's necessary to build Postgres to work with either API,
-		 * you can define both LINUX_OOM_SCORE_ADJ and LINUX_OOM_ADJ.
+		 * similarly except with a different scale of adjustment values. If
+		 * it's necessary to build Postgres to work with either API, you can
+		 * define both LINUX_OOM_SCORE_ADJ and LINUX_OOM_ADJ.
 		 */
 #ifdef LINUX_OOM_ADJ
 		{

@@ -49,8 +49,7 @@ my $contrib_extraincludes =
   { 'tsearch2' => ['contrib/tsearch2'], 'dblink' => ['src/backend'] };
 my $contrib_extrasource = {
 	'cube' => [ 'cubescan.l', 'cubeparse.y' ],
-	'seg'  => [ 'segscan.l',  'segparse.y' ], 
-	};
+	'seg'  => [ 'segscan.l',  'segparse.y' ], };
 my @contrib_excludes = ('pgcrypto', 'intagg', 'sepgsql');
 
 sub mkvcbuild
@@ -68,17 +67,18 @@ sub mkvcbuild
 	our @pgportfiles = qw(
 	  chklocale.c crypt.c fls.c fseeko.c getrusage.c inet_aton.c random.c
 	  srandom.c getaddrinfo.c gettimeofday.c inet_net_ntop.c kill.c open.c
-	  erand48.c snprintf.c strlcat.c strlcpy.c dirmod.c exec.c noblock.c path.c
+	  erand48.c snprintf.c strlcat.c strlcpy.c dirmod.c noblock.c path.c
 	  pgcheckdir.c pg_crc.c pgmkdirp.c pgsleep.c pgstrcasecmp.c pqsignal.c
-	  qsort.c qsort_arg.c quotes.c
-	  sprompt.c tar.c thread.c wait_error.c getopt.c getopt_long.c dirent.c rint.c win32env.c
-	  win32error.c win32setlocale.c);
+	  qsort.c qsort_arg.c quotes.c system.c
+	  sprompt.c tar.c thread.c getopt.c getopt_long.c dirent.c
+	  win32env.c win32error.c win32setlocale.c);
+
+	push(@pgportfiles, 'rint.c') if ($vsVersion < '12.00');
 
 	our @pgcommonallfiles = qw(
-		relpath.c);
+	  exec.c pgfnames.c psprintf.c relpath.c rmtree.c username.c wait_error.c);
 
-	our @pgcommonfrontendfiles = (@pgcommonallfiles,
-		qw(fe_memutils.c));
+	our @pgcommonfrontendfiles = (@pgcommonallfiles, qw(fe_memutils.c));
 
 	our @pgcommonbkndfiles = @pgcommonallfiles;
 
@@ -103,7 +103,7 @@ sub mkvcbuild
 		'src\backend\port\win32_shmem.c');
 	$postgres->ReplaceFile('src\backend\port\pg_latch.c',
 		'src\backend\port\win32_latch.c');
-	$postgres->AddFiles('src\port', @pgportfiles);
+	$postgres->AddFiles('src\port',   @pgportfiles);
 	$postgres->AddFiles('src\common', @pgcommonbkndfiles);
 	$postgres->AddDir('src\timezone');
 	$postgres->AddFiles('src\backend\parser', 'scan.l', 'gram.y');
@@ -318,10 +318,10 @@ sub mkvcbuild
 	$ecpg->AddPrefixInclude('src\interfaces\ecpg\preproc');
 	$ecpg->AddFiles('src\interfaces\ecpg\preproc', 'pgc.l', 'preproc.y');
 	$ecpg->AddDefine('MAJOR_VERSION=4');
-	$ecpg->AddDefine('MINOR_VERSION=9');
+	$ecpg->AddDefine('MINOR_VERSION=10');
 	$ecpg->AddDefine('PATCHLEVEL=0');
 	$ecpg->AddDefine('ECPG_COMPILE');
-	$ecpg->AddReference($libpgport, $libpgcommon);
+	$ecpg->AddReference($libpgcommon, $libpgport);
 
 	my $pgregress_ecpg =
 	  $solution->AddProject('pg_regress_ecpg', 'exe', 'misc');
@@ -331,7 +331,7 @@ sub mkvcbuild
 	$pgregress_ecpg->AddIncludeDir('src\test\regress');
 	$pgregress_ecpg->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$pgregress_ecpg->AddDefine('FRONTEND');
-	$pgregress_ecpg->AddReference($libpgport, $libpgcommon);
+	$pgregress_ecpg->AddReference($libpgcommon, $libpgport);
 
 	my $isolation_tester =
 	  $solution->AddProject('isolationtester', 'exe', 'misc');
@@ -346,7 +346,7 @@ sub mkvcbuild
 	$isolation_tester->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$isolation_tester->AddDefine('FRONTEND');
 	$isolation_tester->AddLibrary('wsock32.lib');
-	$isolation_tester->AddReference($libpq, $libpgport);
+	$isolation_tester->AddReference($libpq, $libpgcommon, $libpgport);
 
 	my $pgregress_isolation =
 	  $solution->AddProject('pg_isolation_regress', 'exe', 'misc');
@@ -356,7 +356,7 @@ sub mkvcbuild
 	$pgregress_isolation->AddIncludeDir('src\test\regress');
 	$pgregress_isolation->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$pgregress_isolation->AddDefine('FRONTEND');
-	$pgregress_isolation->AddReference($libpgport, $libpgcommon);
+	$pgregress_isolation->AddReference($libpgcommon, $libpgport);
 
 	# src/bin
 	my $initdb = AddSimpleFrontend('initdb');
@@ -374,6 +374,11 @@ sub mkvcbuild
 	$pgreceivexlog->{name} = 'pg_receivexlog';
 	$pgreceivexlog->AddFile('src\bin\pg_basebackup\pg_receivexlog.c');
 	$pgreceivexlog->AddLibrary('ws2_32.lib');
+
+	my $pgrecvlogical = AddSimpleFrontend('pg_basebackup', 1);
+	$pgrecvlogical->{name} = 'pg_recvlogical';
+	$pgrecvlogical->AddFile('src\bin\pg_basebackup\pg_recvlogical.c');
+	$pgrecvlogical->AddLibrary('ws2_32.lib');
 
 	my $pgconfig = AddSimpleFrontend('pg_config');
 
@@ -434,7 +439,7 @@ sub mkvcbuild
 	my $zic = $solution->AddProject('zic', 'exe', 'utils');
 	$zic->AddFiles('src\timezone', 'zic.c', 'ialloc.c', 'scheck.c',
 		'localtime.c');
-	$zic->AddReference($libpgport, $libpgcommon);
+	$zic->AddReference($libpgcommon, $libpgport);
 
 	if ($solution->{options}->{xml})
 	{
@@ -525,8 +530,8 @@ sub mkvcbuild
 		my $mf = Project::read_file(
 			'src\backend\utils\mb\conversion_procs\\' . $sub . '\Makefile');
 		my $p = $solution->AddProject($sub, 'dll', 'conversion procs');
-		$p->AddFile('src\backend\utils\mb\conversion_procs\\' 
-			  . $sub . '\\' 
+		$p->AddFile('src\backend\utils\mb\conversion_procs\\'
+			  . $sub . '\\'
 			  . $sub
 			  . '.c');
 		if ($mf =~ m{^SRCS\s*\+=\s*(.*)$}m)
@@ -574,7 +579,7 @@ sub mkvcbuild
 		$proj->AddIncludeDir('src\interfaces\libpq');
 		$proj->AddIncludeDir('src\bin\pg_dump');
 		$proj->AddIncludeDir('src\bin\psql');
-		$proj->AddReference($libpq, $libpgport, $libpgcommon);
+		$proj->AddReference($libpq, $libpgcommon, $libpgport);
 		$proj->AddResourceFile('src\bin\scripts', 'PostgreSQL Utility');
 		$proj->AddLibrary('ws2_32.lib');
 	}
@@ -589,21 +594,23 @@ sub mkvcbuild
 	$pgregress->AddFile('src\test\regress\pg_regress_main.c');
 	$pgregress->AddIncludeDir('src\port');
 	$pgregress->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
-	$pgregress->AddReference($libpgport, $libpgcommon);
+	$pgregress->AddReference($libpgcommon, $libpgport);
 
 	# fix up pg_xlogdump once it's been set up
 	# files symlinked on Unix are copied on windows
-	my $pg_xlogdump = (grep {$_->{name} eq 'pg_xlogdump'} 
-					   @{$solution->{projects}->{contrib}} )[0];
+	my $pg_xlogdump =
+	  (grep { $_->{name} eq 'pg_xlogdump' }
+		  @{ $solution->{projects}->{contrib} })[0];
 	$pg_xlogdump->AddDefine('FRONTEND');
-	foreach my $xf (glob('src/backend/access/rmgrdesc/*desc.c') )
+	foreach my $xf (glob('src/backend/access/rmgrdesc/*desc.c'))
 	{
 		my $bf = basename $xf;
-		copy($xf,"contrib/pg_xlogdump/$bf");
+		copy($xf, "contrib/pg_xlogdump/$bf");
 		$pg_xlogdump->AddFile("contrib\\pg_xlogdump\\$bf");
 	}
-	copy('src/backend/access/transam/xlogreader.c',
-		 'contrib/pg_xlogdump/xlogreader.c'); 
+	copy(
+		'src/backend/access/transam/xlogreader.c',
+		'contrib/pg_xlogdump/xlogreader.c');
 
 	$solution->Save();
 	return $solution->{vcver};
@@ -621,7 +628,7 @@ sub AddSimpleFrontend
 
 	my $p = $solution->AddProject($n, 'exe', 'bin');
 	$p->AddDir('src\bin\\' . $n);
-	$p->AddReference($libpgport, $libpgcommon);
+	$p->AddReference($libpgcommon, $libpgport);
 	if ($uselibpq)
 	{
 		$p->AddIncludeDir('src\interfaces\libpq');

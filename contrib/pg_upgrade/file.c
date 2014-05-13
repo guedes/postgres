@@ -3,7 +3,7 @@
  *
  *	file system operations
  *
- *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2014, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/file.c
  */
 
@@ -127,26 +127,31 @@ linkAndUpdateFile(pageCnvCtx *pageConverter,
 static int
 copy_file(const char *srcfile, const char *dstfile, bool force)
 {
-
 #define COPY_BUF_SIZE (50 * BLCKSZ)
 
 	int			src_fd;
 	int			dest_fd;
 	char	   *buffer;
 	int			ret = 0;
-	int         save_errno = 0;
+	int			save_errno = 0;
 
 	if ((srcfile == NULL) || (dstfile == NULL))
+	{
+		errno = EINVAL;
 		return -1;
+	}
 
 	if ((src_fd = open(srcfile, O_RDONLY, 0)) < 0)
 		return -1;
 
 	if ((dest_fd = open(dstfile, O_RDWR | O_CREAT | (force ? 0 : O_EXCL), S_IRUSR | S_IWUSR)) < 0)
 	{
+		save_errno = errno;
+
 		if (src_fd != 0)
 			close(src_fd);
 
+		errno = save_errno;
 		return -1;
 	}
 
@@ -171,6 +176,9 @@ copy_file(const char *srcfile, const char *dstfile, bool force)
 
 		if (write(dest_fd, buffer, nbytes) != nbytes)
 		{
+			/* if write didn't set errno, assume problem is no disk space */
+			if (errno == 0)
+				errno = ENOSPC;
 			save_errno = errno;
 			ret = -1;
 			break;
@@ -205,10 +213,9 @@ check_hard_link(void)
 
 	if (pg_link_file(existing_file, new_link_file) == -1)
 	{
-		pg_log(PG_FATAL,
-			   "Could not create hard link between old and new data directories: %s\n"
-			   "In link mode the old and new data directories must be on the same file system volume.\n",
-			   getErrorText(errno));
+		pg_fatal("Could not create hard link between old and new data directories: %s\n"
+				 "In link mode the old and new data directories must be on the same file system volume.\n",
+				 getErrorText(errno));
 	}
 	unlink(new_link_file);
 }

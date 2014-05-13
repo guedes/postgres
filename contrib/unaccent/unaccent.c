@@ -3,7 +3,7 @@
  * unaccent.c
  *	  Text search unaccent dictionary
  *
- * Copyright (c) 2009-2013, PostgreSQL Global Development Group
+ * Copyright (c) 2009-2014, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/unaccent/unaccent.c
@@ -40,7 +40,7 @@ typedef struct TrieChar
 static TrieChar *
 placeChar(TrieChar *node, unsigned char *str, int lenstr, char *replaceTo, int replacelen)
 {
-	TrieChar *curnode;
+	TrieChar   *curnode;
 
 	if (!node)
 	{
@@ -77,7 +77,7 @@ placeChar(TrieChar *node, unsigned char *str, int lenstr, char *replaceTo, int r
 static TrieChar *
 initTrie(char *filename)
 {
-	TrieChar *volatile rootTrie = NULL;
+	TrieChar   *volatile rootTrie = NULL;
 	MemoryContext ccxt = CurrentMemoryContext;
 	tsearch_readline_state trst;
 	volatile bool skip;
@@ -162,8 +162,8 @@ initTrie(char *filename)
 
 				if (state >= 3)
 					rootTrie = placeChar(rootTrie,
-											   (unsigned char *) src, srclen,
-											   trg, trglen);
+										 (unsigned char *) src, srclen,
+										 trg, trglen);
 
 				pfree(line);
 			}
@@ -216,7 +216,6 @@ findReplaceTo(TrieChar *node, unsigned char *src, int srclen)
 }
 
 PG_FUNCTION_INFO_V1(unaccent_init);
-Datum		unaccent_init(PG_FUNCTION_ARGS);
 Datum
 unaccent_init(PG_FUNCTION_ARGS)
 {
@@ -258,7 +257,6 @@ unaccent_init(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(unaccent_lexize);
-Datum		unaccent_lexize(PG_FUNCTION_ARGS);
 Datum
 unaccent_lexize(PG_FUNCTION_ARGS)
 {
@@ -313,7 +311,6 @@ unaccent_lexize(PG_FUNCTION_ARGS)
  * Function-like wrapper for dictionary
  */
 PG_FUNCTION_INFO_V1(unaccent_dict);
-Datum		unaccent_dict(PG_FUNCTION_ARGS);
 Datum
 unaccent_dict(PG_FUNCTION_ARGS)
 {

@@ -79,6 +79,7 @@ ALTER FOREIGN TABLE ft2 DROP COLUMN cx;
 -- configure options
 ALTER SERVER testserver1 OPTIONS (
 	use_remote_estimate 'false',
+	updatable 'true',
 	fdw_startup_cost '123.456',
 	fdw_tuple_cost '0.123',
 	service 'value',
@@ -466,6 +467,149 @@ SELECT * FROM ft2 a, ft2 b WHERE a.c1 = 47 AND b.c1 = a.c2;
 ----+----+-------+------------------------------+--------------------------+----+------------+-----+----+----+-------+------------------------------+--------------------------+----+------------+-----
  47 |  7 | 00047 | Tue Feb 17 00:00:00 1970 PST | Tue Feb 17 00:00:00 1970 | 7  | 7          | foo |  7 |  7 | 00007 | Thu Jan 08 00:00:00 1970 PST | Thu Jan 08 00:00:00 1970 | 7  | 7          | foo
 (1 row)
+
+-- check both safe and unsafe join conditions
+EXPLAIN (VERBOSE, COSTS false)
+  SELECT * FROM ft2 a, ft2 b
+  WHERE a.c2 = 6 AND b.c1 = a.c1 AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: a.c1, a.c2, a.c3, a.c4, a.c5, a.c6, a.c7, a.c8, b.c1, b.c2, b.c3, b.c4, b.c5, b.c6, b.c7, b.c8
+   ->  Foreign Scan on public.ft2 a
+         Output: a.c1, a.c2, a.c3, a.c4, a.c5, a.c6, a.c7, a.c8
+         Filter: (a.c8 = 'foo'::user_enum)
+         Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" WHERE ((c2 = 6))
+   ->  Foreign Scan on public.ft2 b
+         Output: b.c1, b.c2, b.c3, b.c4, b.c5, b.c6, b.c7, b.c8
+         Filter: (upper((a.c7)::text) = (b.c7)::text)
+         Remote SQL: SELECT "C 1", c2, c3, c4, c5, c6, c7, c8 FROM "S 1"."T 1" WHERE (($1::integer = "C 1"))
+(10 rows)
+
+SELECT * FROM ft2 a, ft2 b
+WHERE a.c2 = 6 AND b.c1 = a.c1 AND a.c8 = 'foo' AND b.c7 = upper(a.c7);
+ c1  | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  | c1  | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+-----+----+-------+------------------------------+--------------------------+----+------------+-----+-----+----+-------+------------------------------+--------------------------+----+------------+-----
+   6 |  6 | 00006 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo |   6 |  6 | 00006 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+  16 |  6 | 00016 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo |  16 |  6 | 00016 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+  26 |  6 | 00026 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo |  26 |  6 | 00026 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+  36 |  6 | 00036 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo |  36 |  6 | 00036 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+  46 |  6 | 00046 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo |  46 |  6 | 00046 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+  56 |  6 | 00056 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo |  56 |  6 | 00056 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+  66 |  6 | 00066 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo |  66 |  6 | 00066 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+  76 |  6 | 00076 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo |  76 |  6 | 00076 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+  86 |  6 | 00086 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo |  86 |  6 | 00086 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+  96 |  6 | 00096 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo |  96 |  6 | 00096 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 106 |  6 | 00106 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 106 |  6 | 00106 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 116 |  6 | 00116 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 116 |  6 | 00116 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 126 |  6 | 00126 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 126 |  6 | 00126 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 136 |  6 | 00136 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 136 |  6 | 00136 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 146 |  6 | 00146 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 146 |  6 | 00146 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 156 |  6 | 00156 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 156 |  6 | 00156 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 166 |  6 | 00166 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 166 |  6 | 00166 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 176 |  6 | 00176 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 176 |  6 | 00176 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 186 |  6 | 00186 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 186 |  6 | 00186 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 196 |  6 | 00196 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 196 |  6 | 00196 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 206 |  6 | 00206 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 206 |  6 | 00206 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 216 |  6 | 00216 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 216 |  6 | 00216 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 226 |  6 | 00226 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 226 |  6 | 00226 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 236 |  6 | 00236 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 236 |  6 | 00236 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 246 |  6 | 00246 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 246 |  6 | 00246 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 256 |  6 | 00256 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 256 |  6 | 00256 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 266 |  6 | 00266 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 266 |  6 | 00266 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 276 |  6 | 00276 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 276 |  6 | 00276 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 286 |  6 | 00286 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 286 |  6 | 00286 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 296 |  6 | 00296 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 296 |  6 | 00296 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 306 |  6 | 00306 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 306 |  6 | 00306 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 316 |  6 | 00316 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 316 |  6 | 00316 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 326 |  6 | 00326 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 326 |  6 | 00326 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 336 |  6 | 00336 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 336 |  6 | 00336 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 346 |  6 | 00346 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 346 |  6 | 00346 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 356 |  6 | 00356 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 356 |  6 | 00356 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 366 |  6 | 00366 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 366 |  6 | 00366 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 376 |  6 | 00376 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 376 |  6 | 00376 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 386 |  6 | 00386 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 386 |  6 | 00386 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 396 |  6 | 00396 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 396 |  6 | 00396 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 406 |  6 | 00406 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 406 |  6 | 00406 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 416 |  6 | 00416 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 416 |  6 | 00416 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 426 |  6 | 00426 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 426 |  6 | 00426 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 436 |  6 | 00436 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 436 |  6 | 00436 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 446 |  6 | 00446 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 446 |  6 | 00446 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 456 |  6 | 00456 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 456 |  6 | 00456 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 466 |  6 | 00466 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 466 |  6 | 00466 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 476 |  6 | 00476 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 476 |  6 | 00476 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 486 |  6 | 00486 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 486 |  6 | 00486 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 496 |  6 | 00496 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 496 |  6 | 00496 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 506 |  6 | 00506 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 506 |  6 | 00506 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 516 |  6 | 00516 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 516 |  6 | 00516 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 526 |  6 | 00526 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 526 |  6 | 00526 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 536 |  6 | 00536 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 536 |  6 | 00536 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 546 |  6 | 00546 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 546 |  6 | 00546 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 556 |  6 | 00556 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 556 |  6 | 00556 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 566 |  6 | 00566 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 566 |  6 | 00566 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 576 |  6 | 00576 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 576 |  6 | 00576 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 586 |  6 | 00586 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 586 |  6 | 00586 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 596 |  6 | 00596 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 596 |  6 | 00596 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 606 |  6 | 00606 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 606 |  6 | 00606 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 616 |  6 | 00616 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 616 |  6 | 00616 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 626 |  6 | 00626 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 626 |  6 | 00626 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 636 |  6 | 00636 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 636 |  6 | 00636 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 646 |  6 | 00646 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 646 |  6 | 00646 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 656 |  6 | 00656 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 656 |  6 | 00656 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 666 |  6 | 00666 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 666 |  6 | 00666 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 676 |  6 | 00676 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 676 |  6 | 00676 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 686 |  6 | 00686 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 686 |  6 | 00686 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 696 |  6 | 00696 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 696 |  6 | 00696 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 706 |  6 | 00706 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 706 |  6 | 00706 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 716 |  6 | 00716 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 716 |  6 | 00716 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 726 |  6 | 00726 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 726 |  6 | 00726 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 736 |  6 | 00736 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 736 |  6 | 00736 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 746 |  6 | 00746 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 746 |  6 | 00746 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 756 |  6 | 00756 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 756 |  6 | 00756 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 766 |  6 | 00766 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 766 |  6 | 00766 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 776 |  6 | 00776 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 776 |  6 | 00776 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 786 |  6 | 00786 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 786 |  6 | 00786 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 796 |  6 | 00796 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 796 |  6 | 00796 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 806 |  6 | 00806 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 806 |  6 | 00806 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 816 |  6 | 00816 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 816 |  6 | 00816 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 826 |  6 | 00826 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 826 |  6 | 00826 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 836 |  6 | 00836 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 836 |  6 | 00836 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 846 |  6 | 00846 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 846 |  6 | 00846 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 856 |  6 | 00856 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 856 |  6 | 00856 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 866 |  6 | 00866 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 866 |  6 | 00866 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 876 |  6 | 00876 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 876 |  6 | 00876 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 886 |  6 | 00886 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 886 |  6 | 00886 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 896 |  6 | 00896 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 896 |  6 | 00896 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+ 906 |  6 | 00906 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo | 906 |  6 | 00906 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
+ 916 |  6 | 00916 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo | 916 |  6 | 00916 | Sat Jan 17 00:00:00 1970 PST | Sat Jan 17 00:00:00 1970 | 6  | 6          | foo
+ 926 |  6 | 00926 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo | 926 |  6 | 00926 | Tue Jan 27 00:00:00 1970 PST | Tue Jan 27 00:00:00 1970 | 6  | 6          | foo
+ 936 |  6 | 00936 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo | 936 |  6 | 00936 | Fri Feb 06 00:00:00 1970 PST | Fri Feb 06 00:00:00 1970 | 6  | 6          | foo
+ 946 |  6 | 00946 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo | 946 |  6 | 00946 | Mon Feb 16 00:00:00 1970 PST | Mon Feb 16 00:00:00 1970 | 6  | 6          | foo
+ 956 |  6 | 00956 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo | 956 |  6 | 00956 | Thu Feb 26 00:00:00 1970 PST | Thu Feb 26 00:00:00 1970 | 6  | 6          | foo
+ 966 |  6 | 00966 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo | 966 |  6 | 00966 | Sun Mar 08 00:00:00 1970 PST | Sun Mar 08 00:00:00 1970 | 6  | 6          | foo
+ 976 |  6 | 00976 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo | 976 |  6 | 00976 | Wed Mar 18 00:00:00 1970 PST | Wed Mar 18 00:00:00 1970 | 6  | 6          | foo
+ 986 |  6 | 00986 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo | 986 |  6 | 00986 | Sat Mar 28 00:00:00 1970 PST | Sat Mar 28 00:00:00 1970 | 6  | 6          | foo
+ 996 |  6 | 00996 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo | 996 |  6 | 00996 | Tue Apr 07 00:00:00 1970 PST | Tue Apr 07 00:00:00 1970 | 6  | 6          | foo
+(100 rows)
+
+-- bug before 9.3.5 due to sloppy handling of remote-estimate parameters
+SELECT * FROM ft1 WHERE c1 = ANY (ARRAY(SELECT c1 FROM ft2 WHERE c1 < 5));
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+  3 |  3 | 00003 | Sun Jan 04 00:00:00 1970 PST | Sun Jan 04 00:00:00 1970 | 3  | 3          | foo
+  4 |  4 | 00004 | Mon Jan 05 00:00:00 1970 PST | Mon Jan 05 00:00:00 1970 | 4  | 4          | foo
+(4 rows)
+
+SELECT * FROM ft2 WHERE c1 = ANY (ARRAY(SELECT c1 FROM ft1 WHERE c1 < 5));
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+  3 |  3 | 00003 | Sun Jan 04 00:00:00 1970 PST | Sun Jan 04 00:00:00 1970 | 3  | 3          | foo
+  4 |  4 | 00004 | Mon Jan 05 00:00:00 1970 PST | Mon Jan 05 00:00:00 1970 | 4  | 4          | foo
+(4 rows)
 
 -- ===================================================================
 -- parameterized queries
@@ -1951,126 +2095,124 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE TRIGGER t1_br_insert BEFORE INSERT OR UPDATE
     ON "S 1"."T 1" FOR EACH ROW EXECUTE PROCEDURE "S 1".F_BRTRIG();
-INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 218, 'fff') RETURNING *;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 818, 'fff') RETURNING *;
   c1  | c2  |       c3        | c4 | c5 | c6 |     c7     | c8 
 ------+-----+-----------------+----+----+----+------------+----
- 1208 | 218 | fff_trig_update |    |    |    | ft2        | 
+ 1208 | 818 | fff_trig_update |    |    |    | ft2        | 
 (1 row)
 
-INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 218, 'ggg', '(--;') RETURNING *;
+INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 818, 'ggg', '(--;') RETURNING *;
   c1  | c2  |       c3        | c4 | c5 |  c6  |     c7     | c8 
 ------+-----+-----------------+----+----+------+------------+----
- 1218 | 218 | ggg_trig_update |    |    | (--; | ft2        | 
+ 1218 | 818 | ggg_trig_update |    |    | (--; | ft2        | 
 (1 row)
 
-UPDATE ft2 SET c2 = c2 + 600 WHERE c1 % 10 = 8 RETURNING *;
-  c1  | c2  |             c3              |              c4              |            c5            |  c6  |     c7     | c8  
-------+-----+-----------------------------+------------------------------+--------------------------+------+------------+-----
-    8 | 608 | 00008_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-   18 | 608 | 00018_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-   28 | 608 | 00028_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-   38 | 608 | 00038_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-   48 | 608 | 00048_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-   58 | 608 | 00058_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-   68 | 608 | 00068_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-   78 | 608 | 00078_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-   88 | 608 | 00088_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-   98 | 608 | 00098_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  108 | 608 | 00108_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  118 | 608 | 00118_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  128 | 608 | 00128_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  138 | 608 | 00138_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  148 | 608 | 00148_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  158 | 608 | 00158_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  168 | 608 | 00168_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  178 | 608 | 00178_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  188 | 608 | 00188_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  198 | 608 | 00198_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  208 | 608 | 00208_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  218 | 608 | 00218_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  228 | 608 | 00228_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  238 | 608 | 00238_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  248 | 608 | 00248_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  258 | 608 | 00258_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  268 | 608 | 00268_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  278 | 608 | 00278_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  288 | 608 | 00288_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  298 | 608 | 00298_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  308 | 608 | 00308_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  318 | 608 | 00318_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  328 | 608 | 00328_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  338 | 608 | 00338_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  348 | 608 | 00348_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  358 | 608 | 00358_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  368 | 608 | 00368_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  378 | 608 | 00378_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  388 | 608 | 00388_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  398 | 608 | 00398_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  408 | 608 | 00408_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  418 | 608 | 00418_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  428 | 608 | 00428_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  438 | 608 | 00438_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  448 | 608 | 00448_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  458 | 608 | 00458_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  468 | 608 | 00468_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  478 | 608 | 00478_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  488 | 608 | 00488_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  498 | 608 | 00498_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  508 | 608 | 00508_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  518 | 608 | 00518_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  528 | 608 | 00528_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  538 | 608 | 00538_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  548 | 608 | 00548_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  558 | 608 | 00558_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  568 | 608 | 00568_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  578 | 608 | 00578_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  588 | 608 | 00588_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  598 | 608 | 00598_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  608 | 608 | 00608_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  618 | 608 | 00618_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  628 | 608 | 00628_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  638 | 608 | 00638_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  648 | 608 | 00648_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  658 | 608 | 00658_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  668 | 608 | 00668_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  678 | 608 | 00678_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  688 | 608 | 00688_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  698 | 608 | 00698_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  708 | 608 | 00708_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  718 | 608 | 00718_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  728 | 608 | 00728_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  738 | 608 | 00738_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  748 | 608 | 00748_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  758 | 608 | 00758_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  768 | 608 | 00768_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  778 | 608 | 00778_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  788 | 608 | 00788_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  798 | 608 | 00798_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  808 | 608 | 00808_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  818 | 608 | 00818_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  828 | 608 | 00828_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  838 | 608 | 00838_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  848 | 608 | 00848_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  858 | 608 | 00858_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  868 | 608 | 00868_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  878 | 608 | 00878_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  888 | 608 | 00888_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  898 | 608 | 00898_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
-  908 | 608 | 00908_trig_update           | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8    | 8          | foo
-  918 | 608 | 00918_trig_update           | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8    | 8          | foo
-  928 | 608 | 00928_trig_update           | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8    | 8          | foo
-  938 | 608 | 00938_trig_update           | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8    | 8          | foo
-  948 | 608 | 00948_trig_update           | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8    | 8          | foo
-  958 | 608 | 00958_trig_update           | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8    | 8          | foo
-  968 | 608 | 00968_trig_update           | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8    | 8          | foo
-  978 | 608 | 00978_trig_update           | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8    | 8          | foo
-  988 | 608 | 00988_trig_update           | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8    | 8          | foo
-  998 | 608 | 00998_trig_update           | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8    | 8          | foo
- 1008 | 708 | 0000800008_trig_update      |                              |                          |      | ft2        | 
- 1018 | 708 | 0001800018_trig_update      |                              |                          |      | ft2        | 
- 1208 | 818 | fff_trig_update_trig_update |                              |                          |      | ft2        | 
- 1218 | 818 | ggg_trig_update_trig_update |                              |                          | (--; | ft2        | 
-(104 rows)
+UPDATE ft2 SET c2 = c2 + 600 WHERE c1 % 10 = 8 AND c1 < 1200 RETURNING *;
+  c1  | c2  |           c3           |              c4              |            c5            | c6 |     c7     | c8  
+------+-----+------------------------+------------------------------+--------------------------+----+------------+-----
+    8 | 608 | 00008_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+   18 | 608 | 00018_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+   28 | 608 | 00028_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+   38 | 608 | 00038_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+   48 | 608 | 00048_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+   58 | 608 | 00058_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+   68 | 608 | 00068_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+   78 | 608 | 00078_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+   88 | 608 | 00088_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+   98 | 608 | 00098_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  108 | 608 | 00108_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  118 | 608 | 00118_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  128 | 608 | 00128_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  138 | 608 | 00138_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  148 | 608 | 00148_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  158 | 608 | 00158_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  168 | 608 | 00168_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  178 | 608 | 00178_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  188 | 608 | 00188_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  198 | 608 | 00198_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  208 | 608 | 00208_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  218 | 608 | 00218_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  228 | 608 | 00228_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  238 | 608 | 00238_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  248 | 608 | 00248_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  258 | 608 | 00258_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  268 | 608 | 00268_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  278 | 608 | 00278_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  288 | 608 | 00288_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  298 | 608 | 00298_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  308 | 608 | 00308_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  318 | 608 | 00318_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  328 | 608 | 00328_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  338 | 608 | 00338_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  348 | 608 | 00348_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  358 | 608 | 00358_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  368 | 608 | 00368_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  378 | 608 | 00378_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  388 | 608 | 00388_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  398 | 608 | 00398_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  408 | 608 | 00408_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  418 | 608 | 00418_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  428 | 608 | 00428_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  438 | 608 | 00438_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  448 | 608 | 00448_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  458 | 608 | 00458_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  468 | 608 | 00468_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  478 | 608 | 00478_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  488 | 608 | 00488_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  498 | 608 | 00498_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  508 | 608 | 00508_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  518 | 608 | 00518_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  528 | 608 | 00528_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  538 | 608 | 00538_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  548 | 608 | 00548_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  558 | 608 | 00558_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  568 | 608 | 00568_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  578 | 608 | 00578_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  588 | 608 | 00588_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  598 | 608 | 00598_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  608 | 608 | 00608_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  618 | 608 | 00618_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  628 | 608 | 00628_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  638 | 608 | 00638_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  648 | 608 | 00648_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  658 | 608 | 00658_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  668 | 608 | 00668_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  678 | 608 | 00678_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  688 | 608 | 00688_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  698 | 608 | 00698_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  708 | 608 | 00708_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  718 | 608 | 00718_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  728 | 608 | 00728_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  738 | 608 | 00738_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  748 | 608 | 00748_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  758 | 608 | 00758_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  768 | 608 | 00768_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  778 | 608 | 00778_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  788 | 608 | 00788_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  798 | 608 | 00798_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  808 | 608 | 00808_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  818 | 608 | 00818_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  828 | 608 | 00828_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  838 | 608 | 00838_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  848 | 608 | 00848_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  858 | 608 | 00858_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  868 | 608 | 00868_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  878 | 608 | 00878_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  888 | 608 | 00888_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  898 | 608 | 00898_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+  908 | 608 | 00908_trig_update      | Fri Jan 09 00:00:00 1970 PST | Fri Jan 09 00:00:00 1970 | 8  | 8          | foo
+  918 | 608 | 00918_trig_update      | Mon Jan 19 00:00:00 1970 PST | Mon Jan 19 00:00:00 1970 | 8  | 8          | foo
+  928 | 608 | 00928_trig_update      | Thu Jan 29 00:00:00 1970 PST | Thu Jan 29 00:00:00 1970 | 8  | 8          | foo
+  938 | 608 | 00938_trig_update      | Sun Feb 08 00:00:00 1970 PST | Sun Feb 08 00:00:00 1970 | 8  | 8          | foo
+  948 | 608 | 00948_trig_update      | Wed Feb 18 00:00:00 1970 PST | Wed Feb 18 00:00:00 1970 | 8  | 8          | foo
+  958 | 608 | 00958_trig_update      | Sat Feb 28 00:00:00 1970 PST | Sat Feb 28 00:00:00 1970 | 8  | 8          | foo
+  968 | 608 | 00968_trig_update      | Tue Mar 10 00:00:00 1970 PST | Tue Mar 10 00:00:00 1970 | 8  | 8          | foo
+  978 | 608 | 00978_trig_update      | Fri Mar 20 00:00:00 1970 PST | Fri Mar 20 00:00:00 1970 | 8  | 8          | foo
+  988 | 608 | 00988_trig_update      | Mon Mar 30 00:00:00 1970 PST | Mon Mar 30 00:00:00 1970 | 8  | 8          | foo
+  998 | 608 | 00998_trig_update      | Thu Apr 09 00:00:00 1970 PST | Thu Apr 09 00:00:00 1970 | 8  | 8          | foo
+ 1008 | 708 | 0000800008_trig_update |                              |                          |    | ft2        | 
+ 1018 | 708 | 0001800018_trig_update |                              |                          |    | ft2        | 
+(102 rows)
 
 -- Test errors thrown on remote side during update
 ALTER TABLE "S 1"."T 1" ADD CONSTRAINT c2positive CHECK (c2 >= 0);
@@ -2372,4 +2514,323 @@ select * from rem1;
   2 | bye
  11 | bye remote
 (4 rows)
+
+-- ===================================================================
+-- test local triggers
+-- ===================================================================
+-- Trigger functions "borrowed" from triggers regress test.
+CREATE FUNCTION trigger_func() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE NOTICE 'trigger_func(%) called: action = %, when = %, level = %',
+		TG_ARGV[0], TG_OP, TG_WHEN, TG_LEVEL;
+	RETURN NULL;
+END;$$;
+CREATE TRIGGER trig_stmt_before BEFORE DELETE OR INSERT OR UPDATE ON rem1
+	FOR EACH STATEMENT EXECUTE PROCEDURE trigger_func();
+CREATE TRIGGER trig_stmt_after AFTER DELETE OR INSERT OR UPDATE ON rem1
+	FOR EACH STATEMENT EXECUTE PROCEDURE trigger_func();
+CREATE OR REPLACE FUNCTION trigger_data()  RETURNS trigger
+LANGUAGE plpgsql AS $$
+
+declare
+	oldnew text[];
+	relid text;
+    argstr text;
+begin
+
+	relid := TG_relid::regclass;
+	argstr := '';
+	for i in 0 .. TG_nargs - 1 loop
+		if i > 0 then
+			argstr := argstr || ', ';
+		end if;
+		argstr := argstr || TG_argv[i];
+	end loop;
+
+    RAISE NOTICE '%(%) % % % ON %',
+		tg_name, argstr, TG_when, TG_level, TG_OP, relid;
+    oldnew := '{}'::text[];
+	if TG_OP != 'INSERT' then
+		oldnew := array_append(oldnew, format('OLD: %s', OLD));
+	end if;
+
+	if TG_OP != 'DELETE' then
+		oldnew := array_append(oldnew, format('NEW: %s', NEW));
+	end if;
+
+    RAISE NOTICE '%', array_to_string(oldnew, ',');
+
+	if TG_OP = 'DELETE' then
+		return OLD;
+	else
+		return NEW;
+	end if;
+end;
+$$;
+-- Test basic functionality
+CREATE TRIGGER trig_row_before
+BEFORE INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER trig_row_after
+AFTER INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+delete from rem1;
+NOTICE:  trigger_func(<NULL>) called: action = DELETE, when = BEFORE, level = STATEMENT
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW DELETE ON rem1
+NOTICE:  OLD: (1,hi)
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW DELETE ON rem1
+NOTICE:  OLD: (10,"hi remote")
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW DELETE ON rem1
+NOTICE:  OLD: (2,bye)
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW DELETE ON rem1
+NOTICE:  OLD: (11,"bye remote")
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (1,hi)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (10,"hi remote")
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (2,bye)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (11,"bye remote")
+NOTICE:  trigger_func(<NULL>) called: action = DELETE, when = AFTER, level = STATEMENT
+insert into rem1 values(1,'insert');
+NOTICE:  trigger_func(<NULL>) called: action = INSERT, when = BEFORE, level = STATEMENT
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW INSERT ON rem1
+NOTICE:  NEW: (1,insert)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW INSERT ON rem1
+NOTICE:  NEW: (1,insert)
+NOTICE:  trigger_func(<NULL>) called: action = INSERT, when = AFTER, level = STATEMENT
+update rem1 set f2  = 'update' where f1 = 1;
+NOTICE:  trigger_func(<NULL>) called: action = UPDATE, when = BEFORE, level = STATEMENT
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW UPDATE ON rem1
+NOTICE:  OLD: (1,insert),NEW: (1,update)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (1,insert),NEW: (1,update)
+NOTICE:  trigger_func(<NULL>) called: action = UPDATE, when = AFTER, level = STATEMENT
+update rem1 set f2 = f2 || f2;
+NOTICE:  trigger_func(<NULL>) called: action = UPDATE, when = BEFORE, level = STATEMENT
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW UPDATE ON rem1
+NOTICE:  OLD: (1,update),NEW: (1,updateupdate)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (1,update),NEW: (1,updateupdate)
+NOTICE:  trigger_func(<NULL>) called: action = UPDATE, when = AFTER, level = STATEMENT
+-- cleanup
+DROP TRIGGER trig_row_before ON rem1;
+DROP TRIGGER trig_row_after ON rem1;
+DROP TRIGGER trig_stmt_before ON rem1;
+DROP TRIGGER trig_stmt_after ON rem1;
+DELETE from rem1;
+-- Test WHEN conditions
+CREATE TRIGGER trig_row_before_insupd
+BEFORE INSERT OR UPDATE ON rem1
+FOR EACH ROW
+WHEN (NEW.f2 like '%update%')
+EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER trig_row_after_insupd
+AFTER INSERT OR UPDATE ON rem1
+FOR EACH ROW
+WHEN (NEW.f2 like '%update%')
+EXECUTE PROCEDURE trigger_data(23,'skidoo');
+-- Insert or update not matching: nothing happens
+INSERT INTO rem1 values(1, 'insert');
+UPDATE rem1 set f2 = 'test';
+-- Insert or update matching: triggers are fired
+INSERT INTO rem1 values(2, 'update');
+NOTICE:  trig_row_before_insupd(23, skidoo) BEFORE ROW INSERT ON rem1
+NOTICE:  NEW: (2,update)
+NOTICE:  trig_row_after_insupd(23, skidoo) AFTER ROW INSERT ON rem1
+NOTICE:  NEW: (2,update)
+UPDATE rem1 set f2 = 'update update' where f1 = '2';
+NOTICE:  trig_row_before_insupd(23, skidoo) BEFORE ROW UPDATE ON rem1
+NOTICE:  OLD: (2,update),NEW: (2,"update update")
+NOTICE:  trig_row_after_insupd(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (2,update),NEW: (2,"update update")
+CREATE TRIGGER trig_row_before_delete
+BEFORE DELETE ON rem1
+FOR EACH ROW
+WHEN (OLD.f2 like '%update%')
+EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER trig_row_after_delete
+AFTER DELETE ON rem1
+FOR EACH ROW
+WHEN (OLD.f2 like '%update%')
+EXECUTE PROCEDURE trigger_data(23,'skidoo');
+-- Trigger is fired for f1=2, not for f1=1
+DELETE FROM rem1;
+NOTICE:  trig_row_before_delete(23, skidoo) BEFORE ROW DELETE ON rem1
+NOTICE:  OLD: (2,"update update")
+NOTICE:  trig_row_after_delete(23, skidoo) AFTER ROW DELETE ON rem1
+NOTICE:  OLD: (2,"update update")
+-- cleanup
+DROP TRIGGER trig_row_before_insupd ON rem1;
+DROP TRIGGER trig_row_after_insupd ON rem1;
+DROP TRIGGER trig_row_before_delete ON rem1;
+DROP TRIGGER trig_row_after_delete ON rem1;
+-- Test various RETURN statements in BEFORE triggers.
+CREATE FUNCTION trig_row_before_insupdate() RETURNS TRIGGER AS $$
+  BEGIN
+    NEW.f2 := NEW.f2 || ' triggered !';
+    RETURN NEW;
+  END
+$$ language plpgsql;
+CREATE TRIGGER trig_row_before_insupd
+BEFORE INSERT OR UPDATE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trig_row_before_insupdate();
+-- The new values should have 'triggered' appended
+INSERT INTO rem1 values(1, 'insert');
+SELECT * from loc1;
+ f1 |         f2         
+----+--------------------
+  1 | insert triggered !
+(1 row)
+
+INSERT INTO rem1 values(2, 'insert') RETURNING f2;
+         f2         
+--------------------
+ insert triggered !
+(1 row)
+
+SELECT * from loc1;
+ f1 |         f2         
+----+--------------------
+  1 | insert triggered !
+  2 | insert triggered !
+(2 rows)
+
+UPDATE rem1 set f2 = '';
+SELECT * from loc1;
+ f1 |      f2      
+----+--------------
+  1 |  triggered !
+  2 |  triggered !
+(2 rows)
+
+UPDATE rem1 set f2 = 'skidoo' RETURNING f2;
+         f2         
+--------------------
+ skidoo triggered !
+ skidoo triggered !
+(2 rows)
+
+SELECT * from loc1;
+ f1 |         f2         
+----+--------------------
+  1 | skidoo triggered !
+  2 | skidoo triggered !
+(2 rows)
+
+DELETE FROM rem1;
+-- Add a second trigger, to check that the changes are propagated correctly
+-- from trigger to trigger
+CREATE TRIGGER trig_row_before_insupd2
+BEFORE INSERT OR UPDATE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trig_row_before_insupdate();
+INSERT INTO rem1 values(1, 'insert');
+SELECT * from loc1;
+ f1 |               f2               
+----+--------------------------------
+  1 | insert triggered ! triggered !
+(1 row)
+
+INSERT INTO rem1 values(2, 'insert') RETURNING f2;
+               f2               
+--------------------------------
+ insert triggered ! triggered !
+(1 row)
+
+SELECT * from loc1;
+ f1 |               f2               
+----+--------------------------------
+  1 | insert triggered ! triggered !
+  2 | insert triggered ! triggered !
+(2 rows)
+
+UPDATE rem1 set f2 = '';
+SELECT * from loc1;
+ f1 |            f2            
+----+--------------------------
+  1 |  triggered ! triggered !
+  2 |  triggered ! triggered !
+(2 rows)
+
+UPDATE rem1 set f2 = 'skidoo' RETURNING f2;
+               f2               
+--------------------------------
+ skidoo triggered ! triggered !
+ skidoo triggered ! triggered !
+(2 rows)
+
+SELECT * from loc1;
+ f1 |               f2               
+----+--------------------------------
+  1 | skidoo triggered ! triggered !
+  2 | skidoo triggered ! triggered !
+(2 rows)
+
+DROP TRIGGER trig_row_before_insupd ON rem1;
+DROP TRIGGER trig_row_before_insupd2 ON rem1;
+DELETE from rem1;
+INSERT INTO rem1 VALUES (1, 'test');
+-- Test with a trigger returning NULL
+CREATE FUNCTION trig_null() RETURNS TRIGGER AS $$
+  BEGIN
+    RETURN NULL;
+  END
+$$ language plpgsql;
+CREATE TRIGGER trig_null
+BEFORE INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trig_null();
+-- Nothing should have changed.
+INSERT INTO rem1 VALUES (2, 'test2');
+SELECT * from loc1;
+ f1 |  f2  
+----+------
+  1 | test
+(1 row)
+
+UPDATE rem1 SET f2 = 'test2';
+SELECT * from loc1;
+ f1 |  f2  
+----+------
+  1 | test
+(1 row)
+
+DELETE from rem1;
+SELECT * from loc1;
+ f1 |  f2  
+----+------
+  1 | test
+(1 row)
+
+DROP TRIGGER trig_null ON rem1;
+DELETE from rem1;
+-- Test a combination of local and remote triggers
+CREATE TRIGGER trig_row_before
+BEFORE INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER trig_row_after
+AFTER INSERT OR UPDATE OR DELETE ON rem1
+FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
+CREATE TRIGGER trig_local_before BEFORE INSERT OR UPDATE ON loc1
+FOR EACH ROW EXECUTE PROCEDURE trig_row_before_insupdate();
+INSERT INTO rem1(f2) VALUES ('test');
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW INSERT ON rem1
+NOTICE:  NEW: (12,test)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW INSERT ON rem1
+NOTICE:  NEW: (12,"test triggered !")
+UPDATE rem1 SET f2 = 'testo';
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW UPDATE ON rem1
+NOTICE:  OLD: (12,"test triggered !"),NEW: (12,testo)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW UPDATE ON rem1
+NOTICE:  OLD: (12,"test triggered !"),NEW: (12,"testo triggered !")
+-- Test returning a system attribute
+INSERT INTO rem1(f2) VALUES ('test') RETURNING ctid;
+NOTICE:  trig_row_before(23, skidoo) BEFORE ROW INSERT ON rem1
+NOTICE:  NEW: (13,test)
+NOTICE:  trig_row_after(23, skidoo) AFTER ROW INSERT ON rem1
+NOTICE:  NEW: (13,"test triggered !")
+  ctid  
+--------
+ (0,27)
+(1 row)
 

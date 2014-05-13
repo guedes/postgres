@@ -37,7 +37,7 @@ ALTER GROUP regressgroup1 ADD USER regressuser4;
 
 ALTER GROUP regressgroup2 ADD USER regressuser2;	-- duplicate
 ALTER GROUP regressgroup2 DROP USER regressuser2;
-ALTER GROUP regressgroup2 ADD USER regressuser4;
+GRANT regressgroup2 TO regressuser4 WITH ADMIN OPTION;
 
 -- test owner privileges
 
@@ -599,6 +599,33 @@ SELECT has_table_privilege('regressuser3', 'atest4', 'SELECT'); -- false
 SELECT has_table_privilege('regressuser1', 'atest4', 'SELECT WITH GRANT OPTION'); -- true
 
 
+-- Admin options
+
+SET SESSION AUTHORIZATION regressuser4;
+CREATE FUNCTION dogrant_ok() RETURNS void LANGUAGE sql SECURITY DEFINER AS
+	'GRANT regressgroup2 TO regressuser5';
+GRANT regressgroup2 TO regressuser5; -- ok: had ADMIN OPTION
+SET ROLE regressgroup2;
+GRANT regressgroup2 TO regressuser5; -- fails: SET ROLE suspended privilege
+
+SET SESSION AUTHORIZATION regressuser1;
+GRANT regressgroup2 TO regressuser5; -- fails: no ADMIN OPTION
+SELECT dogrant_ok();			-- ok: SECURITY DEFINER conveys ADMIN
+SET ROLE regressgroup2;
+GRANT regressgroup2 TO regressuser5; -- fails: SET ROLE did not help
+
+SET SESSION AUTHORIZATION regressgroup2;
+GRANT regressgroup2 TO regressuser5; -- ok: a role can self-admin
+CREATE FUNCTION dogrant_fails() RETURNS void LANGUAGE sql SECURITY DEFINER AS
+	'GRANT regressgroup2 TO regressuser5';
+SELECT dogrant_fails();			-- fails: no self-admin in SECURITY DEFINER
+DROP FUNCTION dogrant_fails();
+
+SET SESSION AUTHORIZATION regressuser4;
+DROP FUNCTION dogrant_ok();
+REVOKE regressgroup2 FROM regressuser5;
+
+
 -- has_sequence_privilege tests
 \c -
 
@@ -811,6 +838,33 @@ SELECT has_function_privilege('regressuser1', 'testns.testfunc(int)', 'EXECUTE')
 SET client_min_messages TO 'warning';
 DROP SCHEMA testns CASCADE;
 RESET client_min_messages;
+
+
+-- Change owner of the schema & and rename of new schema owner
+\c -
+
+CREATE ROLE schemauser1 superuser login;
+CREATE ROLE schemauser2 superuser login;
+
+SET SESSION ROLE schemauser1;
+CREATE SCHEMA testns;
+
+SELECT nspname, rolname FROM pg_namespace, pg_roles WHERE pg_namespace.nspname = 'testns' AND pg_namespace.nspowner = pg_roles.oid;
+
+ALTER SCHEMA testns OWNER TO schemauser2;
+ALTER ROLE schemauser2 RENAME TO schemauser_renamed;
+SELECT nspname, rolname FROM pg_namespace, pg_roles WHERE pg_namespace.nspname = 'testns' AND pg_namespace.nspowner = pg_roles.oid;
+
+set session role schemauser_renamed;
+SET client_min_messages TO 'warning';
+DROP SCHEMA testns CASCADE;
+RESET client_min_messages;
+
+-- clean up
+\c -
+
+DROP ROLE schemauser1;
+DROP ROLE schemauser_renamed;
 
 
 -- test that dependent privileges are revoked (or not) properly

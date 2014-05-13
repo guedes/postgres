@@ -5,7 +5,7 @@
  *	  wherein you authenticate a user by seeing what IP address the system
  *	  says he comes from and choosing authentication method based on it).
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -397,12 +397,12 @@ tokenize_file(const char *filename, FILE *file,
 
 	while (!feof(file) && !ferror(file))
 	{
-		char rawline[MAX_LINE];
-		char *lineptr;
+		char		rawline[MAX_LINE];
+		char	   *lineptr;
 
 		if (!fgets(rawline, sizeof(rawline), file))
 			break;
-		if (strlen(rawline) == MAX_LINE-1)
+		if (strlen(rawline) == MAX_LINE - 1)
 			/* Line too long! */
 			ereport(ERROR,
 					(errcode(ERRCODE_CONFIG_FILE_ERROR),
@@ -411,9 +411,9 @@ tokenize_file(const char *filename, FILE *file,
 								line_number, filename)));
 
 		/* Strip trailing linebreak from rawline */
-		while (rawline[strlen(rawline)-1] == '\n' ||
-			   rawline[strlen(rawline)-1] == '\r')
-			rawline[strlen(rawline)-1] = '\0';
+		lineptr = rawline + strlen(rawline) - 1;
+		while (lineptr >= rawline && (*lineptr == '\n' || *lineptr == '\r'))
+			*lineptr-- = '\0';
 
 		lineptr = rawline;
 		while (strlen(lineptr) > 0)
@@ -592,35 +592,47 @@ check_hostname(hbaPort *port, const char *hostname)
 	int			ret;
 	bool		found;
 
+	/* Quick out if remote host name already known bad */
+	if (port->remote_hostname_resolv < 0)
+		return false;
+
 	/* Lookup remote host name if not already done */
 	if (!port->remote_hostname)
 	{
 		char		remote_hostname[NI_MAXHOST];
 
-		if (pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
-							   remote_hostname, sizeof(remote_hostname),
-							   NULL, 0,
-							   0) != 0)
+		ret = pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
+								 remote_hostname, sizeof(remote_hostname),
+								 NULL, 0,
+								 NI_NAMEREQD);
+		if (ret != 0)
+		{
+			/* remember failure; don't complain in the postmaster log yet */
+			port->remote_hostname_resolv = -2;
+			port->remote_hostname_errcode = ret;
 			return false;
+		}
 
 		port->remote_hostname = pstrdup(remote_hostname);
 	}
 
+	/* Now see if remote host name matches this pg_hba line */
 	if (!hostname_match(hostname, port->remote_hostname))
 		return false;
 
-	/* Lookup IP from host name and check against original IP */
-
+	/* If we already verified the forward lookup, we're done */
 	if (port->remote_hostname_resolv == +1)
 		return true;
-	if (port->remote_hostname_resolv == -1)
-		return false;
 
+	/* Lookup IP from host name and check against original IP */
 	ret = getaddrinfo(port->remote_hostname, NULL, NULL, &gai_result);
 	if (ret != 0)
-		ereport(ERROR,
-				(errmsg("could not translate host name \"%s\" to address: %s",
-						port->remote_hostname, gai_strerror(ret))));
+	{
+		/* remember failure; don't complain in the postmaster log yet */
+		port->remote_hostname_resolv = -2;
+		port->remote_hostname_errcode = ret;
+		return false;
+	}
 
 	found = false;
 	for (gai = gai_result; gai; gai = gai->ai_next)
@@ -1029,7 +1041,7 @@ parse_hba_line(List *line, int line_num, char *raw_line)
 
 			/* Get the IP address either way */
 			hints.ai_flags = AI_NUMERICHOST;
-			hints.ai_family = PF_UNSPEC;
+			hints.ai_family = AF_UNSPEC;
 			hints.ai_socktype = 0;
 			hints.ai_protocol = 0;
 			hints.ai_addrlen = 0;
@@ -1177,12 +1189,6 @@ parse_hba_line(List *line, int line_num, char *raw_line)
 		parsedline->auth_method = uaPeer;
 	else if (strcmp(token->string, "password") == 0)
 		parsedline->auth_method = uaPassword;
-	else if (strcmp(token->string, "krb5") == 0)
-#ifdef KRB5
-		parsedline->auth_method = uaKrb5;
-#else
-		unsupauth = "krb5";
-#endif
 	else if (strcmp(token->string, "gss") == 0)
 #ifdef ENABLE_GSS
 		parsedline->auth_method = uaGSS;
@@ -1261,17 +1267,6 @@ parse_hba_line(List *line, int line_num, char *raw_line)
 		parsedline->auth_method = uaPeer;
 
 	/* Invalid authentication combinations */
-	if (parsedline->conntype == ctLocal &&
-		parsedline->auth_method == uaKrb5)
-	{
-		ereport(LOG,
-				(errcode(ERRCODE_CONFIG_FILE_ERROR),
-			 errmsg("krb5 authentication is not supported on local sockets"),
-				 errcontext("line %d of configuration file \"%s\"",
-							line_num, HbaFileName)));
-		return NULL;
-	}
-
 	if (parsedline->conntype == ctLocal &&
 		parsedline->auth_method == uaGSS)
 	{
@@ -1417,11 +1412,10 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 	{
 		if (hbaline->auth_method != uaIdent &&
 			hbaline->auth_method != uaPeer &&
-			hbaline->auth_method != uaKrb5 &&
 			hbaline->auth_method != uaGSS &&
 			hbaline->auth_method != uaSSPI &&
 			hbaline->auth_method != uaCert)
-			INVALID_AUTH_OPTION("map", gettext_noop("ident, peer, krb5, gssapi, sspi, and cert"));
+			INVALID_AUTH_OPTION("map", gettext_noop("ident, peer, gssapi, sspi, and cert"));
 		hbaline->usermap = pstrdup(val);
 	}
 	else if (strcmp(name, "clientcert") == 0)
@@ -1476,7 +1470,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 	{
 #ifdef LDAP_API_FEATURE_X_OPENLDAP
 		LDAPURLDesc *urldata;
-		int rc;
+		int			rc;
 #endif
 
 		REQUIRE_AUTH_OPTION(uaLDAP, "ldapurl", "ldap");
@@ -1485,8 +1479,8 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 		if (rc != LDAP_SUCCESS)
 		{
 			ereport(LOG,
-				 (errcode(ERRCODE_CONFIG_FILE_ERROR),
-				  errmsg("could not parse LDAP URL \"%s\": %s", val, ldap_err2string(rc))));
+					(errcode(ERRCODE_CONFIG_FILE_ERROR),
+					 errmsg("could not parse LDAP URL \"%s\": %s", val, ldap_err2string(rc))));
 			return false;
 		}
 
@@ -1494,7 +1488,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 		{
 			ereport(LOG,
 					(errcode(ERRCODE_CONFIG_FILE_ERROR),
-					 errmsg("unsupported LDAP URL scheme: %s", urldata->lud_scheme)));
+			errmsg("unsupported LDAP URL scheme: %s", urldata->lud_scheme)));
 			ldap_free_urldesc(urldata);
 			return false;
 		}
@@ -1504,7 +1498,7 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 		hbaline->ldapbasedn = pstrdup(urldata->lud_dn);
 
 		if (urldata->lud_attrs)
-			hbaline->ldapsearchattribute = pstrdup(urldata->lud_attrs[0]);  /* only use first one */
+			hbaline->ldapsearchattribute = pstrdup(urldata->lud_attrs[0]);		/* only use first one */
 		hbaline->ldapscope = urldata->lud_scope;
 		if (urldata->lud_filter)
 		{
@@ -1515,11 +1509,11 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 			return false;
 		}
 		ldap_free_urldesc(urldata);
-#else /* not OpenLDAP */
+#else							/* not OpenLDAP */
 		ereport(LOG,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("LDAP URLs not supported on this platform")));
-#endif /* not OpenLDAP */
+#endif   /* not OpenLDAP */
 	}
 	else if (strcmp(name, "ldaptls") == 0)
 	{
@@ -1578,25 +1572,18 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline, int line_num)
 		REQUIRE_AUTH_OPTION(uaLDAP, "ldapsuffix", "ldap");
 		hbaline->ldapsuffix = pstrdup(val);
 	}
-	else if (strcmp(name, "krb_server_hostname") == 0)
-	{
-		REQUIRE_AUTH_OPTION(uaKrb5, "krb_server_hostname", "krb5");
-		hbaline->krb_server_hostname = pstrdup(val);
-	}
 	else if (strcmp(name, "krb_realm") == 0)
 	{
-		if (hbaline->auth_method != uaKrb5 &&
-			hbaline->auth_method != uaGSS &&
+		if (hbaline->auth_method != uaGSS &&
 			hbaline->auth_method != uaSSPI)
-			INVALID_AUTH_OPTION("krb_realm", gettext_noop("krb5, gssapi, and sspi"));
+			INVALID_AUTH_OPTION("krb_realm", gettext_noop("gssapi and sspi"));
 		hbaline->krb_realm = pstrdup(val);
 	}
 	else if (strcmp(name, "include_realm") == 0)
 	{
-		if (hbaline->auth_method != uaKrb5 &&
-			hbaline->auth_method != uaGSS &&
+		if (hbaline->auth_method != uaGSS &&
 			hbaline->auth_method != uaSSPI)
-			INVALID_AUTH_OPTION("include_realm", gettext_noop("krb5, gssapi, and sspi"));
+			INVALID_AUTH_OPTION("include_realm", gettext_noop("gssapi and sspi"));
 		if (strcmp(val, "1") == 0)
 			hbaline->include_realm = true;
 		else
@@ -1771,7 +1758,7 @@ check_hba(hbaPort *port)
  * Read the config file and create a List of HbaLine records for the contents.
  *
  * The configuration is read into a temporary list, and if any parse error
- * occurs the old list is kept in place and false is returned.	Only if the
+ * occurs the old list is kept in place and false is returned.  Only if the
  * whole file parses OK is the list replaced, and the function returns true.
  *
  * On a false result, caller will take care of reporting a FATAL error in case
@@ -2023,7 +2010,7 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 				ereport(LOG,
 						(errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
 						 errmsg("regular expression \"%s\" has no subexpressions as requested by backreference in \"%s\"",
-								identLine->ident_user + 1, identLine->pg_role)));
+							identLine->ident_user + 1, identLine->pg_role)));
 				*error_p = true;
 				return;
 			}
@@ -2165,7 +2152,7 @@ load_ident(void)
 	MemoryContext linecxt;
 	MemoryContext oldcxt;
 	MemoryContext ident_context;
-	IdentLine	 *newline;
+	IdentLine  *newline;
 
 	file = AllocateFile(IdentFileName, "r");
 	if (file == NULL)
@@ -2183,10 +2170,10 @@ load_ident(void)
 
 	/* Now parse all the lines */
 	ident_context = AllocSetContextCreate(TopMemoryContext,
-								   "ident parser context",
-								   ALLOCSET_DEFAULT_MINSIZE,
-								   ALLOCSET_DEFAULT_MINSIZE,
-								   ALLOCSET_DEFAULT_MAXSIZE);
+										  "ident parser context",
+										  ALLOCSET_DEFAULT_MINSIZE,
+										  ALLOCSET_DEFAULT_MINSIZE,
+										  ALLOCSET_DEFAULT_MAXSIZE);
 	oldcxt = MemoryContextSwitchTo(ident_context);
 	forboth(line_cell, ident_lines, num_cell, ident_line_nums)
 	{
@@ -2235,7 +2222,7 @@ load_ident(void)
 	}
 
 	/* Loaded new file successfully, replace the one we use */
-	if (parsed_ident_lines != NULL)
+	if (parsed_ident_lines != NIL)
 	{
 		foreach(parsed_line_cell, parsed_ident_lines)
 		{
@@ -2243,8 +2230,10 @@ load_ident(void)
 			if (newline->ident_user[0] == '/')
 				pg_regfree(&newline->re);
 		}
-		MemoryContextDelete(parsed_ident_context);
 	}
+	if (parsed_ident_context != NULL)
+		MemoryContextDelete(parsed_ident_context);
+
 	parsed_ident_context = ident_context;
 	parsed_ident_lines = new_parsed_lines;
 
@@ -2255,7 +2244,7 @@ load_ident(void)
 
 /*
  *	Determine what authentication method should be used when accessing database
- *	"database" from frontend "raddr", user "user".	Return the method and
+ *	"database" from frontend "raddr", user "user".  Return the method and
  *	an optional argument (stored in fields of *port), and STATUS_OK.
  *
  *	If the file does not contain any entry matching the request, we return

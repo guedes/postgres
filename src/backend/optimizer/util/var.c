@@ -9,7 +9,7 @@
  * contains variables.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -161,8 +161,13 @@ pull_varnos_walker(Node *node, pull_varnos_context *context)
 	if (IsA(node, PlaceHolderVar))
 	{
 		/*
-		 * Normally, we can just take the varnos in the contained expression.
-		 * But if it is variable-free, use the PHV's syntactic relids.
+		 * A PlaceHolderVar acts as a variable of its syntactic scope, or
+		 * lower than that if it references only a subset of the rels in its
+		 * syntactic scope.  It might also contain lateral references, but we
+		 * should ignore such references when computing the set of varnos in
+		 * an expression tree.  Also, if the PHV contains no variables within
+		 * its syntactic scope, it will be forced to be evaluated exactly at
+		 * the syntactic scope, so take that as the relid set.
 		 */
 		PlaceHolderVar *phv = (PlaceHolderVar *) node;
 		pull_varnos_context subcontext;
@@ -170,12 +175,15 @@ pull_varnos_walker(Node *node, pull_varnos_context *context)
 		subcontext.varnos = NULL;
 		subcontext.sublevels_up = context->sublevels_up;
 		(void) pull_varnos_walker((Node *) phv->phexpr, &subcontext);
-
-		if (bms_is_empty(subcontext.varnos) &&
-			phv->phlevelsup == context->sublevels_up)
-			context->varnos = bms_add_members(context->varnos, phv->phrels);
-		else
-			context->varnos = bms_join(context->varnos, subcontext.varnos);
+		if (phv->phlevelsup == context->sublevels_up)
+		{
+			subcontext.varnos = bms_int_members(subcontext.varnos,
+												phv->phrels);
+			if (bms_is_empty(subcontext.varnos))
+				context->varnos = bms_add_members(context->varnos,
+												  phv->phrels);
+		}
+		context->varnos = bms_join(context->varnos, subcontext.varnos);
 		return false;
 	}
 	if (IsA(node, Query))
@@ -356,7 +364,7 @@ contain_var_clause_walker(Node *node, void *context)
  *
  *	  Returns true if any such Var found.
  *
- * Will recurse into sublinks.	Also, may be invoked directly on a Query.
+ * Will recurse into sublinks.  Also, may be invoked directly on a Query.
  */
 bool
 contain_vars_of_level(Node *node, int levelsup)
@@ -416,10 +424,10 @@ contain_vars_of_level_walker(Node *node, int *sublevels_up)
  *	  Find the parse location of any Var of the specified query level.
  *
  * Returns -1 if no such Var is in the querytree, or if they all have
- * unknown parse location.	(The former case is probably caller error,
+ * unknown parse location.  (The former case is probably caller error,
  * but we don't bother to distinguish it from the latter case.)
  *
- * Will recurse into sublinks.	Also, may be invoked directly on a Query.
+ * Will recurse into sublinks.  Also, may be invoked directly on a Query.
  *
  * Note: it might seem appropriate to merge this functionality into
  * contain_vars_of_level, but that would complicate that function's API.
@@ -506,7 +514,7 @@ locate_var_of_level_walker(Node *node,
  *	  Upper-level vars (with varlevelsup > 0) should not be seen here,
  *	  likewise for upper-level Aggrefs and PlaceHolderVars.
  *
- *	  Returns list of nodes found.	Note the nodes themselves are not
+ *	  Returns list of nodes found.  Note the nodes themselves are not
  *	  copied, only referenced.
  *
  * Does not examine subqueries, therefore must only be used after reduction
@@ -583,7 +591,7 @@ pull_var_clause_walker(Node *node, pull_var_clause_context *context)
  * flatten_join_alias_vars
  *	  Replace Vars that reference JOIN outputs with references to the original
  *	  relation variables instead.  This allows quals involving such vars to be
- *	  pushed down.	Whole-row Vars that reference JOIN relations are expanded
+ *	  pushed down.  Whole-row Vars that reference JOIN relations are expanded
  *	  into RowExpr constructs that name the individual output Vars.  This
  *	  is necessary since we will not scan the JOIN as a base relation, which
  *	  is the only way that the executor can directly handle whole-row Vars.
@@ -595,7 +603,7 @@ pull_var_clause_walker(Node *node, pull_var_clause_context *context)
  * entries might now be arbitrary expressions, not just Vars.  This affects
  * this function in one important way: we might find ourselves inserting
  * SubLink expressions into subqueries, and we must make sure that their
- * Query.hasSubLinks fields get set to TRUE if so.	If there are any
+ * Query.hasSubLinks fields get set to TRUE if so.  If there are any
  * SubLinks in the join alias lists, the outer Query should already have
  * hasSubLinks = TRUE, so this is only relevant to un-flattened subqueries.
  *
@@ -654,7 +662,7 @@ flatten_join_alias_vars_mutator(Node *node,
 				newvar = (Node *) lfirst(lv);
 				attnum++;
 				/* Ignore dropped columns */
-				if (IsA(newvar, Const))
+				if (newvar == NULL)
 					continue;
 				newvar = copyObject(newvar);
 
@@ -687,6 +695,7 @@ flatten_join_alias_vars_mutator(Node *node,
 		/* Expand join alias reference */
 		Assert(var->varattno > 0);
 		newvar = (Node *) list_nth(rte->joinaliasvars, var->varattno - 1);
+		Assert(newvar != NULL);
 		newvar = copyObject(newvar);
 
 		/*

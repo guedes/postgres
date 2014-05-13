@@ -4,7 +4,7 @@
  *	  POSTGRES relation descriptor (a/k/a relcache entry) definitions.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/rel.h
@@ -84,20 +84,15 @@ typedef struct RelationData
 	/*
 	 * rd_createSubid is the ID of the highest subtransaction the rel has
 	 * survived into; or zero if the rel was not created in the current top
-	 * transaction.  This can be now be relied on, whereas previously it
-	 * could be "forgotten" in earlier releases.
-	 * Likewise, rd_newRelfilenodeSubid is the ID of the highest
-	 * subtransaction the relfilenode change has survived into, or zero if not
-	 * changed in the current transaction (or we have forgotten changing it).
-	 * rd_newRelfilenodeSubid can be forgotten when a relation has multiple
-	 * new relfilenodes within a single transaction, with one of them occuring
-	 * in a subsequently aborted subtransaction, e.g.
-	 * 		BEGIN;
-	 * 		TRUNCATE t;
-	 * 		SAVEPOINT save;
-	 * 		TRUNCATE t;
-	 * 		ROLLBACK TO save;
-	 * 		-- rd_newRelfilenode is now forgotten
+	 * transaction.  This can be now be relied on, whereas previously it could
+	 * be "forgotten" in earlier releases. Likewise, rd_newRelfilenodeSubid is
+	 * the ID of the highest subtransaction the relfilenode change has
+	 * survived into, or zero if not changed in the current transaction (or we
+	 * have forgotten changing it). rd_newRelfilenodeSubid can be forgotten
+	 * when a relation has multiple new relfilenodes within a single
+	 * transaction, with one of them occuring in a subsequently aborted
+	 * subtransaction, e.g. BEGIN; TRUNCATE t; SAVEPOINT save; TRUNCATE t;
+	 * ROLLBACK TO save; -- rd_newRelfilenode is now forgotten
 	 */
 	SubTransactionId rd_createSubid;	/* rel was created in current xact */
 	SubTransactionId rd_newRelfilenodeSubid;	/* new relfilenode assigned in
@@ -109,11 +104,19 @@ typedef struct RelationData
 	List	   *rd_indexlist;	/* list of OIDs of indexes on relation */
 	Bitmapset  *rd_indexattr;	/* identifies columns used in indexes */
 	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
+	Bitmapset  *rd_idattr;		/* included in replica identity index */
 	Oid			rd_oidindex;	/* OID of unique index on OID, if any */
 	LockInfoData rd_lockInfo;	/* lock mgr's info for locking relation */
 	RuleLock   *rd_rules;		/* rewrite rules */
 	MemoryContext rd_rulescxt;	/* private memory cxt for rd_rules, if any */
 	TriggerDesc *trigdesc;		/* Trigger info, or NULL if rel has none */
+
+	/*
+	 * The index chosen as the relation's replication identity or InvalidOid.
+	 * Only set correctly if RelationGetIndexList has been
+	 * called/rd_indexvalid > 0.
+	 */
+	Oid			rd_replidindex;
 
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.
@@ -139,7 +142,7 @@ typedef struct RelationData
 	 * Note: rd_amcache is available for index AMs to cache private data about
 	 * an index.  This must be just a cache since it may get reset at any time
 	 * (in particular, it will get reset by a relcache inval message for the
-	 * index).	If used, it must point to a single memory chunk palloc'd in
+	 * index).  If used, it must point to a single memory chunk palloc'd in
 	 * rd_indexcxt.  A relcache reset will include freeing that chunk and
 	 * setting rd_amcache = NULL.
 	 */
@@ -203,6 +206,9 @@ typedef struct AutoVacOpts
 	int			freeze_min_age;
 	int			freeze_max_age;
 	int			freeze_table_age;
+	int			multixact_freeze_min_age;
+	int			multixact_freeze_max_age;
+	int			multixact_freeze_table_age;
 	float8		vacuum_scale_factor;
 	float8		analyze_scale_factor;
 } AutoVacOpts;
@@ -213,6 +219,9 @@ typedef struct StdRdOptions
 	int			fillfactor;		/* page fill factor in percent (0..100) */
 	AutoVacOpts autovacuum;		/* autovacuum-related options */
 	bool		security_barrier;		/* for views */
+	int			check_option_offset;	/* for views */
+	bool		user_catalog_table;		/* use as an additional catalog
+										 * relation */
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
@@ -247,6 +256,48 @@ typedef struct StdRdOptions
 #define RelationIsSecurityView(relation)	\
 	((relation)->rd_options ?				\
 	 ((StdRdOptions *) (relation)->rd_options)->security_barrier : false)
+
+/*
+ * RelationHasCheckOption
+ *		Returns true if the relation is a view defined with either the local
+ *		or the cascaded check option.
+ */
+#define RelationHasCheckOption(relation)									\
+	((relation)->rd_options &&												\
+	 ((StdRdOptions *) (relation)->rd_options)->check_option_offset != 0)
+
+/*
+ * RelationHasLocalCheckOption
+ *		Returns true if the relation is a view defined with the local check
+ *		option.
+ */
+#define RelationHasLocalCheckOption(relation)								\
+	((relation)->rd_options &&												\
+	 ((StdRdOptions *) (relation)->rd_options)->check_option_offset != 0 ?	\
+	 strcmp((char *) (relation)->rd_options +								\
+			((StdRdOptions *) (relation)->rd_options)->check_option_offset, \
+			"local") == 0 : false)
+
+/*
+ * RelationHasCascadedCheckOption
+ *		Returns true if the relation is a view defined with the cascaded check
+ *		option.
+ */
+#define RelationHasCascadedCheckOption(relation)							\
+	((relation)->rd_options &&												\
+	 ((StdRdOptions *) (relation)->rd_options)->check_option_offset != 0 ?	\
+	 strcmp((char *) (relation)->rd_options +								\
+			((StdRdOptions *) (relation)->rd_options)->check_option_offset, \
+			"cascaded") == 0 : false)
+
+/*
+ * RelationIsUsedAsCatalogTable
+ *		Returns whether the relation should be treated as a catalog table
+ *		from the pov of logical decoding.
+ */
+#define RelationIsUsedAsCatalogTable(relation)	\
+	((relation)->rd_options ?				\
+	 ((StdRdOptions *) (relation)->rd_options)->user_catalog_table : false)
 
 /*
  * RelationIsValid
@@ -348,7 +399,7 @@ typedef struct StdRdOptions
  * RelationGetTargetBlock
  *		Fetch relation's current insertion target block.
  *
- * Returns InvalidBlockNumber if there is no current target block.	Note
+ * Returns InvalidBlockNumber if there is no current target block.  Note
  * that the target block status is discarded on any smgr-level invalidation.
  */
 #define RelationGetTargetBlock(relation) \
@@ -403,20 +454,45 @@ typedef struct StdRdOptions
 
 /*
  * RelationIsScannable
- * 		Currently can only be false for a materialized view which has not been
- * 		populated by its query.  This is likely to get more complicated later,
- * 		so use a macro which looks like a function.
+ *		Currently can only be false for a materialized view which has not been
+ *		populated by its query.  This is likely to get more complicated later,
+ *		so use a macro which looks like a function.
  */
 #define RelationIsScannable(relation) ((relation)->rd_rel->relispopulated)
 
 /*
  * RelationIsPopulated
- * 		Currently, we don't physically distinguish the "populated" and
+ *		Currently, we don't physically distinguish the "populated" and
  *		"scannable" properties of matviews, but that may change later.
  *		Hence, use the appropriate one of these macros in code tests.
  */
 #define RelationIsPopulated(relation) ((relation)->rd_rel->relispopulated)
 
+/*
+ * RelationIsAccessibleInLogicalDecoding
+ *		True if we need to log enough information to have access via
+ *		decoding snapshot.
+ */
+#define RelationIsAccessibleInLogicalDecoding(relation) \
+	(XLogLogicalInfoActive() && \
+	 RelationNeedsWAL(relation) && \
+	 (IsCatalogRelation(relation) || RelationIsUsedAsCatalogTable(relation)))
+
+/*
+ * RelationIsLogicallyLogged
+ *		True if we need to log enough information to extract the data from the
+ *		WAL stream.
+ *
+ * We don't log information for unlogged tables (since they don't WAL log
+ * anyway) and for system tables (their content is hard to make sense of, and
+ * it would complicate decoding slightly for little gain). Note that we *do*
+ * log information for user defined catalog tables since they presumably are
+ * interesting to the user...
+ */
+#define RelationIsLogicallyLogged(relation) \
+	(XLogLogicalInfoActive() && \
+	 RelationNeedsWAL(relation) && \
+	 !IsCatalogRelation(relation))
 
 /* routines in utils/cache/relcache.c */
 extern void RelationIncrementReferenceCount(Relation rel);

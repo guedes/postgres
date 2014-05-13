@@ -3,7 +3,7 @@
  * hashsearch.c
  *	  search code for postgres hash tables
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -269,7 +269,7 @@ _hash_first(IndexScanDesc scan, ScanDirection dir)
  *	_hash_step() -- step to the next valid item in a scan in the bucket.
  *
  *		If no valid record exists in the requested direction, return
- *		false.	Else, return true and set the hashso_curpos for the
+ *		false.  Else, return true and set the hashso_curpos for the
  *		scan to the right thing.
  *
  *		'bufP' points to the current buffer, which is pinned and read-locked.

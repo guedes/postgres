@@ -3,7 +3,7 @@
  *
  *	information support functions
  *
- *	Copyright (c) 2010-2013, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2014, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/info.c
  */
 
@@ -51,8 +51,8 @@ gen_db_file_maps(DbInfo *old_db, DbInfo *new_db,
 		RelInfo    *new_rel = &new_db->rel_arr.rels[relnum];
 
 		if (old_rel->reloid != new_rel->reloid)
-			pg_log(PG_FATAL, "Mismatch of relation OID in database \"%s\": old OID %d, new OID %d\n",
-				   old_db->db_name, old_rel->reloid, new_rel->reloid);
+			pg_fatal("Mismatch of relation OID in database \"%s\": old OID %d, new OID %d\n",
+					 old_db->db_name, old_rel->reloid, new_rel->reloid);
 
 		/*
 		 * TOAST table names initially match the heap pg_class oid. In
@@ -60,29 +60,31 @@ gen_db_file_maps(DbInfo *old_db, DbInfo *new_db,
 		 * table names change during ALTER TABLE ALTER COLUMN SET TYPE. In >=
 		 * 9.0, TOAST relation names always use heap table oids, hence we
 		 * cannot check relation names when upgrading from pre-9.0. Clusters
-		 * upgraded to 9.0 will get matching TOAST names.
-		 * If index names don't match primary key constraint names, this will
-		 * fail because pg_dump dumps constraint names and pg_upgrade checks
-		 * index names.
+		 * upgraded to 9.0 will get matching TOAST names. If index names don't
+		 * match primary key constraint names, this will fail because pg_dump
+		 * dumps constraint names and pg_upgrade checks index names.
 		 */
 		if (strcmp(old_rel->nspname, new_rel->nspname) != 0 ||
 			((GET_MAJOR_VERSION(old_cluster.major_version) >= 900 ||
 			  strcmp(old_rel->nspname, "pg_toast") != 0) &&
 			 strcmp(old_rel->relname, new_rel->relname) != 0))
-			pg_log(PG_FATAL, "Mismatch of relation names in database \"%s\": "
-				   "old name \"%s.%s\", new name \"%s.%s\"\n",
-				   old_db->db_name, old_rel->nspname, old_rel->relname,
-				   new_rel->nspname, new_rel->relname);
+			pg_fatal("Mismatch of relation names in database \"%s\": "
+					 "old name \"%s.%s\", new name \"%s.%s\"\n",
+					 old_db->db_name, old_rel->nspname, old_rel->relname,
+					 new_rel->nspname, new_rel->relname);
 
 		create_rel_filename_map(old_pgdata, new_pgdata, old_db, new_db,
 								old_rel, new_rel, maps + num_maps);
 		num_maps++;
 	}
 
-	/* Do this check after the loop so hopefully we will produce a clearer error above */
+	/*
+	 * Do this check after the loop so hopefully we will produce a clearer
+	 * error above
+	 */
 	if (old_db->rel_arr.nrels != new_db->rel_arr.nrels)
-		pg_log(PG_FATAL, "old and new databases \"%s\" have a different number of relations\n",
-			   old_db->db_name);
+		pg_fatal("old and new databases \"%s\" have a different number of relations\n",
+				 old_db->db_name);
 
 	*nmaps = num_maps;
 	return maps;
@@ -106,20 +108,18 @@ create_rel_filename_map(const char *old_data, const char *new_data,
 		 * relation belongs to the default tablespace, hence relfiles should
 		 * exist in the data directories.
 		 */
-		strlcpy(map->old_tablespace, old_data, sizeof(map->old_tablespace));
-		strlcpy(map->new_tablespace, new_data, sizeof(map->new_tablespace));
-		strlcpy(map->old_tablespace_suffix, "/base", sizeof(map->old_tablespace_suffix));
-		strlcpy(map->new_tablespace_suffix, "/base", sizeof(map->new_tablespace_suffix));
+		map->old_tablespace = old_data;
+		map->new_tablespace = new_data;
+		map->old_tablespace_suffix = "/base";
+		map->new_tablespace_suffix = "/base";
 	}
 	else
 	{
 		/* relation belongs to a tablespace, so use the tablespace location */
-		strlcpy(map->old_tablespace, old_rel->tablespace, sizeof(map->old_tablespace));
-		strlcpy(map->new_tablespace, new_rel->tablespace, sizeof(map->new_tablespace));
-		strlcpy(map->old_tablespace_suffix, old_cluster.tablespace_suffix,
-				sizeof(map->old_tablespace_suffix));
-		strlcpy(map->new_tablespace_suffix, new_cluster.tablespace_suffix,
-				sizeof(map->new_tablespace_suffix));
+		map->old_tablespace = old_rel->tablespace;
+		map->new_tablespace = new_rel->tablespace;
+		map->old_tablespace_suffix = old_cluster.tablespace_suffix;
+		map->new_tablespace_suffix = new_cluster.tablespace_suffix;
 	}
 
 	map->old_db_oid = old_db->db_oid;
@@ -229,7 +229,7 @@ get_db_infos(ClusterInfo *cluster)
 	{
 		dbinfos[tupnum].db_oid = atooid(PQgetvalue(res, tupnum, i_oid));
 		dbinfos[tupnum].db_name = pg_strdup(PQgetvalue(res, tupnum, i_datname));
-		snprintf(dbinfos[tupnum].db_tblspace, sizeof(dbinfos[tupnum].db_tblspace), "%s",
+		snprintf(dbinfos[tupnum].db_tablespace, sizeof(dbinfos[tupnum].db_tablespace), "%s",
 				 PQgetvalue(res, tupnum, i_spclocation));
 	}
 	PQclear(res);
@@ -262,6 +262,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	int			num_rels = 0;
 	char	   *nspname = NULL;
 	char	   *relname = NULL;
+	char	   *tablespace = NULL;
 	int			i_spclocation,
 				i_nspname,
 				i_relname,
@@ -269,6 +270,8 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 				i_relfilenode,
 				i_reltablespace;
 	char		query[QUERY_ALLOC];
+	char	   *last_namespace = NULL,
+			   *last_tablespace = NULL;
 
 	/*
 	 * pg_largeobject contains user data that does not appear in pg_dumpall
@@ -285,8 +288,11 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 "LEFT OUTER JOIN pg_catalog.pg_index i "
 			 "	   ON c.oid = i.indexrelid "
 			 "WHERE relkind IN ('r', 'm', 'i'%s) AND "
-			/* pg_dump only dumps valid indexes;  testing indisready is
-			 * necessary in 9.2, and harmless in earlier/later versions. */
+
+	/*
+	 * pg_dump only dumps valid indexes;  testing indisready is necessary in
+	 * 9.2, and harmless in earlier/later versions.
+	 */
 			 " i.indisvalid IS DISTINCT FROM false AND "
 			 " i.indisready IS DISTINCT FROM false AND "
 	/* exclude possible orphaned temp tables */
@@ -309,19 +315,26 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	PQclear(executeQueryOrDie(conn, "%s", query));
 
 	/*
-	 *	Get TOAST tables and indexes;  we have to gather the TOAST tables in
-	 *	later steps because we can't schema-qualify TOAST tables.
+	 * Get TOAST tables and indexes;  we have to gather the TOAST tables in
+	 * later steps because we can't schema-qualify TOAST tables.
 	 */
 	PQclear(executeQueryOrDie(conn,
 							  "INSERT INTO info_rels "
 							  "SELECT reltoastrelid "
 							  "FROM info_rels i JOIN pg_catalog.pg_class c "
-							  "		ON i.reloid = c.oid"));
+							  "		ON i.reloid = c.oid "
+						  "		AND c.reltoastrelid != %u", InvalidOid));
 	PQclear(executeQueryOrDie(conn,
 							  "INSERT INTO info_rels "
-							  "SELECT reltoastidxid "
-							  "FROM info_rels i JOIN pg_catalog.pg_class c "
-							  "		ON i.reloid = c.oid"));
+							  "SELECT indexrelid "
+							  "FROM pg_index "
+							  "WHERE indisvalid "
+							  "    AND indrelid IN (SELECT reltoastrelid "
+							  "        FROM info_rels i "
+							  "            JOIN pg_catalog.pg_class c "
+							  "            ON i.reloid = c.oid "
+							  "            AND c.reltoastrelid != %u)",
+							  InvalidOid));
 
 	snprintf(query, sizeof(query),
 			 "SELECT c.oid, n.nspname, c.relname, "
@@ -335,8 +348,8 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	/* we preserve pg_class.oid so we sort by it to match old/new */
 			 "ORDER BY 1;",
 	/* 9.2 removed the spclocation column */
-		   (GET_MAJOR_VERSION(cluster->major_version) <= 901) ?
-		   "t.spclocation" : "pg_catalog.pg_tablespace_location(t.oid) AS spclocation");
+			 (GET_MAJOR_VERSION(cluster->major_version) <= 901) ?
+			 "t.spclocation" : "pg_catalog.pg_tablespace_location(t.oid) AS spclocation");
 
 	res = executeQueryOrDie(conn, "%s", query);
 
@@ -354,26 +367,53 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	for (relnum = 0; relnum < ntups; relnum++)
 	{
 		RelInfo    *curr = &relinfos[num_rels++];
-		const char *tblspace;
 
 		curr->reloid = atooid(PQgetvalue(res, relnum, i_oid));
 
 		nspname = PQgetvalue(res, relnum, i_nspname);
-		curr->nspname = pg_strdup(nspname);
+		curr->nsp_alloc = false;
+
+		/*
+		 * Many of the namespace and tablespace strings are identical, so we
+		 * try to reuse the allocated string pointers where possible to reduce
+		 * memory consumption.
+		 */
+		/* Can we reuse the previous string allocation? */
+		if (last_namespace && strcmp(nspname, last_namespace) == 0)
+			curr->nspname = last_namespace;
+		else
+		{
+			last_namespace = curr->nspname = pg_strdup(nspname);
+			curr->nsp_alloc = true;
+		}
 
 		relname = PQgetvalue(res, relnum, i_relname);
 		curr->relname = pg_strdup(relname);
 
 		curr->relfilenode = atooid(PQgetvalue(res, relnum, i_relfilenode));
+		curr->tblsp_alloc = false;
 
+		/* Is the tablespace oid non-zero? */
 		if (atooid(PQgetvalue(res, relnum, i_reltablespace)) != 0)
-			/* Might be "", meaning the cluster default location. */
-			tblspace = PQgetvalue(res, relnum, i_spclocation);
-		else
-			/* A zero reltablespace indicates the database tablespace. */
-			tblspace = dbinfo->db_tblspace;
+		{
+			/*
+			 * The tablespace location might be "", meaning the cluster
+			 * default location, i.e. pg_default or pg_global.
+			 */
+			tablespace = PQgetvalue(res, relnum, i_spclocation);
 
-		strlcpy(curr->tablespace, tblspace, sizeof(curr->tablespace));
+			/* Can we reuse the previous string allocation? */
+			if (last_tablespace && strcmp(tablespace, last_tablespace) == 0)
+				curr->tablespace = last_tablespace;
+			else
+			{
+				last_tablespace = curr->tablespace = pg_strdup(tablespace);
+				curr->tblsp_alloc = true;
+			}
+		}
+		else
+			/* A zero reltablespace oid indicates the database tablespace. */
+			curr->tablespace = dbinfo->db_tablespace;
 	}
 	PQclear(res);
 
@@ -407,8 +447,11 @@ free_rel_infos(RelInfoArr *rel_arr)
 
 	for (relnum = 0; relnum < rel_arr->nrels; relnum++)
 	{
-		pg_free(rel_arr->rels[relnum].nspname);
+		if (rel_arr->rels[relnum].nsp_alloc)
+			pg_free(rel_arr->rels[relnum].nspname);
 		pg_free(rel_arr->rels[relnum].relname);
+		if (rel_arr->rels[relnum].tblsp_alloc)
+			pg_free(rel_arr->rels[relnum].tablespace);
 	}
 	pg_free(rel_arr->rels);
 	rel_arr->nrels = 0;
@@ -436,6 +479,8 @@ print_rel_infos(RelInfoArr *rel_arr)
 
 	for (relnum = 0; relnum < rel_arr->nrels; relnum++)
 		pg_log(PG_VERBOSE, "relname: %s.%s: reloid: %u reltblspace: %s\n",
-			   rel_arr->rels[relnum].nspname, rel_arr->rels[relnum].relname,
-			   rel_arr->rels[relnum].reloid, rel_arr->rels[relnum].tablespace);
+			   rel_arr->rels[relnum].nspname,
+			   rel_arr->rels[relnum].relname,
+			   rel_arr->rels[relnum].reloid,
+			   rel_arr->rels[relnum].tablespace);
 }

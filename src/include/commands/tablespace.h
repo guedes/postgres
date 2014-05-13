@@ -4,7 +4,7 @@
  *		Tablespace management commands (create/drop tablespace).
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/tablespace.h
@@ -39,10 +39,11 @@ typedef struct TableSpaceOpts
 	float8		seq_page_cost;
 } TableSpaceOpts;
 
-extern Oid CreateTableSpace(CreateTableSpaceStmt *stmt);
+extern Oid	CreateTableSpace(CreateTableSpaceStmt *stmt);
 extern void DropTableSpace(DropTableSpaceStmt *stmt);
-extern Oid RenameTableSpace(const char *oldname, const char *newname);
-extern Oid AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt);
+extern Oid	RenameTableSpace(const char *oldname, const char *newname);
+extern Oid	AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt);
+extern Oid	AlterTableSpaceMove(AlterTableSpaceMoveStmt *stmt);
 
 extern void TablespaceCreateDbspace(Oid spcNode, Oid dbNode, bool isRedo);
 

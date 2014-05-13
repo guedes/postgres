@@ -3,7 +3,7 @@
  * option.c
  *		  FDW option handling for postgres_fdw
  *
- * Portions Copyright (c) 2012-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2014, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/postgres_fdw/option.c
@@ -57,8 +57,6 @@ static bool is_libpq_option(const char *keyword);
  *
  * Raise an ERROR if the option or its value is considered invalid.
  */
-extern Datum postgres_fdw_validator(PG_FUNCTION_ARGS);
-
 PG_FUNCTION_INFO_V1(postgres_fdw_validator);
 
 Datum
@@ -106,9 +104,10 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 		/*
 		 * Validate option value, when we can do so without any context.
 		 */
-		if (strcmp(def->defname, "use_remote_estimate") == 0)
+		if (strcmp(def->defname, "use_remote_estimate") == 0 ||
+			strcmp(def->defname, "updatable") == 0)
 		{
-			/* use_remote_estimate accepts only boolean values */
+			/* these accept only boolean values */
 			(void) defGetBoolean(def);
 		}
 		else if (strcmp(def->defname, "fdw_startup_cost") == 0 ||
@@ -151,6 +150,9 @@ InitPgFdwOptions(void)
 		/* cost factors */
 		{"fdw_startup_cost", ForeignServerRelationId, false},
 		{"fdw_tuple_cost", ForeignServerRelationId, false},
+		/* updatable is available on both server and table */
+		{"updatable", ForeignServerRelationId, false},
+		{"updatable", ForeignTableRelationId, false},
 		{NULL, InvalidOid, false}
 	};
 
@@ -264,7 +266,7 @@ is_libpq_option(const char *keyword)
 
 /*
  * Generate key-value arrays which include only libpq options from the
- * given list (which can contain any kind of options).	Caller must have
+ * given list (which can contain any kind of options).  Caller must have
  * allocated large-enough arrays.  Returns number of options found.
  */
 int

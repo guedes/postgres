@@ -18,7 +18,10 @@
   <variablelist>
    <varlistentry>
     <term>
-     <function>pgstattuple(text) returns record</>
+     <indexterm>
+      <primary>pgstattuple</primary>
+     </indexterm>
+     <function>pgstattuple(regclass) returns record</>
     </term>
 
     <listitem>
@@ -26,7 +29,7 @@
       <function>pgstattuple</function> returns a relation's physical length,
       percentage of <quote>dead</> tuples, and other info. This may help users
       to determine whether vacuum is necessary or not.  The argument is the
-      target relation's name (optionally schema-qualified).
+      target relation's name (optionally schema-qualified) or OID.
       For example:
 <programlisting>
 test=> SELECT * FROM pgstattuple('pg_catalog.pg_proc');
@@ -114,27 +117,32 @@ free_percent       | 1.95
 
     <para>
      <function>pgstattuple</function> judges a tuple is <quote>dead</> if
-     <function>HeapTupleSatisfiesNow</> returns false.
+     <function>HeapTupleSatisfiesDirty</> returns false.
     </para>
     </listitem>
    </varlistentry>
 
    <varlistentry>
     <term>
-     <function>pgstattuple(oid) returns record</>
+     <function>pgstattuple(text) returns record</>
     </term>
 
     <listitem>
      <para>
-      This is the same as <function>pgstattuple(text)</function>, except
-      that the target relation is specified by OID.
+      This is the same as <function>pgstattuple(regclass)</function>, except
+      that the target relation is specified by TEXT. This function is kept
+      because of backward-compatibility so far, and will be deprecated in
+      the future release.
      </para>
     </listitem>
    </varlistentry>
 
    <varlistentry>
     <term>
-     <function>pgstatindex(text) returns record</>
+    <indexterm>
+     <primary>pgstatindex</primary>
+    </indexterm>
+     <function>pgstatindex(regclass) returns record</>
     </term>
 
     <listitem>
@@ -246,6 +254,24 @@ leaf_fragmentation | 0
 
    <varlistentry>
     <term>
+     <function>pgstatindex(text) returns record</>
+    </term>
+
+    <listitem>
+     <para>
+      This is the same as <function>pgstatindex(regclass)</function>, except
+      that the target index is specified by TEXT. This function is kept
+      because of backward-compatibility so far, and will be deprecated in
+      the future release.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <indexterm>
+      <primary>pgstatginindex</primary>
+     </indexterm>
      <function>pgstatginindex(regclass) returns record</>
     </term>
 
@@ -303,7 +329,10 @@ pending_tuples | 0
 
    <varlistentry>
     <term>
-     <function>pg_relpages(text) returns bigint</>
+     <indexterm>
+      <primary>pg_relpages</primary>
+     </indexterm>
+     <function>pg_relpages(regclass) returns bigint</>
     </term>
 
     <listitem>
@@ -313,6 +342,22 @@ pending_tuples | 0
      </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>pg_relpages(text) returns bigint</>
+    </term>
+
+    <listitem>
+     <para>
+      This is the same as <function>pg_relpages(regclass)</function>, except
+      that the target relation is specified by TEXT. This function is kept
+      because of backward-compatibility so far, and will be deprecated in
+      the future release.
+     </para>
+    </listitem>
+   </varlistentry>
+
   </variablelist>
  </sect2>
 

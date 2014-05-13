@@ -12,7 +12,7 @@
 /*
  * We have to use postgres.h not postgres_fe.h here, because there's so much
  * backend-only stuff in the XLOG include files we need.  But we need a
- * frontend-ish environment otherwise.	Hence this ugly hack.
+ * frontend-ish environment otherwise.  Hence this ugly hack.
  */
 #define FRONTEND 1
 
@@ -77,6 +77,8 @@ wal_level_str(WalLevel wal_level)
 			return "archive";
 		case WAL_LEVEL_HOT_STANDBY:
 			return "hot_standby";
+		case WAL_LEVEL_LOGICAL:
+			return "logical";
 	}
 	return _("unrecognized wal_level");
 }
@@ -258,8 +260,12 @@ main(int argc, char *argv[])
 		   ControlFile.backupEndRequired ? _("yes") : _("no"));
 	printf(_("Current wal_level setting:            %s\n"),
 		   wal_level_str(ControlFile.wal_level));
+	printf(_("Current wal_log_hints setting:        %s\n"),
+		   ControlFile.wal_log_hints ? _("on") : _("off"));
 	printf(_("Current max_connections setting:      %d\n"),
 		   ControlFile.MaxConnections);
+	printf(_("Current max_worker_processes setting: %d\n"),
+		   ControlFile.max_worker_processes);
 	printf(_("Current max_prepared_xacts setting:   %d\n"),
 		   ControlFile.max_prepared_xacts);
 	printf(_("Current max_locks_per_xact setting:   %d\n"),

@@ -27,10 +27,9 @@
 #include "storage/standby.h"
 #include "utils/relmapper.h"
 
-#define PG_RMGR(symname,name,redo,desc,startup,cleanup,restartpoint) \
+#define PG_RMGR(symname,name,redo,desc,startup,cleanup) \
 	{ name, desc, },
 
 const RmgrDescData RmgrDescTable[RM_MAX_ID + 1] = {
 #include "access/rmgrlist.h"
 };
-

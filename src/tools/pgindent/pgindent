@@ -12,7 +12,7 @@ use IO::Handle;
 use Getopt::Long;
 
 # Update for pg_bsd_indent version
-my $INDENT_VERSION = "1.2";
+my $INDENT_VERSION = "1.3";
 my $devnull        = File::Spec->devnull;
 
 # Common indent settings
@@ -22,14 +22,15 @@ my $indent_opts =
 # indent-dependant settings
 my $extra_opts = "";
 
-my ($typedefs_file, $code_base, $excludes, $indent, $build);
+my ($typedefs_file, $typedef_str, $code_base, $excludes, $indent, $build);
 
 my %options = (
-	"typedefs=s"  => \$typedefs_file,
-	"code-base=s" => \$code_base,
-	"excludes=s"  => \$excludes,
-	"indent=s"    => \$indent,
-	"build"       => \$build,);
+	"typedefs=s"         => \$typedefs_file,
+	"list-of-typedefs=s" => \$typedef_str,
+	"code-base=s"        => \$code_base,
+	"excludes=s"         => \$excludes,
+	"indent=s"           => \$indent,
+	"build"              => \$build,);
 GetOptions(%options) || die "bad command line argument\n";
 
 run_build($code_base) if ($build);
@@ -119,12 +120,21 @@ sub load_typedefs
 		$tdtry = "$tdtry/..";
 	}
 	die "cannot locate typedefs file \"$typedefs_file\"\n"
-		unless $typedefs_file && -f $typedefs_file;
+	  unless $typedefs_file && -f $typedefs_file;
 
 	open(my $typedefs_fh, '<', $typedefs_file)
 	  || die "cannot open typedefs file \"$typedefs_file\": $!\n";
 	my @typedefs = <$typedefs_fh>;
 	close($typedefs_fh);
+
+	# add command-line-supplied typedefs?
+	if (defined($typedef_str))
+	{
+		foreach my $typedef (split(m/[, \t\n]+/, $typedef_str))
+		{
+			push(@typedefs, $typedef . "\n");
+		}
+	}
 
 	# remove certain entries
 	@typedefs =
@@ -144,7 +154,8 @@ sub process_exclude
 {
 	if ($excludes && @files)
 	{
-		open(my $eh, '<', $excludes) || die "cannot open exclude file \"$excludes\"\n";
+		open(my $eh, '<', $excludes)
+		  || die "cannot open exclude file \"$excludes\"\n";
 		while (my $line = <$eh>)
 		{
 			chomp $line;
@@ -205,7 +216,8 @@ sub pre_indent
 	# FILE: ../../../src/backend/rewrite/rewriteHandler.c
 	# Error@2259:
 	# Stuff missing from end of file
-	$source =~ s!(\}|[ \t])else[ \t]*(/\*)(.*\*/)[ \t]*$!$1else\n    $2 _PGMV$3!gm;
+	$source =~
+	  s!(\}|[ \t])else[ \t]*(/\*)(.*\*/)[ \t]*$!$1else\n    $2 _PGMV$3!gm;
 
 	# Indent multi-line after-'else' comment so BSD indent will move it
 	# properly. We already moved down single-line comments above.
@@ -284,12 +296,6 @@ sub post_indent
 	# Reduce whitespace between #endif and comments to one tab
 	$source =~ s!^\#endif[ \t]+/\*!#endif   /*!gm;
 
-	# Remove blank line(s) before #else, #elif, and #endif
-	$source =~ s!\n\n+(\#else|\#elif|\#endif)!\n$1!g;
-
-	# Add blank line before #endif if it is the last line in the file
-	$source =~ s!\n(#endif.*)\n\z!\n\n$1\n!;
-
 	## Functions
 
 	# Work around misindenting of function with no variables defined.
@@ -308,7 +314,7 @@ sub post_indent
 	$source =~ s!
 			(\n$ident[^(\n]*)\n                  # e.g. static void
 			(
-				$ident\(\n?                      # func_name( 
+				$ident\(\n?                      # func_name(
 				(.*,([ \t]*$comment)?\n)*        # args b4 final ln
 				.*\);([ \t]*$comment)?$          # final line
 			)
@@ -388,8 +394,12 @@ sub entab
 	print $tmp_fh $source;
 	$tmp_fh->close();
 
-	open(my $entab, '-|',
-		"$entab -d -t8 -qc " . $tmp_fh->filename . " | $entab -t4 -qc");
+	open(
+		my $entab,
+		'-|',
+		"$entab -d -t8 -qc "
+		  . $tmp_fh->filename
+		  . " | $entab -t4 -qc | $entab -d -t4 -m");
 	local ($/) = undef;
 	$source = <$entab>;
 	close($entab);
@@ -442,20 +452,25 @@ sub run_build
 
 	chdir "$code_base/src/tools/pgindent";
 
-	my $typedefs_list_url = "http://buildfarm.postgresql.org/cgi-bin/typedefs.pl";
+	my $typedefs_list_url =
+	  "http://buildfarm.postgresql.org/cgi-bin/typedefs.pl";
 
 	my $rv = getstore($typedefs_list_url, "tmp_typedefs.list");
 
-	die "cannot fetch typedefs list from $typedefs_list_url\n" unless is_success($rv);
+	die "cannot fetch typedefs list from $typedefs_list_url\n"
+	  unless is_success($rv);
 
 	$ENV{PGTYPEDEFS} = abs_path('tmp_typedefs.list');
 
-	my $pg_bsd_indent_url = "ftp://ftp.postgresql.org/pub/dev/pg_bsd_indent-" . 
-				 $INDENT_VERSION . ".tar.gz";
+	my $pg_bsd_indent_url =
+	    "ftp://ftp.postgresql.org/pub/dev/pg_bsd_indent-"
+	  . $INDENT_VERSION
+	  . ".tar.gz";
 
 	$rv = getstore($pg_bsd_indent_url, "pg_bsd_indent.tgz");
 
-	die "cannot fetch BSD indent tarfile from $pg_bsd_indent_url\n" unless is_success($rv);
+	die "cannot fetch BSD indent tarfile from $pg_bsd_indent_url\n"
+	  unless is_success($rv);
 
 	# XXX add error checking here
 

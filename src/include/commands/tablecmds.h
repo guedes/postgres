@@ -4,7 +4,7 @@
  *	  prototypes for tablecmds.c.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/tablecmds.h
@@ -35,7 +35,7 @@ extern void ATExecChangeOwner(Oid relationOid, Oid newOwnerId, bool recursing, L
 
 extern void AlterTableInternal(Oid relid, List *cmds, bool recurse);
 
-extern Oid AlterTableNamespace(AlterObjectSchemaStmt *stmt);
+extern Oid	AlterTableNamespace(AlterObjectSchemaStmt *stmt);
 
 extern void AlterTableNamespaceInternal(Relation rel, Oid oldNspOid,
 							Oid nspOid, ObjectAddresses *objsMoved);
@@ -51,11 +51,11 @@ extern void ExecuteTruncate(TruncateStmt *stmt);
 
 extern void SetRelationHasSubclass(Oid relationId, bool relhassubclass);
 
-extern Oid renameatt(RenameStmt *stmt);
+extern Oid	renameatt(RenameStmt *stmt);
 
-extern Oid RenameConstraint(RenameStmt *stmt);
+extern Oid	RenameConstraint(RenameStmt *stmt);
 
-extern Oid RenameRelation(RenameStmt *stmt);
+extern Oid	RenameRelation(RenameStmt *stmt);
 
 extern void RenameRelationInternal(Oid myrelid,
 					   const char *newrelname, bool is_internal);
@@ -78,4 +78,6 @@ extern void AtEOSubXact_on_commit_actions(bool isCommit,
 extern void RangeVarCallbackOwnsTable(const RangeVar *relation,
 						  Oid relId, Oid oldRelId, void *arg);
 
+extern void RangeVarCallbackOwnsRelation(const RangeVar *relation,
+							 Oid relId, Oid oldRelId, void *noCatalogs);
 #endif   /* TABLECMDS_H */

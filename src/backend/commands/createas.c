@@ -12,7 +12,7 @@
  * to assorted legacy behaviors that we still try to preserve, notably that
  * we must return a tuples-processed count in the completionTag.
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,6 +33,7 @@
 #include "commands/prepare.h"
 #include "commands/tablecmds.h"
 #include "commands/view.h"
+#include "miscadmin.h"
 #include "parser/parse_clause.h"
 #include "rewrite/rewriteHandler.h"
 #include "storage/smgr.h"
@@ -69,7 +70,11 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 {
 	Query	   *query = (Query *) stmt->query;
 	IntoClause *into = stmt->into;
+	bool		is_matview = (into->viewQuery != NULL);
 	DestReceiver *dest;
+	Oid			save_userid = InvalidOid;
+	int			save_sec_context = 0;
+	int			save_nestlevel = 0;
 	List	   *rewritten;
 	PlannedStmt *plan;
 	QueryDesc  *queryDesc;
@@ -90,11 +95,27 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 	{
 		ExecuteStmt *estmt = (ExecuteStmt *) query->utilityStmt;
 
+		Assert(!is_matview);	/* excluded by syntax */
 		ExecuteQuery(estmt, into, queryString, params, dest, completionTag);
 
 		return;
 	}
 	Assert(query->commandType == CMD_SELECT);
+
+	/*
+	 * For materialized views, lock down security-restricted operations and
+	 * arrange to make GUC variable changes local to this command.  This is
+	 * not necessary for security, but this keeps the behavior similar to
+	 * REFRESH MATERIALIZED VIEW.  Otherwise, one could create a materialized
+	 * view not possible to refresh.
+	 */
+	if (is_matview)
+	{
+		GetUserIdAndSecContext(&save_userid, &save_sec_context);
+		SetUserIdAndSecContext(save_userid,
+						   save_sec_context | SECURITY_RESTRICTED_OPERATION);
+		save_nestlevel = NewGUCNestLevel();
+	}
 
 	/*
 	 * Parse analysis was done already, but we still have to run the rule
@@ -103,9 +124,9 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 	 * plancache.c.
 	 *
 	 * Because the rewriter and planner tend to scribble on the input, we make
-	 * a preliminary copy of the source querytree.	This prevents problems in
+	 * a preliminary copy of the source querytree.  This prevents problems in
 	 * the case that CTAS is in a portal or plpgsql function and is executed
-	 * repeatedly.	(See also the same hack in EXPLAIN and PREPARE.)
+	 * repeatedly.  (See also the same hack in EXPLAIN and PREPARE.)
 	 */
 	rewritten = QueryRewrite((Query *) copyObject(query));
 
@@ -120,7 +141,7 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 
 	/*
 	 * Use a snapshot with an updated command ID to ensure this query sees
-	 * results of any previously executed queries.	(This could only matter if
+	 * results of any previously executed queries.  (This could only matter if
 	 * the planner executed an allegedly-stable function that changed the
 	 * database contents, but let's do it anyway to be parallel to the EXPLAIN
 	 * code path.)
@@ -160,6 +181,15 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 	FreeQueryDesc(queryDesc);
 
 	PopActiveSnapshot();
+
+	if (is_matview)
+	{
+		/* Roll back any GUC changes */
+		AtEOXact_GUC(false, save_nestlevel);
+
+		/* Restore userid and security context */
+		SetUserIdAndSecContext(save_userid, save_sec_context);
+	}
 }
 
 /*
@@ -173,7 +203,7 @@ ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,
 int
 GetIntoRelEFlags(IntoClause *intoClause)
 {
-	int		flags;
+	int			flags;
 
 	/*
 	 * We need to tell the executor whether it has to produce OIDs or not,
@@ -289,6 +319,7 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 		col->collOid = attribute->attcollation;
 		col->constraints = NIL;
 		col->fdwoptions = NIL;
+		col->location = -1;
 
 		coltype->names = NIL;
 		coltype->typeOid = attribute->atttypid;
@@ -328,8 +359,8 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 
 	/*
 	 * If necessary, create a TOAST table for the target table.  Note that
-	 * AlterTableCreateToastTable ends with CommandCounterIncrement(), so that
-	 * the TOAST table will be visible for insertion.
+	 * NewRelationCreateToastTable ends with CommandCounterIncrement(), so
+	 * that the TOAST table will be visible for insertion.
 	 */
 	CommandCounterIncrement();
 
@@ -342,13 +373,13 @@ intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 
 	(void) heap_reloptions(RELKIND_TOASTVALUE, toast_options, true);
 
-	AlterTableCreateToastTable(intoRelationId, toast_options);
+	NewRelationCreateToastTable(intoRelationId, toast_options);
 
 	/* Create the "view" part of a materialized view. */
 	if (is_matview)
 	{
 		/* StoreViewQuery scribbles on tree, so make a copy */
-		Query  *query = (Query *) copyObject(into->viewQuery);
+		Query	   *query = (Query *) copyObject(into->viewQuery);
 
 		StoreViewQuery(intoRelationId, query, false);
 		CommandCounterIncrement();

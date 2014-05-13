@@ -3,7 +3,7 @@
  * spi.c
  *				Server Programming Interface
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -126,6 +126,7 @@ SPI_connect(void)
 	_SPI_current->processed = 0;
 	_SPI_current->lastoid = InvalidOid;
 	_SPI_current->tuptable = NULL;
+	slist_init(&_SPI_current->tuptables);
 	_SPI_current->procCxt = NULL;		/* in case we fail to create 'em */
 	_SPI_current->execCxt = NULL;
 	_SPI_current->connectSubid = GetCurrentSubTransactionId();
@@ -166,7 +167,7 @@ SPI_finish(void)
 	/* Restore memory context as it was before procedure call */
 	MemoryContextSwitchTo(_SPI_current->savedcxt);
 
-	/* Release memory used in procedure call */
+	/* Release memory used in procedure call (including tuptables) */
 	MemoryContextDelete(_SPI_current->execCxt);
 	_SPI_current->execCxt = NULL;
 	MemoryContextDelete(_SPI_current->procCxt);
@@ -255,7 +256,7 @@ AtEOSubXact_SPI(bool isCommit, SubTransactionId mySubid)
 		}
 
 		/*
-		 * Pop the stack entry and reset global variables.	Unlike
+		 * Pop the stack entry and reset global variables.  Unlike
 		 * SPI_finish(), we don't risk switching to memory contexts that might
 		 * be already gone.
 		 */
@@ -282,11 +283,35 @@ AtEOSubXact_SPI(bool isCommit, SubTransactionId mySubid)
 	 */
 	if (_SPI_current && !isCommit)
 	{
+		slist_mutable_iter siter;
+
 		/* free Executor memory the same as _SPI_end_call would do */
 		MemoryContextResetAndDeleteChildren(_SPI_current->execCxt);
-		/* throw away any partially created tuple-table */
-		SPI_freetuptable(_SPI_current->tuptable);
-		_SPI_current->tuptable = NULL;
+
+		/* throw away any tuple tables created within current subxact */
+		slist_foreach_modify(siter, &_SPI_current->tuptables)
+		{
+			SPITupleTable *tuptable;
+
+			tuptable = slist_container(SPITupleTable, next, siter.cur);
+			if (tuptable->subid >= mySubid)
+			{
+				/*
+				 * If we used SPI_freetuptable() here, its internal search of
+				 * the tuptables list would make this operation O(N^2).
+				 * Instead, just free the tuptable manually.  This should
+				 * match what SPI_freetuptable() does.
+				 */
+				slist_delete_current(&siter);
+				if (tuptable == _SPI_current->tuptable)
+					_SPI_current->tuptable = NULL;
+				if (tuptable == SPI_tuptable)
+					SPI_tuptable = NULL;
+				MemoryContextDelete(tuptable->tuptabcxt);
+			}
+		}
+		/* in particular we should have gotten rid of any in-progress table */
+		Assert(_SPI_current->tuptable == NULL);
 	}
 }
 
@@ -717,12 +742,7 @@ SPI_returntuple(HeapTuple tuple, TupleDesc tupdesc)
 		oldcxt = MemoryContextSwitchTo(_SPI_current->savedcxt);
 	}
 
-	dtup = (HeapTupleHeader) palloc(tuple->t_len);
-	memcpy((char *) dtup, (char *) tuple->t_data, tuple->t_len);
-
-	HeapTupleHeaderSetDatumLength(dtup, tuple->t_len);
-	HeapTupleHeaderSetTypeId(dtup, tupdesc->tdtypeid);
-	HeapTupleHeaderSetTypMod(dtup, tupdesc->tdtypmod);
+	dtup = DatumGetHeapTupleHeader(heap_copy_tuple_as_datum(tuple, tupdesc));
 
 	if (oldcxt)
 		MemoryContextSwitchTo(oldcxt);
@@ -844,9 +864,7 @@ SPI_fname(TupleDesc tupdesc, int fnumber)
 char *
 SPI_getvalue(HeapTuple tuple, TupleDesc tupdesc, int fnumber)
 {
-	char	   *result;
-	Datum		origval,
-				val;
+	Datum		val;
 	bool		isnull;
 	Oid			typoid,
 				foutoid;
@@ -861,7 +879,7 @@ SPI_getvalue(HeapTuple tuple, TupleDesc tupdesc, int fnumber)
 		return NULL;
 	}
 
-	origval = heap_getattr(tuple, fnumber, tupdesc, &isnull);
+	val = heap_getattr(tuple, fnumber, tupdesc, &isnull);
 	if (isnull)
 		return NULL;
 
@@ -872,22 +890,7 @@ SPI_getvalue(HeapTuple tuple, TupleDesc tupdesc, int fnumber)
 
 	getTypeOutputInfo(typoid, &foutoid, &typisvarlena);
 
-	/*
-	 * If we have a toasted datum, forcibly detoast it here to avoid memory
-	 * leakage inside the type's output routine.
-	 */
-	if (typisvarlena)
-		val = PointerGetDatum(PG_DETOAST_DATUM(origval));
-	else
-		val = origval;
-
-	result = OidOutputFunctionCall(foutoid, val);
-
-	/* Clean up detoasted copy, if any */
-	if (val != origval)
-		pfree(DatumGetPointer(val));
-
-	return result;
+	return OidOutputFunctionCall(foutoid, val);
 }
 
 Datum
@@ -940,6 +943,12 @@ SPI_gettype(TupleDesc tupdesc, int fnumber)
 	return result;
 }
 
+/*
+ * Get the data type OID for a column.
+ *
+ * There's nothing similar for typmod and typcollation.  The rare consumers
+ * thereof should inspect the TupleDesc directly.
+ */
 Oid
 SPI_gettypeid(TupleDesc tupdesc, int fnumber)
 {
@@ -1015,8 +1024,59 @@ SPI_freetuple(HeapTuple tuple)
 void
 SPI_freetuptable(SPITupleTable *tuptable)
 {
-	if (tuptable != NULL)
-		MemoryContextDelete(tuptable->tuptabcxt);
+	bool		found = false;
+
+	/* ignore call if NULL pointer */
+	if (tuptable == NULL)
+		return;
+
+	/*
+	 * Since this function might be called during error recovery, it seems
+	 * best not to insist that the caller be actively connected.  We just
+	 * search the topmost SPI context, connected or not.
+	 */
+	if (_SPI_connected >= 0)
+	{
+		slist_mutable_iter siter;
+
+		if (_SPI_current != &(_SPI_stack[_SPI_connected]))
+			elog(ERROR, "SPI stack corrupted");
+
+		/* find tuptable in active list, then remove it */
+		slist_foreach_modify(siter, &_SPI_current->tuptables)
+		{
+			SPITupleTable *tt;
+
+			tt = slist_container(SPITupleTable, next, siter.cur);
+			if (tt == tuptable)
+			{
+				slist_delete_current(&siter);
+				found = true;
+				break;
+			}
+		}
+	}
+
+	/*
+	 * Refuse the deletion if we didn't find it in the topmost SPI context.
+	 * This is primarily a guard against double deletion, but might prevent
+	 * other errors as well.  Since the worst consequence of not deleting a
+	 * tuptable would be a transient memory leak, this is just a WARNING.
+	 */
+	if (!found)
+	{
+		elog(WARNING, "attempt to delete invalid SPITupleTable %p", tuptable);
+		return;
+	}
+
+	/* for safety, reset global variables that might point at tuptable */
+	if (tuptable == _SPI_current->tuptable)
+		_SPI_current->tuptable = NULL;
+	if (tuptable == SPI_tuptable)
+		SPI_tuptable = NULL;
+
+	/* release all memory belonging to tuptable */
+	MemoryContextDelete(tuptable->tuptabcxt);
 }
 
 
@@ -1246,7 +1306,7 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 	}
 
 	/*
-	 * Disallow SCROLL with SELECT FOR UPDATE.	This is not redundant with the
+	 * Disallow SCROLL with SELECT FOR UPDATE.  This is not redundant with the
 	 * check in transformDeclareCursorStmt because the cursor options might
 	 * not have come through there.
 	 */
@@ -1500,7 +1560,7 @@ SPI_plan_is_valid(SPIPlanPtr plan)
 /*
  * SPI_result_code_string --- convert any SPI return code to a string
  *
- * This is often useful in error messages.	Most callers will probably
+ * This is often useful in error messages.  Most callers will probably
  * only pass negative (error-case) codes, but for generality we recognize
  * the success codes too.
  */
@@ -1650,6 +1710,8 @@ spi_dest_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	if (_SPI_current->tuptable != NULL)
 		elog(ERROR, "improper call to spi_dest_startup");
 
+	/* We create the tuple table context as a child of procCxt */
+
 	oldcxt = _SPI_procmem();	/* switch to procedure memory context */
 
 	tuptabcxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -1660,8 +1722,18 @@ spi_dest_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	MemoryContextSwitchTo(tuptabcxt);
 
 	_SPI_current->tuptable = tuptable = (SPITupleTable *)
-		palloc(sizeof(SPITupleTable));
+		palloc0(sizeof(SPITupleTable));
 	tuptable->tuptabcxt = tuptabcxt;
+	tuptable->subid = GetCurrentSubTransactionId();
+
+	/*
+	 * The tuptable is now valid enough to be freed by AtEOSubXact_SPI, so put
+	 * it onto the SPI context's tuptables list.  This will ensure it's not
+	 * leaked even in the unlikely event the following few lines fail.
+	 */
+	slist_push_head(&_SPI_current->tuptables, &tuptable->next);
+
+	/* set up initial allocations */
 	tuptable->alloced = tuptable->free = 128;
 	tuptable->vals = (HeapTuple *) palloc(tuptable->alloced * sizeof(HeapTuple));
 	tuptable->tupdesc = CreateTupleDescCopy(typeinfo);
@@ -1971,7 +2043,7 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 				stmt_list = pg_analyze_and_rewrite_params(parsetree,
 														  src,
 														  plan->parserSetup,
-														  plan->parserSetupArg);
+													   plan->parserSetupArg);
 			}
 			else
 			{
@@ -1990,7 +2062,7 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 							   plan->parserSetup,
 							   plan->parserSetupArg,
 							   plan->cursor_options,
-							   false);		/* not fixed result */
+							   false);	/* not fixed result */
 		}
 
 		/*
@@ -2132,7 +2204,7 @@ _SPI_execute_plan(SPIPlanPtr plan, ParamListInfo paramLI,
 
 			/*
 			 * The last canSetTag query sets the status values returned to the
-			 * caller.	Be careful to free any tuptables not returned, to
+			 * caller.  Be careful to free any tuptables not returned, to
 			 * avoid intratransaction memory leak.
 			 */
 			if (canSetTag)

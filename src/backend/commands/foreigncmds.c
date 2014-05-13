@@ -3,7 +3,7 @@
  * foreigncmds.c
  *	  foreign-data wrapper/server creation/manipulation commands
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -39,7 +39,9 @@
 
 /*
  * Convert a DefElem list to the text array format that is used in
- * pg_foreign_data_wrapper, pg_foreign_server, and pg_user_mapping.
+ * pg_foreign_data_wrapper, pg_foreign_server, pg_user_mapping, and
+ * pg_foreign_table.
+ *
  * Returns the array in the form of a Datum, or PointerGetDatum(NULL)
  * if the list is empty.
  *
@@ -79,7 +81,7 @@ optionListToArray(List *options)
 
 
 /*
- * Transform a list of DefElem into text array format.	This is substantially
+ * Transform a list of DefElem into text array format.  This is substantially
  * the same thing as optionListToArray(), except we recognize SET/ADD/DROP
  * actions for modifying an existing list of options, which is passed in
  * Datum form as oldOptions.  Also, if fdwvalidator isn't InvalidOid
@@ -88,7 +90,8 @@ optionListToArray(List *options)
  * Returns the array in the form of a Datum, or PointerGetDatum(NULL)
  * if the list is empty.
  *
- * This is used by CREATE/ALTER of FOREIGN DATA WRAPPER/SERVER/USER MAPPING.
+ * This is used by CREATE/ALTER of FOREIGN DATA WRAPPER/SERVER/USER MAPPING/
+ * FOREIGN TABLE.
  */
 Datum
 transformGenericOptions(Oid catalogId,
@@ -122,7 +125,7 @@ transformGenericOptions(Oid catalogId,
 
 		/*
 		 * It is possible to perform multiple SET/DROP actions on the same
-		 * option.	The standard permits this, as long as the options to be
+		 * option.  The standard permits this, as long as the options to be
 		 * added are unique.  Note that an unspecified action is taken to be
 		 * ADD.
 		 */
@@ -681,8 +684,9 @@ AlterForeignDataWrapper(AlterFdwStmt *stmt)
 		repl_repl[Anum_pg_foreign_data_wrapper_fdwvalidator - 1] = true;
 
 		/*
-		 * It could be that the options for the FDW, SERVER and USER MAPPING
-		 * are no longer valid with the new validator.	Warn about this.
+		 * It could be that existing options for the FDW or dependent SERVER,
+		 * USER MAPPING or FOREIGN TABLE objects are no longer valid according
+		 * to the new validator.  Warn about this.
 		 */
 		if (OidIsValid(fdwvalidator))
 			ereport(WARNING,

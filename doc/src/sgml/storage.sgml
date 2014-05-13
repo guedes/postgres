@@ -33,8 +33,7 @@ files, as shown in <xref linkend="pgdata-contents-table">.  In addition to
 these required items, the cluster configuration files
 <filename>postgresql.conf</filename>, <filename>pg_hba.conf</filename>, and
 <filename>pg_ident.conf</filename> are traditionally stored in
-<varname>PGDATA</> (although in <productname>PostgreSQL</productname> 8.0 and
-later, it is possible to place them elsewhere).
+<varname>PGDATA</>, although it is possible to place them elsewhere.
 </para>
 
 <table tocentry="1" id="pgdata-contents-table">
@@ -73,6 +72,12 @@ Item
 </row>
 
 <row>
+ <entry><filename>pg_dynshmem</></entry>
+ <entry>Subdirectory containing files used by the dynamic shared memory
+  subsystem</entry>
+</row>
+
+<row>
  <entry><filename>pg_multixact</></entry>
  <entry>Subdirectory containing multitransaction status data
   (used for shared row locks)</entry>
@@ -81,6 +86,11 @@ Item
 <row>
  <entry><filename>pg_notify</></entry>
  <entry>Subdirectory containing LISTEN/NOTIFY status data</entry>
+</row>
+
+<row>
+ <entry><filename>pg_replslot</></entry>
+ <entry>Subdirectory containing replication slot data</entry>
 </row>
 
 <row>
@@ -117,6 +127,12 @@ Item
 <row>
  <entry><filename>pg_xlog</></entry>
  <entry>Subdirectory containing WAL (Write Ahead Log) files</entry>
+</row>
+
+<row>
+ <entry><filename>postgresql.auto.conf</></entry>
+ <entry>A file used for storing configuration parameters that are set by
+<command>ALTER SYSTEM</command></entry>
 </row>
 
 <row>
@@ -666,10 +682,10 @@ data. Empty in ordinary tables.</entry>
    to this page</entry>
   </row>
   <row>
-   <entry>pd_tli</entry>
+   <entry>pd_checksum</entry>
    <entry>uint16</entry>
    <entry>2 bytes</entry>
-   <entry>TimeLineID of last change (only its lowest 16 bits)</entry>
+   <entry>Page checksum</entry>
   </row>
   <row>
    <entry>pd_flags</entry>

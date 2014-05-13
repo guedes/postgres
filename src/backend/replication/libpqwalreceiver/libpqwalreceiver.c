@@ -6,7 +6,7 @@
  * loaded as a dynamic module to avoid linking the main server binary with
  * libpq.
  *
- * Portions Copyright (c) 2010-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2014, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -49,9 +49,10 @@ static char *recvBuf = NULL;
 static void libpqrcv_connect(char *conninfo);
 static void libpqrcv_identify_system(TimeLineID *primary_tli);
 static void libpqrcv_readtimelinehistoryfile(TimeLineID tli, char **filename, char **content, int *len);
-static bool libpqrcv_startstreaming(TimeLineID tli, XLogRecPtr startpoint);
+static bool libpqrcv_startstreaming(TimeLineID tli, XLogRecPtr startpoint,
+						char *slotname);
 static void libpqrcv_endstreaming(TimeLineID *next_tli);
-static int libpqrcv_receive(int timeout, char **buffer);
+static int	libpqrcv_receive(int timeout, char **buffer);
 static void libpqrcv_send(const char *buffer, int nbytes);
 static void libpqrcv_disconnect(void);
 
@@ -130,7 +131,7 @@ libpqrcv_identify_system(TimeLineID *primary_tli)
 						"the primary server: %s",
 						PQerrorMessage(streamConn))));
 	}
-	if (PQnfields(res) != 3 || PQntuples(res) != 1)
+	if (PQnfields(res) < 3 || PQntuples(res) != 1)
 	{
 		int			ntuples = PQntuples(res);
 		int			nfields = PQnfields(res);
@@ -138,8 +139,8 @@ libpqrcv_identify_system(TimeLineID *primary_tli)
 		PQclear(res);
 		ereport(ERROR,
 				(errmsg("invalid response from primary server"),
-				 errdetail("Expected 1 tuple with 3 fields, got %d tuples with %d fields.",
-						   ntuples, nfields)));
+				 errdetail("Could not identify system: Got %d rows and %d fields, expected %d rows and %d or more fields.",
+						   ntuples, nfields, 3, 1)));
 	}
 	primary_sysid = PQgetvalue(res, 0, 0);
 	*primary_tli = pg_atoi(PQgetvalue(res, 0, 1), 4, 0);
@@ -151,6 +152,7 @@ libpqrcv_identify_system(TimeLineID *primary_tli)
 			 GetSystemIdentifier());
 	if (strcmp(primary_sysid, standby_sysid) != 0)
 	{
+		primary_sysid = pstrdup(primary_sysid);
 		PQclear(res);
 		ereport(ERROR,
 				(errmsg("database system identifier differs between the primary and standby"),
@@ -171,15 +173,20 @@ libpqrcv_identify_system(TimeLineID *primary_tli)
  * throws an ERROR.
  */
 static bool
-libpqrcv_startstreaming(TimeLineID tli, XLogRecPtr startpoint)
+libpqrcv_startstreaming(TimeLineID tli, XLogRecPtr startpoint, char *slotname)
 {
-	char		cmd[64];
+	char		cmd[256];
 	PGresult   *res;
 
 	/* Start streaming from the point requested by startup process */
-	snprintf(cmd, sizeof(cmd), "START_REPLICATION %X/%X TIMELINE %u",
-			 (uint32) (startpoint >> 32), (uint32) startpoint,
-			 tli);
+	if (slotname != NULL)
+		snprintf(cmd, sizeof(cmd),
+				 "START_REPLICATION SLOT \"%s\" %X/%X TIMELINE %u", slotname,
+				 (uint32) (startpoint >> 32), (uint32) startpoint, tli);
+	else
+		snprintf(cmd, sizeof(cmd),
+				 "START_REPLICATION %X/%X TIMELINE %u",
+				 (uint32) (startpoint >> 32), (uint32) startpoint, tli);
 	res = libpqrcv_PQexec(cmd);
 
 	if (PQresultStatus(res) == PGRES_COMMAND_OK)
@@ -209,12 +216,13 @@ libpqrcv_endstreaming(TimeLineID *next_tli)
 
 	if (PQputCopyEnd(streamConn, NULL) <= 0 || PQflush(streamConn))
 		ereport(ERROR,
-				(errmsg("could not send end-of-streaming message to primary: %s",
-						PQerrorMessage(streamConn))));
+			(errmsg("could not send end-of-streaming message to primary: %s",
+					PQerrorMessage(streamConn))));
 
 	/*
 	 * After COPY is finished, we should receive a result set indicating the
-	 * next timeline's ID, or just CommandComplete if the server was shut down.
+	 * next timeline's ID, or just CommandComplete if the server was shut
+	 * down.
 	 *
 	 * If we had not yet received CopyDone from the backend, PGRES_COPY_IN
 	 * would also be possible. However, at the moment this function is only
@@ -456,7 +464,7 @@ libpqrcv_disconnect(void)
  *	 0 if no data was available within timeout, or wait was interrupted
  *	 by signal.
  *
- *   -1 if the server ended the COPY.
+ *	 -1 if the server ended the COPY.
  *
  * ereports on error.
  */

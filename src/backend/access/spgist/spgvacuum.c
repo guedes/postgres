@@ -4,7 +4,7 @@
  *	  vacuum for SP-GiST
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -211,7 +211,7 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 	 * Figure out exactly what we have to do.  We do this separately from
 	 * actually modifying the page, mainly so that we have a representation
 	 * that can be dumped into WAL and then the replay code can do exactly
-	 * the same thing.	The output of this step consists of six arrays
+	 * the same thing.  The output of this step consists of six arrays
 	 * describing four kinds of operations, to be performed in this order:
 	 *
 	 * toDead[]: tuple numbers to be replaced with DEAD tuples
@@ -287,7 +287,7 @@ vacuumLeafPage(spgBulkDeleteState *bds, Relation index, Buffer buffer,
 			else
 			{
 				/*
-				 * Second or later live tuple.	Arrange to re-chain it to the
+				 * Second or later live tuple.  Arrange to re-chain it to the
 				 * previous live one, if there was a gap.
 				 */
 				if (interveningDeletable)

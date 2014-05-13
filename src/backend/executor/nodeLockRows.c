@@ -3,7 +3,7 @@
  * nodeLockRows.c
  *	  Routines to handle FOR UPDATE/FOR SHARE row locking
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -127,7 +127,7 @@ lnext:
 				break;
 			default:
 				elog(ERROR, "unsupported rowmark type");
-				lockmode = LockTupleNoKeyExclusive;	/* keep compiler quiet */
+				lockmode = LockTupleNoKeyExclusive;		/* keep compiler quiet */
 				break;
 		}
 
@@ -139,6 +139,7 @@ lnext:
 		switch (test)
 		{
 			case HeapTupleSelfUpdated:
+
 				/*
 				 * The target tuple was already updated or deleted by the
 				 * current command, or by a later command in the current
@@ -181,7 +182,7 @@ lnext:
 				tuple.t_self = copyTuple->t_self;
 
 				/*
-				 * Need to run a recheck subquery.	Initialize EPQ state if we
+				 * Need to run a recheck subquery.  Initialize EPQ state if we
 				 * didn't do so already.
 				 */
 				if (!epq_started)
@@ -212,7 +213,7 @@ lnext:
 	{
 		/*
 		 * First, fetch a copy of any rows that were successfully locked
-		 * without any update having occurred.	(We do this in a separate pass
+		 * without any update having occurred.  (We do this in a separate pass
 		 * so as to avoid overhead in the common case where there are no
 		 * concurrent updates.)
 		 */
@@ -317,7 +318,7 @@ ExecInitLockRows(LockRows *node, EState *estate, int eflags)
 
 	/*
 	 * Locate the ExecRowMark(s) that this node is responsible for, and
-	 * construct ExecAuxRowMarks for them.	(InitPlan should already have
+	 * construct ExecAuxRowMarks for them.  (InitPlan should already have
 	 * built the global list of ExecRowMarks.)
 	 */
 	lrstate->lr_arowMarks = NIL;
@@ -339,7 +340,7 @@ ExecInitLockRows(LockRows *node, EState *estate, int eflags)
 		aerm = ExecBuildAuxRowMark(erm, outerPlan->targetlist);
 
 		/*
-		 * Only locking rowmarks go into our own list.	Non-locking marks are
+		 * Only locking rowmarks go into our own list.  Non-locking marks are
 		 * passed off to the EvalPlanQual machinery.  This is because we don't
 		 * want to bother fetching non-locked rows unless we actually have to
 		 * do an EPQ recheck.

@@ -5,7 +5,7 @@
  *	  However, we define it here so that the format is documented.
  *
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_control.h
@@ -43,7 +43,7 @@ typedef struct CheckPoint
 	MultiXactOffset nextMultiOffset;	/* next free MultiXact offset */
 	TransactionId oldestXid;	/* cluster-wide minimum datfrozenxid */
 	Oid			oldestXidDB;	/* database with minimum datfrozenxid */
-	MultiXactId	oldestMulti;	/* cluster-wide minimum datminmxid */
+	MultiXactId oldestMulti;	/* cluster-wide minimum datminmxid */
 	Oid			oldestMultiDB;	/* database with minimum datminmxid */
 	pg_time_t	time;			/* time stamp of checkpoint */
 
@@ -67,7 +67,7 @@ typedef struct CheckPoint
 #define XLOG_RESTORE_POINT				0x70
 #define XLOG_FPW_CHANGE					0x80
 #define XLOG_END_OF_RECOVERY			0x90
-#define XLOG_HINT						0xA0
+#define XLOG_FPI						0xA0
 
 
 /*
@@ -102,9 +102,9 @@ typedef struct ControlFileData
 	uint64		system_identifier;
 
 	/*
-	 * Version identifier information.	Keep these fields at the same offset,
+	 * Version identifier information.  Keep these fields at the same offset,
 	 * especially pg_control_version; they won't be real useful if they move
-	 * around.	(For historical reasons they must be 8 bytes into the file
+	 * around.  (For historical reasons they must be 8 bytes into the file
 	 * rather than immediately at the front.)
 	 *
 	 * pg_control_version identifies the format of pg_control itself.
@@ -127,7 +127,7 @@ typedef struct ControlFileData
 
 	CheckPoint	checkPointCopy; /* copy of last check point record */
 
-	XLogRecPtr  unloggedLSN;	/* current fake LSN value, for unlogged rels */
+	XLogRecPtr	unloggedLSN;	/* current fake LSN value, for unlogged rels */
 
 	/*
 	 * These two values determine the minimum point we must recover up to
@@ -171,7 +171,9 @@ typedef struct ControlFileData
 	 * or hot standby.
 	 */
 	int			wal_level;
+	bool		wal_log_hints;
 	int			MaxConnections;
+	int			max_worker_processes;
 	int			max_prepared_xacts;
 	int			max_locks_per_xact;
 

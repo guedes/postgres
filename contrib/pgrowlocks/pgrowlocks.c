@@ -35,14 +35,13 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/tqual.h"
 
 
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pgrowlocks);
-
-extern Datum pgrowlocks(PG_FUNCTION_ARGS);
 
 /* ----------
  * pgrowlocks:
@@ -106,7 +105,7 @@ pgrowlocks(PG_FUNCTION_ARGS)
 			aclcheck_error(aclresult, ACL_KIND_CLASS,
 						   RelationGetRelationName(rel));
 
-		scan = heap_beginscan(rel, SnapshotNow, 0, NULL);
+		scan = heap_beginscan(rel, GetActiveSnapshot(), 0, NULL);
 		mydata = palloc(sizeof(*mydata));
 		mydata->rel = rel;
 		mydata->scan = scan;
@@ -124,14 +123,14 @@ pgrowlocks(PG_FUNCTION_ARGS)
 	/* scan the relation */
 	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
-		HTSU_Result	htsu;
+		HTSU_Result htsu;
 		TransactionId xmax;
 		uint16		infomask;
 
 		/* must hold a buffer lock to call HeapTupleSatisfiesUpdate */
 		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
 
-		htsu = HeapTupleSatisfiesUpdate(tuple->t_data,
+		htsu = HeapTupleSatisfiesUpdate(tuple,
 										GetCurrentCommandId(false),
 										scan->rs_cbuf);
 		xmax = HeapTupleHeaderGetRawXmax(tuple->t_data);
@@ -152,7 +151,7 @@ pgrowlocks(PG_FUNCTION_ARGS)
 			values = (char **) palloc(mydata->ncolumns * sizeof(char *));
 
 			values[Atnum_tid] = (char *) DirectFunctionCall1(tidout,
-															 PointerGetDatum(&tuple->t_self));
+											PointerGetDatum(&tuple->t_self));
 
 			values[Atnum_xmax] = palloc(NCHARS * sizeof(char));
 			snprintf(values[Atnum_xmax], NCHARS, "%d", xmax);
@@ -166,7 +165,7 @@ pgrowlocks(PG_FUNCTION_ARGS)
 				values[Atnum_ismulti] = pstrdup("true");
 
 				allow_old = !(infomask & HEAP_LOCK_MASK) &&
-							 (infomask & HEAP_XMAX_LOCK_ONLY);
+					(infomask & HEAP_XMAX_LOCK_ONLY);
 				nmembers = GetMultiXactIdMembers(xmax, &members, allow_old);
 				if (nmembers == -1)
 				{
@@ -280,8 +279,8 @@ pgrowlocks(PG_FUNCTION_ARGS)
 			result = HeapTupleGetDatum(tuple);
 
 			/*
-			 * no need to pfree what we allocated; it's on a short-lived memory
-			 * context anyway
+			 * no need to pfree what we allocated; it's on a short-lived
+			 * memory context anyway
 			 */
 
 			SRF_RETURN_NEXT(funcctx, result);

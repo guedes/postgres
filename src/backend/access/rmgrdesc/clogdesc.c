@@ -1,14 +1,14 @@
 /*-------------------------------------------------------------------------
  *
  * clogdesc.c
- *    rmgr descriptor routines for access/transam/clog.c
+ *	  rmgr descriptor routines for access/transam/clog.c
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *    src/backend/access/rmgrdesc/clogdesc.c
+ *	  src/backend/access/rmgrdesc/clogdesc.c
  *
  *-------------------------------------------------------------------------
  */
@@ -37,5 +37,5 @@ clog_desc(StringInfo buf, uint8 xl_info, char *rec)
 		appendStringInfo(buf, "truncate before: %d", pageno);
 	}
 	else
-		appendStringInfo(buf, "UNKNOWN");
+		appendStringInfoString(buf, "UNKNOWN");
 }

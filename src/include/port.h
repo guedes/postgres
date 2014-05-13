@@ -3,7 +3,7 @@
  * port.h
  *	  Header for src/port/ compatibility functions.
  *
- * Portions Copyright (c) 1996-2013, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/port.h
@@ -45,6 +45,7 @@ extern void make_native_path(char *path);
 extern bool path_contains_parent_reference(const char *path);
 extern bool path_is_relative_and_below_cwd(const char *path);
 extern bool path_is_prefix_of_path(const char *path1, const char *path2);
+extern char *make_absolute_path(const char *path);
 extern const char *get_progname(const char *argv0);
 extern void get_share_path(const char *my_exec_path, char *ret_path);
 extern void get_etc_path(const char *my_exec_path, char *ret_path);
@@ -114,37 +115,6 @@ extern BOOL AddUserToTokenDacl(HANDLE hToken);
 #define DEVNULL "/dev/null"
 #endif
 
-/*
- *	Win32 needs double quotes at the beginning and end of system()
- *	strings.  If not, it gets confused with multiple quoted strings.
- *	It also requires double-quotes around the executable name and
- *	any files used for redirection.  Other args can use single-quotes.
- *
- *	Generated using Win32 "CMD /?":
- *
- *	1. If all of the following conditions are met, then quote characters
- *	on the command line are preserved:
- *
- *	 - no /S switch
- *	 - exactly two quote characters
- *	 - no special characters between the two quote characters, where special
- *	   is one of: &<>()@^|
- *	 - there are one or more whitespace characters between the two quote
- *	   characters
- *	 - the string between the two quote characters is the name of an
- *	   executable file.
- *
- *	 2. Otherwise, old behavior is to see if the first character is a quote
- *	 character and if so, strip the leading character and remove the last
- *	 quote character on the command line, preserving any text after the last
- *	 quote character.
- */
-#if defined(WIN32) && !defined(__CYGWIN__)
-#define SYSTEMQUOTE "\""
-#else
-#define SYSTEMQUOTE ""
-#endif
-
 /* Portable delay handling */
 extern void pg_usleep(long microsec);
 
@@ -160,7 +130,7 @@ extern unsigned char pg_ascii_tolower(unsigned char ch);
 
 /*
  * Versions of libintl >= 0.13 try to replace printf() and friends with
- * macros to their own versions that understand the %$ format.	We do the
+ * macros to their own versions that understand the %$ format.  We do the
  * same, so disable their macros, if they exist.
  */
 #ifdef vsnprintf
@@ -331,12 +301,16 @@ extern FILE *pgwin32_fopen(const char *, const char *);
 #define		fopen(a,b) pgwin32_fopen(a,b)
 #endif
 
-#ifndef popen
-#define popen(a,b) _popen(a,b)
-#endif
-#ifndef pclose
+/*
+ * system() and popen() replacements to enclose the command in an extra
+ * pair of quotes.
+ */
+extern int	pgwin32_system(const char *command);
+extern FILE *pgwin32_popen(const char *command, const char *type);
+
+#define system(a) pgwin32_system(a)
+#define popen(a,b) pgwin32_popen(a,b)
 #define pclose(a) _pclose(a)
-#endif
 
 /* New versions of MingW have gettimeofday, old mingw and msvc don't */
 #ifndef HAVE_GETTIMEOFDAY
@@ -380,10 +354,6 @@ extern int	fls(int mask);
 #ifndef HAVE_FSEEKO
 #define fseeko(a, b, c) fseek(a, b, c)
 #define ftello(a)		ftell(a)
-#endif
-
-#ifndef HAVE_GETOPT
-extern int	getopt(int nargc, char *const * nargv, const char *ostr);
 #endif
 
 #if !defined(HAVE_GETPEEREID) && !defined(WIN32)
@@ -440,7 +410,7 @@ extern int pqGethostbyname(const char *name,
 
 extern void pg_qsort(void *base, size_t nel, size_t elsize,
 		 int (*cmp) (const void *, const void *));
-extern int pg_qsort_strcmp(const void *a, const void *b);
+extern int	pg_qsort_strcmp(const void *a, const void *b);
 
 #define qsort(a,b,c,d) pg_qsort(a,b,c,d)
 
@@ -451,6 +421,10 @@ extern void qsort_arg(void *base, size_t nel, size_t elsize,
 
 /* port/chklocale.c */
 extern int	pg_get_encoding_from_locale(const char *ctype, bool write_message);
+
+#if defined(WIN32) && !defined(FRONTEND)
+extern int	pg_codepage_to_encoding(UINT cp);
+#endif
 
 /* port/inet_net_ntop.c */
 extern char *inet_net_ntop(int af, const void *src, int bits,

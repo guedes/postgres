@@ -271,7 +271,8 @@
         authentication dialog (not described here, part of the
         Kerberos specification) with the server.  If this is
         successful, the server responds with an AuthenticationOk,
-        otherwise it responds with an ErrorResponse.
+        otherwise it responds with an ErrorResponse. This is no
+        longer supported. This is not supported any more.
        </para>
       </listitem>
      </varlistentry>
@@ -1301,20 +1302,36 @@
 
 <para>
 To initiate streaming replication, the frontend sends the
-<literal>replication</> parameter in the startup message. This tells the
-backend to go into walsender mode, wherein a small set of replication commands
-can be issued instead of SQL statements. Only the simple query protocol can be
-used in walsender mode.
+<literal>replication</> parameter in the startup message. A boolean value
+of <literal>true</> tells the backend to go into walsender mode, wherein a
+small set of replication commands can be issued instead of SQL statements. Only
+the simple query protocol can be used in walsender mode.
+Passing <literal>database</> as the value instructs walsender to connect to
+the database specified in the <literal>dbname</> parameter, which will allow
+the connection to be used for logical replication from that database.
+</para>
+<para>
+ For the purpose of testing replication commands, you can make a replication
+ connection via <application>psql</application> or any other <literal>libpq</literal>-using
+ tool with a connection string including the <literal>replication</literal> option,
+ e.g.:
+ <programlisting>
+  psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
+ </programlisting>
+ However it is often more useful to use
+ <application>pg_receivexlog</application> (for physical replication) or
+ <application>pg_recvlogical</application> (for logical replication).
+</para>
 
+<para>
 The commands accepted in walsender mode are:
-
 <variablelist>
   <varlistentry>
     <term>IDENTIFY_SYSTEM</term>
     <listitem>
      <para>
       Requests the server to identify itself. Server replies with a result
-      set of a single row, containing three fields:
+      set of a single row, containing four fields:
      </para>
 
      <para>
@@ -1352,6 +1369,17 @@ The commands accepted in walsender mode are:
       <para>
        Current xlog write location. Useful to get a known location in the
        transaction log where streaming can start.
+      </para>
+      </listitem>
+      </varlistentry>
+
+      <varlistentry>
+      <term>
+       dbname
+      </term>
+      <listitem>
+      <para>
+       Database connected to or NULL.
       </para>
       </listitem>
       </varlistentry>
@@ -1400,15 +1428,39 @@ The commands accepted in walsender mode are:
   </varlistentry>
 
   <varlistentry>
-    <term>START_REPLICATION <replaceable class="parameter">XXX/XXX</> TIMELINE <replaceable class="parameter">tli</></term>
+    <term><literal>CREATE_REPLICATION_SLOT</literal> <replaceable class="parameter">slotname</> <literal>PHYSICAL</literal><indexterm><primary>CREATE_REPLICATION_SLOT</primary></indexterm></term>
+    <listitem>
+     <para>
+      Create a physical replication
+      slot. See <xref linkend="streaming-replication-slots"> for more about
+      replication slots.
+     </para>
+     <variablelist>
+      <varlistentry>
+       <term><replaceable class="parameter">slotname</></term>
+       <listitem>
+         <para>
+          The name of the slot to create. Must be a valid replication slot
+          name (see <xref linkend="streaming-replication-slots-manipulation">).
+         </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </listitem>
+  </varlistentry>
+
+  <varlistentry>
+    <term><literal>START_REPLICATION</literal> [<literal>SLOT</literal> <replaceable class="parameter">slotname</>] [<literal>PHYSICAL</literal>] <replaceable class="parameter">XXX/XXX</> [<literal>TIMELINE</literal> <replaceable class="parameter">tli</>]</term>
     <listitem>
      <para>
       Instructs server to start streaming WAL, starting at
-      WAL position <replaceable class="parameter">XXX/XXX</> on timeline
-      <replaceable class="parameter">tli</>.
-      The server can reply with an error, e.g. if the requested section of WAL
-      has already been recycled. On success, server responds with a
-      CopyBothResponse message, and then starts to stream WAL to the frontend.
+      WAL position <replaceable class="parameter">XXX/XXX</>.
+      If <literal>TIMELINE</literal> option is specified,
+      streaming starts on timeline <replaceable class="parameter">tli</>;
+      otherwise, the server's current timeline is selected. The server can
+      reply with an error, e.g. if the requested section of WAL has already
+      been recycled. On success, server responds with a CopyBothResponse
+      message, and then starts to stream WAL to the frontend.
      </para>
 
      <para>
@@ -1440,6 +1492,14 @@ The commands accepted in walsender mode are:
       an ErrorResponse message if it encounters a failure after beginning
       to stream.)  The payload of each CopyData message from server to the
       client contains a message of one of the following formats:
+     </para>
+
+     <para>
+      If a slot's name is provided
+      via <replaceable class="parameter">slotname</>, it will be updated
+      as replication progresses so that the server knows which WAL segments -
+      and if <varname>hot_standby_feedback</> is on which transactions -
+      are still needed by the standby.
      </para>
 
      <para>
@@ -1717,9 +1777,66 @@ The commands accepted in walsender mode are:
      </para>
     </listitem>
   </varlistentry>
+  <varlistentry>
+    <term><literal>START_REPLICATION</literal> <literal>SLOT</literal> <replaceable class="parameter">slotname</> <literal>LOGICAL</literal> <replaceable class="parameter">XXX/XXX</></term>
+    <listitem>
+     <para>
+      Instructs server to start streaming WAL for logical replication, starting
+      at WAL position <replaceable class="parameter">XXX/XXX</>. The server can
+      reply with an error, e.g. if the requested section of WAL has already
+      been recycled. On success, server responds with a CopyBothResponse
+      message, and then starts to stream WAL to the frontend.
+     </para>
+     <para>
+      The output plugin associated with the selected slot is used
+      to process the output for streaming.
+     </para>
+     <variablelist>
+      <varlistentry>
+       <term><literal>SLOT</literal> <replaceable class="parameter">slotname</></term>
+       <listitem>
+         <para>
+          The name of the slot to stream changes from. This parameter is required,
+          and must correspond to an existing logical replication slot created
+          with <literal>CREATE_REPLICATION_SLOT</literal> in
+          <literal>LOGICAL</literal> mode.
+         </para>
+       </listitem>
+      </varlistentry>
+      <varlistentry>
+       <term><replaceable class="parameter">XXX/XXX</></term>
+       <listitem>
+        <para>
+         The WAL position to begin streaming at.
+        </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </listitem>
+  </varlistentry>
 
   <varlistentry>
-    <term>BASE_BACKUP [<literal>LABEL</literal> <replaceable>'label'</replaceable>] [<literal>PROGRESS</literal>] [<literal>FAST</literal>] [<literal>WAL</literal>] [<literal>NOWAIT</literal>]</term>
+    <term><literal>DROP_REPLICATION_SLOT</literal> <replaceable class="parameter">slotname</></term>
+    <listitem>
+     <para>
+      Drops a replication slot, freeing any reserved server-side resources. If
+      the slot is currently in use by an active connection, this command fails.
+     </para>
+     <variablelist>
+      <varlistentry>
+       <term><replaceable class="parameter">slotname</></term>
+       <listitem>
+         <para>
+          The name of the slot to drop.
+         </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </listitem>
+  </varlistentry>
+
+  <varlistentry>
+    <term>BASE_BACKUP [<literal>LABEL</literal> <replaceable>'label'</replaceable>] [<literal>PROGRESS</literal>] [<literal>FAST</literal>] [<literal>WAL</literal>] [<literal>NOWAIT</literal>] [<literal>MAX_RATE</literal> <replaceable>rate</replaceable>]</term>
     <listitem>
      <para>
       Instructs the server to start streaming a base backup.
@@ -1787,7 +1904,21 @@ The commands accepted in walsender mode are:
           the waiting and the warning, leaving the client responsible for
           ensuring the required log is available.
          </para>
-         </listitem>
+        </listitem>
+       </varlistentry>
+
+       <varlistentry>
+        <term><literal>MAX_RATE</literal> <replaceable>rate</></term>
+        <listitem>
+         <para>
+          Limit (throttle) the maximum amount of data transferred from server
+          to client per unit of time.  The expected unit is kilobytes per second.
+          If this option is specified, the value must either be equal to zero
+          or it must fall within the range from 32 kB through 1 GB (inclusive).
+          If zero is passed or the option is not specified, no restriction is
+          imposed on the transfer.
+         </para>
+        </listitem>
        </varlistentry>
       </variablelist>
      </para>
@@ -4788,8 +4919,8 @@ message.
 <listitem>
 <para>
         Table name: if the error was associated with a specific table, the
-        name of the table.  (When this field is present, the schema name field
-        provides the name of the table's schema.)
+        name of the table.  (Refer to the schema name field for the name of
+        the table's schema.)
 </para>
 </listitem>
 </varlistentry>
@@ -4801,8 +4932,8 @@ message.
 <listitem>
 <para>
         Column name: if the error was associated with a specific table column,
-        the name of the column.  (When this field is present, the schema and
-        table name fields identify the table.)
+        the name of the column.  (Refer to the schema and table name fields to
+        identify the table.)
 </para>
 </listitem>
 </varlistentry>
@@ -4813,9 +4944,9 @@ message.
 </term>
 <listitem>
 <para>
-        Datatype name: if the error was associated with a specific datatype,
-        the name of the datatype.  (When this field is present, the schema
-        name field provides the name of the datatype's schema.)
+        Data type name: if the error was associated with a specific data type,
+        the name of the data type.  (Refer to the schema name field for the
+        name of the data type's schema.)
 </para>
 </listitem>
 </varlistentry>
@@ -4827,10 +4958,10 @@ message.
 <listitem>
 <para>
         Constraint name: if the error was associated with a specific
-        constraint, the name of the constraint.  The table or domain that the
-        constraint belongs to is reported using the fields listed above.  (For
-        this purpose, indexes are treated as constraints, even if they weren't
-        created with constraint syntax.)
+        constraint, the name of the constraint.  Refer to fields listed above
+        for the associated table or domain.  (For this purpose, indexes are
+        treated as constraints, even if they weren't created with constraint
+        syntax.)
 </para>
 </listitem>
 </varlistentry>
@@ -4874,9 +5005,14 @@ message.
 
 <note>
  <para>
-  The fields for schema name, table name, column name, datatype name, and
+  The fields for schema name, table name, column name, data type name, and
   constraint name are supplied only for a limited number of error types;
-  see <xref linkend="errcodes-appendix">.
+  see <xref linkend="errcodes-appendix">.  Frontends should not assume that
+  the presence of any of these fields guarantees the presence of another
+  field.  Core error sources observe the interrelationships noted above, but
+  user-defined functions may use these fields in other ways.  In the same
+  vein, clients should not assume that these fields denote contemporary
+  objects in the current database.
  </para>
 </note>
 
