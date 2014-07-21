@@ -69,6 +69,8 @@
 #define XLOG_HEAP_CONTAINS_NEW_TUPLE		(1<<4)
 #define XLOG_HEAP_PREFIX_FROM_OLD			(1<<5)
 #define XLOG_HEAP_SUFFIX_FROM_OLD			(1<<6)
+/* last xl_heap_multi_insert record for one heap_multi_insert() call */
+#define XLOG_HEAP_LAST_MULTI_INSERT			(1<<7)
 
 /* convenience macro for checking whether any form of old tuple was logged */
 #define XLOG_HEAP_CONTAINS_OLD						\
@@ -367,10 +369,10 @@ typedef struct xl_heap_rewrite_mapping
 extern void HeapTupleHeaderAdvanceLatestRemovedXid(HeapTupleHeader tuple,
 									   TransactionId *latestRemovedXid);
 
-extern void heap_redo(XLogRecPtr lsn, XLogRecord *rptr);
-extern void heap_desc(StringInfo buf, uint8 xl_info, char *rec);
-extern void heap2_redo(XLogRecPtr lsn, XLogRecord *rptr);
-extern void heap2_desc(StringInfo buf, uint8 xl_info, char *rec);
+extern void heap_redo(XLogRecPtr lsn, XLogRecord *record);
+extern void heap_desc(StringInfo buf, XLogRecord *record);
+extern void heap2_redo(XLogRecPtr lsn, XLogRecord *record);
+extern void heap2_desc(StringInfo buf, XLogRecord *record);
 extern void heap_xlog_logical_rewrite(XLogRecPtr lsn, XLogRecord *r);
 
 extern XLogRecPtr log_heap_cleanup_info(RelFileNode rnode,

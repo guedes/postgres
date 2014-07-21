@@ -21,9 +21,11 @@
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
+#include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/datetime.h"
 #include "utils/lsyscache.h"
 #include "utils/json.h"
 #include "utils/jsonapi.h"
@@ -53,6 +55,8 @@ typedef enum					/* type categories for datum_to_json */
 	JSONTYPE_NULL,				/* null, so we didn't bother to identify */
 	JSONTYPE_BOOL,				/* boolean (built-in types only) */
 	JSONTYPE_NUMERIC,			/* numeric (ditto) */
+	JSONTYPE_TIMESTAMP,         /* we use special formatting for timestamp */
+	JSONTYPE_TIMESTAMPTZ,       /* ... and timestamptz */
 	JSONTYPE_JSON,				/* JSON itself (and JSONB) */
 	JSONTYPE_ARRAY,				/* array */
 	JSONTYPE_COMPOSITE,			/* composite */
@@ -396,7 +400,7 @@ parse_object(JsonLexContext *lex, JsonSemAction *sem)
 {
 	/*
 	 * an object is a possibly empty sequence of object fields, separated by
-	 * commas and surrounde by curly braces.
+	 * commas and surrounded by curly braces.
 	 */
 	json_struct_action ostart = sem->object_start;
 	json_struct_action oend = sem->object_end;
@@ -1262,6 +1266,14 @@ json_categorize_type(Oid typoid,
 			*tcategory = JSONTYPE_NUMERIC;
 			break;
 
+		case TIMESTAMPOID:
+			*tcategory = JSONTYPE_TIMESTAMP;
+			break;
+
+		case TIMESTAMPTZOID:
+			*tcategory = JSONTYPE_TIMESTAMPTZ;
+			break;
+
 		case JSONOID:
 		case JSONBOID:
 			*tcategory = JSONTYPE_JSON;
@@ -1335,7 +1347,7 @@ datum_to_json(Datum val, bool is_null, StringInfo result,
 		 tcategory == JSONTYPE_CAST))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		  errmsg("key value must be scalar, not array, composite or json")));
+		  errmsg("key value must be scalar, not array, composite, or json")));
 
 	switch (tcategory)
 	{
@@ -1374,6 +1386,58 @@ datum_to_json(Datum val, bool is_null, StringInfo result,
 					escape_json(result, outputstr);
 			}
 			pfree(outputstr);
+			break;
+		case JSONTYPE_TIMESTAMP:
+			{
+				Timestamp	timestamp;
+				struct pg_tm tm;
+				fsec_t		fsec;
+				char		buf[MAXDATELEN + 1];
+
+				timestamp = DatumGetTimestamp(val);
+
+				/* XSD doesn't support infinite values */
+				if (TIMESTAMP_NOT_FINITE(timestamp))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+							 errmsg("timestamp out of range"),
+							 errdetail("JSON does not support infinite timestamp values.")));
+				else if (timestamp2tm(timestamp, NULL, &tm, &fsec, NULL, NULL) == 0)
+					EncodeDateTime(&tm, fsec, false, 0, NULL, USE_XSD_DATES, buf);
+				else
+					ereport(ERROR,
+							(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+							 errmsg("timestamp out of range")));
+
+				appendStringInfo(result,"\"%s\"",buf);
+			}
+			break;
+		case JSONTYPE_TIMESTAMPTZ:
+			{
+				TimestampTz timestamp;
+				struct pg_tm tm;
+				int			tz;
+				fsec_t		fsec;
+				const char *tzn = NULL;
+				char		buf[MAXDATELEN + 1];
+
+				timestamp = DatumGetTimestamp(val);
+
+				/* XSD doesn't support infinite values */
+				if (TIMESTAMP_NOT_FINITE(timestamp))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+							 errmsg("timestamp out of range"),
+							 errdetail("JSON does not support infinite timestamp values.")));
+				else if (timestamp2tm(timestamp, &tz, &tm, &fsec, &tzn, NULL) == 0)
+					EncodeDateTime(&tm, fsec, true, tz, tzn, USE_XSD_DATES, buf);
+				else
+					ereport(ERROR,
+							(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+							 errmsg("timestamp out of range")));
+
+				appendStringInfo(result,"\"%s\"",buf);
+			}
 			break;
 		case JSONTYPE_JSON:
 			/* JSON and JSONB output will already be escaped */
@@ -2274,7 +2338,29 @@ escape_json(StringInfo buf, const char *str)
 				appendStringInfoString(buf, "\\\"");
 				break;
 			case '\\':
-				appendStringInfoString(buf, "\\\\");
+				/*
+				 * Unicode escapes are passed through as is. There is no
+				 * requirement that they denote a valid character in the
+				 * server encoding - indeed that is a big part of their
+				 * usefulness.
+				 *
+				 * All we require is that they consist of \uXXXX where
+				 * the Xs are hexadecimal digits. It is the responsibility
+				 * of the caller of, say, to_json() to make sure that the
+				 * unicode escape is valid.
+				 *
+				 * In the case of a jsonb string value being escaped, the
+				 * only unicode escape that should be present is \u0000,
+				 * all the other unicode escapes will have been resolved.
+				 */
+				if (p[1] == 'u' &&
+					isxdigit((unsigned char) p[2]) &&
+					isxdigit((unsigned char) p[3]) &&
+					isxdigit((unsigned char) p[4]) &&
+					isxdigit((unsigned char) p[5]))
+					appendStringInfoCharMacro(buf, *p);
+				else
+					appendStringInfoString(buf, "\\\\");
 				break;
 			default:
 				if ((unsigned char) *p < ' ')

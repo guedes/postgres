@@ -78,6 +78,11 @@ Item
 </row>
 
 <row>
+ <entry><filename>pg_logical</></entry>
+ <entry>Subdirectory containing status data for logical decoding</entry>
+</row>
+
+<row>
  <entry><filename>pg_multixact</></entry>
  <entry>Subdirectory containing multitransaction status data
   (used for shared row locks)</entry>
@@ -101,6 +106,12 @@ Item
 <row>
  <entry><filename>pg_snapshots</></entry>
  <entry>Subdirectory containing exported snapshots</entry>
+</row>
+
+<row>
+ <entry><filename>pg_stat</></entry>
+ <entry>Subdirectory containing permanent files for the statistics
+  subsystem</entry>
 </row>
 
 <row>

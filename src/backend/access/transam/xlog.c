@@ -49,6 +49,7 @@
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/large_object.h"
 #include "storage/latch.h"
 #include "storage/pmsignal.h"
 #include "storage/predicate.h"
@@ -59,6 +60,7 @@
 #include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
@@ -735,6 +737,10 @@ static bool bgwriterLaunched = false;
 static int	MyLockNo = 0;
 static bool holdingAllLocks = false;
 
+#ifdef WAL_DEBUG
+static MemoryContext walDebugCxt = NULL;
+#endif
+
 static void readRecoveryCommandFile(void);
 static void exitArchiveRecovery(TimeLineID endTLI, XLogSegNo endLogSegNo);
 static bool recoveryStopsBefore(XLogRecord *record);
@@ -1257,6 +1263,7 @@ begin:;
 	if (XLOG_DEBUG)
 	{
 		StringInfoData buf;
+		MemoryContext oldCxt = MemoryContextSwitchTo(walDebugCxt);
 
 		initStringInfo(&buf);
 		appendStringInfo(&buf, "INSERT @ %X/%X: ",
@@ -1275,15 +1282,17 @@ begin:;
 			rdt_lastnormal->next = NULL;
 
 			initStringInfo(&recordbuf);
+			appendBinaryStringInfo(&recordbuf, (char *) rechdr, sizeof(XLogRecord));
 			for (; rdata != NULL; rdata = rdata->next)
 				appendBinaryStringInfo(&recordbuf, rdata->data, rdata->len);
 
 			appendStringInfoString(&buf, " - ");
-			RmgrTable[rechdr->xl_rmid].rm_desc(&buf, rechdr->xl_info, recordbuf.data);
-			pfree(recordbuf.data);
+			RmgrTable[rechdr->xl_rmid].rm_desc(&buf, (XLogRecord *) recordbuf.data);
 		}
 		elog(LOG, "%s", buf.data);
-		pfree(buf.data);
+
+		MemoryContextSwitchTo(oldCxt);
+		MemoryContextReset(walDebugCxt);
 	}
 #endif
 
@@ -4352,6 +4361,7 @@ WriteControlFile(void)
 	ControlFile->indexMaxKeys = INDEX_MAX_KEYS;
 
 	ControlFile->toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
+	ControlFile->loblksize = LOBLKSIZE;
 
 #ifdef HAVE_INT64_TIMESTAMP
 	ControlFile->enableIntTimes = true;
@@ -4544,6 +4554,13 @@ ReadControlFile(void)
 				 errdetail("The database cluster was initialized with TOAST_MAX_CHUNK_SIZE %d,"
 				" but the server was compiled with TOAST_MAX_CHUNK_SIZE %d.",
 			  ControlFile->toast_max_chunk_size, (int) TOAST_MAX_CHUNK_SIZE),
+				 errhint("It looks like you need to recompile or initdb.")));
+	if (ControlFile->loblksize != LOBLKSIZE)
+		ereport(FATAL,
+				(errmsg("database files are incompatible with server"),
+		  errdetail("The database cluster was initialized with LOBLKSIZE %d,"
+					" but the server was compiled with LOBLKSIZE %d.",
+					ControlFile->loblksize, (int) LOBLKSIZE),
 				 errhint("It looks like you need to recompile or initdb.")));
 
 #ifdef HAVE_INT64_TIMESTAMP
@@ -4796,6 +4813,24 @@ XLOGShmemInit(void)
 				foundXLog;
 	char	   *allocptr;
 	int			i;
+
+#ifdef WAL_DEBUG
+	/*
+	 * Create a memory context for WAL debugging that's exempt from the
+	 * normal "no pallocs in critical section" rule. Yes, that can lead to a
+	 * PANIC if an allocation fails, but wal_debug is not for production use
+	 * anyway.
+	 */
+	if (walDebugCxt == NULL)
+	{
+		walDebugCxt = AllocSetContextCreate(TopMemoryContext,
+											"WAL Debug",
+											ALLOCSET_DEFAULT_MINSIZE,
+											ALLOCSET_DEFAULT_INITSIZE,
+											ALLOCSET_DEFAULT_MAXSIZE);
+		MemoryContextAllowInCriticalSection(walDebugCxt, true);
+	}
+#endif
 
 	ControlFile = (ControlFileData *)
 		ShmemInitStruct("Control File", sizeof(ControlFileData), &foundCFile);
@@ -5221,12 +5256,12 @@ readRecoveryCommandFile(void)
 					(errmsg_internal("primary_conninfo = '%s'",
 									 PrimaryConnInfo)));
 		}
-		else if (strcmp(item->name, "primary_slotname") == 0)
+		else if (strcmp(item->name, "primary_slot_name") == 0)
 		{
 			ReplicationSlotValidateName(item->value, ERROR);
 			PrimarySlotName = pstrdup(item->value);
 			ereport(DEBUG2,
-					(errmsg_internal("primary_slotname = '%s'",
+					(errmsg_internal("primary_slot_name = '%s'",
 									 PrimarySlotName)));
 		}
 		else if (strcmp(item->name, "trigger_file") == 0)
@@ -6254,6 +6289,7 @@ StartupXLOG(void)
 	MultiXactSetNextMXact(checkPoint.nextMulti, checkPoint.nextMultiOffset);
 	SetTransactionIdLimit(checkPoint.oldestXid, checkPoint.oldestXidDB);
 	SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
+	MultiXactSetSafeTruncate(checkPoint.oldestMulti);
 	XLogCtl->ckptXidEpoch = checkPoint.nextXidEpoch;
 	XLogCtl->ckptXid = checkPoint.nextXid;
 
@@ -6261,7 +6297,7 @@ StartupXLOG(void)
 	 * Initialize replication slots, before there's a chance to remove
 	 * required resources.
 	 */
-	StartupReplicationSlots(checkPoint.redo);
+	StartupReplicationSlots();
 
 	/*
 	 * Startup logical state, needs to be setup now so we have proper data
@@ -6618,9 +6654,7 @@ StartupXLOG(void)
 							 (uint32) (EndRecPtr >> 32), (uint32) EndRecPtr);
 					xlog_outrec(&buf, record);
 					appendStringInfoString(&buf, " - ");
-					RmgrTable[record->xl_rmid].rm_desc(&buf,
-													   record->xl_info,
-													 XLogRecGetData(record));
+					RmgrTable[record->xl_rmid].rm_desc(&buf, record);
 					elog(LOG, "%s", buf.data);
 					pfree(buf.data);
 				}
@@ -8265,6 +8299,12 @@ CreateCheckPoint(int flags)
 	END_CRIT_SECTION();
 
 	/*
+	 * Now that the checkpoint is safely on disk, we can update the point to
+	 * which multixact can be truncated.
+	 */
+	MultiXactSetSafeTruncate(checkPoint.oldestMulti);
+
+	/*
 	 * Let smgr do post-checkpoint cleanup (eg, deleting old files).
 	 */
 	smgrpostckpt();
@@ -8296,6 +8336,11 @@ CreateCheckPoint(int flags)
 	 */
 	if (!RecoveryInProgress())
 		TruncateSUBTRANS(GetOldestXmin(NULL, false));
+
+	/*
+	 * Truncate pg_multixact too.
+	 */
+	TruncateMultiXact();
 
 	/* Real work is done, but log and update stats before releasing lock. */
 	LogCheckpointEnd(false);
@@ -8571,21 +8616,6 @@ CreateRestartPoint(int flags)
 	LWLockRelease(ControlFileLock);
 
 	/*
-	 * Due to an historical accident multixact truncations are not WAL-logged,
-	 * but just performed everytime the mxact horizon is increased. So, unless
-	 * we explicitly execute truncations on a standby it will never clean out
-	 * /pg_multixact which obviously is bad, both because it uses space and
-	 * because we can wrap around into pre-existing data...
-	 *
-	 * We can only do the truncation here, after the UpdateControlFile()
-	 * above, because we've now safely established a restart point, that
-	 * guarantees we will not need need to access those multis.
-	 *
-	 * It's probably worth improving this.
-	 */
-	TruncateMultiXact(lastCheckPoint.oldestMulti);
-
-	/*
 	 * Delete old log files (those no longer needed even for previous
 	 * checkpoint/restartpoint) to prevent the disk holding the xlog from
 	 * growing full.
@@ -8642,6 +8672,21 @@ CreateRestartPoint(int flags)
 		if (RecoveryInProgress())
 			ThisTimeLineID = 0;
 	}
+
+	/*
+	 * Due to an historical accident multixact truncations are not WAL-logged,
+	 * but just performed everytime the mxact horizon is increased. So, unless
+	 * we explicitly execute truncations on a standby it will never clean out
+	 * /pg_multixact which obviously is bad, both because it uses space and
+	 * because we can wrap around into pre-existing data...
+	 *
+	 * We can only do the truncation here, after the UpdateControlFile()
+	 * above, because we've now safely established a restart point.  That
+	 * guarantees we will not need to access those multis.
+	 *
+	 * It's probably worth improving this.
+	 */
+	TruncateMultiXact();
 
 	/*
 	 * Truncate pg_subtrans if possible.  We can throw away all data before
@@ -9109,6 +9154,7 @@ xlog_redo(XLogRecPtr lsn, XLogRecord *record)
 							  checkPoint.nextMultiOffset);
 		SetTransactionIdLimit(checkPoint.oldestXid, checkPoint.oldestXidDB);
 		SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
+		MultiXactSetSafeTruncate(checkPoint.oldestMulti);
 
 		/*
 		 * If we see a shutdown checkpoint while waiting for an end-of-backup
@@ -9209,6 +9255,7 @@ xlog_redo(XLogRecPtr lsn, XLogRecord *record)
 								  checkPoint.oldestXidDB);
 		MultiXactAdvanceOldest(checkPoint.oldestMulti,
 							   checkPoint.oldestMultiDB);
+		MultiXactSetSafeTruncate(checkPoint.oldestMulti);
 
 		/* ControlFile->checkPointCopy always tracks the latest ckpt XID */
 		ControlFile->checkPointCopy.nextXidEpoch = checkPoint.nextXidEpoch;
@@ -9616,7 +9663,7 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			  errmsg("WAL level not sufficient for making an online backup"),
-				 errhint("wal_level must be set to \"archive\", \"hot_standby\" or \"logical\" at server start.")));
+				 errhint("wal_level must be set to \"archive\", \"hot_standby\", or \"logical\" at server start.")));
 
 	if (strlen(backupidstr) > MAXPGPATH)
 		ereport(ERROR,
@@ -9952,7 +9999,7 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive, TimeLineID *stoptli_p)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			  errmsg("WAL level not sufficient for making an online backup"),
-				 errhint("wal_level must be set to \"archive\", \"hot_standby\" or \"logical\" at server start.")));
+				 errhint("wal_level must be set to \"archive\", \"hot_standby\", or \"logical\" at server start.")));
 
 	/*
 	 * OK to update backup counters and forcePageWrites
@@ -10444,9 +10491,7 @@ rm_redo_error_callback(void *arg)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	RmgrTable[record->xl_rmid].rm_desc(&buf,
-									   record->xl_info,
-									   XLogRecGetData(record));
+	RmgrTable[record->xl_rmid].rm_desc(&buf, record);
 
 	/* don't bother emitting empty description */
 	if (buf.len > 0)

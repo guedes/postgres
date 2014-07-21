@@ -4,9 +4,9 @@
 -- pg_operator, pg_proc, pg_cast, pg_aggregate, pg_am,
 -- pg_amop, pg_amproc, pg_opclass, pg_opfamily.
 --
--- None of the SELECTs here should ever find any matching entries,
--- so the expected output is easy to maintain ;-).
--- A test failure indicates someone messed up an entry in the system tables.
+-- Every test failures in this file should be closely inspected. The
+-- description of the failing test should be read carefully before
+-- adjusting the expected output.
 --
 -- NB: we assume the oidjoins test will have caught any dangling links,
 -- that is OID or REGPROC fields that are not zero and do not match some
@@ -297,6 +297,49 @@ SELECT p1.oid, p1.proname
 FROM pg_proc as p1 LEFT JOIN pg_description as d
      ON p1.tableoid = d.classoid and p1.oid = d.objoid and d.objsubid = 0
 WHERE d.classoid IS NULL AND p1.oid <= 9999;
+
+-- List of built-in leakproof functions
+--
+-- Leakproof functions should only be added after carefully
+-- scrutinizing all possibly executed codepaths for possible
+-- information leaks. Don't add functions here unless you know what a
+-- leakproof function is. If unsure, don't mark it as such.
+
+-- temporarily disable fancy output, so catalog changes create less diff noise
+\a\t
+
+SELECT p1.oid::regprocedure
+FROM pg_proc p1 JOIN pg_namespace pn
+     ON pronamespace = pn.oid
+WHERE nspname = 'pg_catalog' AND proleakproof
+ORDER BY 1;
+
+-- restore normal output mode
+\a\t
+
+-- List of functions used by libpq's fe-lobj.c
+--
+-- If the output of this query changes, you probably broke libpq.
+-- lo_initialize() assumes that there will be at most one match for
+-- each listed name.
+select proname, oid from pg_catalog.pg_proc
+where proname in (
+  'lo_open',
+  'lo_close',
+  'lo_creat',
+  'lo_create',
+  'lo_unlink',
+  'lo_lseek',
+  'lo_lseek64',
+  'lo_tell',
+  'lo_tell64',
+  'lo_truncate',
+  'lo_truncate64',
+  'loread',
+  'lowrite')
+and pronamespace = (select oid from pg_catalog.pg_namespace
+                    where nspname = 'pg_catalog')
+order by 1;
 
 
 -- **************** pg_cast ****************
