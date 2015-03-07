@@ -3,7 +3,7 @@
  * acl.c
  *	  Basic access control list data structures manipulation routines.
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -117,7 +117,6 @@ static AclMode convert_role_priv_string(text *priv_type_text);
 static AclResult pg_role_aclcheck(Oid role_oid, Oid roleid, AclMode mode);
 
 static void RoleMembershipCacheCallback(Datum arg, int cacheid, uint32 hashvalue);
-static Oid	get_role_oid_or_public(const char *rolname);
 
 
 /*
@@ -5126,7 +5125,7 @@ get_role_oid(const char *rolname, bool missing_ok)
  * get_role_oid_or_public - As above, but return ACL_ID_PUBLIC if the
  *		role name is "public".
  */
-static Oid
+Oid
 get_role_oid_or_public(const char *rolname)
 {
 	if (strcmp(rolname, "public") == 0)

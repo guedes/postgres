@@ -3,7 +3,7 @@
  * pl_funcs.c		- Misc functions for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -97,7 +97,7 @@ plpgsql_ns_additem(int itemtype, int itemno, const char *name)
 	/* first item added must be a label */
 	Assert(ns_top != NULL || itemtype == PLPGSQL_NSTYPE_LABEL);
 
-	nse = palloc(sizeof(PLpgSQL_nsitem) + strlen(name));
+	nse = palloc(offsetof(PLpgSQL_nsitem, name) +strlen(name) + 1);
 	nse->itemtype = itemtype;
 	nse->itemno = itemno;
 	nse->prev = ns_top;

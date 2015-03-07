@@ -4,7 +4,7 @@
  *
  *	  Routines for operator manipulation commands
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -59,7 +59,7 @@
  *
  * 'parameters' is a list of DefElem
  */
-Oid
+ObjectAddress
 DefineOperator(List *names, List *parameters)
 {
 	char	   *oprName;

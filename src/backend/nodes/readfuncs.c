@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -208,6 +208,7 @@ _readQuery(void)
 	READ_BOOL_FIELD(hasRecursive);
 	READ_BOOL_FIELD(hasModifyingCTE);
 	READ_BOOL_FIELD(hasForUpdate);
+	READ_BOOL_FIELD(hasRowSecurity);
 	READ_NODE_FIELD(cteList);
 	READ_NODE_FIELD(rtable);
 	READ_NODE_FIELD(jointree);
@@ -320,7 +321,7 @@ _readRowMarkClause(void)
 
 	READ_UINT_FIELD(rti);
 	READ_ENUM_FIELD(strength, LockClauseStrength);
-	READ_BOOL_FIELD(noWait);
+	READ_ENUM_FIELD(waitPolicy, LockWaitPolicy);
 	READ_BOOL_FIELD(pushedDown);
 
 	READ_DONE();
@@ -1043,6 +1044,7 @@ _readNullTest(void)
 	READ_NODE_FIELD(arg);
 	READ_ENUM_FIELD(nulltesttype, NullTestType);
 	READ_BOOL_FIELD(argisrow);
+	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
 }
@@ -1057,6 +1059,7 @@ _readBooleanTest(void)
 
 	READ_NODE_FIELD(arg);
 	READ_ENUM_FIELD(booltesttype, BoolTestType);
+	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
 }

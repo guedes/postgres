@@ -4,7 +4,7 @@
  *	   routines for accessing the system catalogs
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -508,8 +508,8 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 				int32		tuple_width;
 
 				tuple_width = get_rel_data_width(rel, attr_widths);
-				tuple_width += sizeof(HeapTupleHeaderData);
-				tuple_width += sizeof(ItemPointerData);
+				tuple_width += MAXALIGN(SizeofHeapTupleHeader);
+				tuple_width += sizeof(ItemIdData);
 				/* note: integer division is intentional here */
 				density = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
 			}
@@ -720,6 +720,7 @@ get_relation_constraints(PlannerInfo *root,
 												  0);
 					ntest->nulltesttype = IS_NOT_NULL;
 					ntest->argisrow = type_is_rowtype(att->atttypid);
+					ntest->location = -1;
 					result = lappend(result, ntest);
 				}
 			}

@@ -4,7 +4,7 @@
  *		Functions for archiving WAL files and restoring from the archive.
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlogarchive.c
@@ -459,7 +459,8 @@ KeepFileRestoredFromArchive(char *path, char *xlogfname)
 							xlogfpath, oldpath)));
 		}
 #else
-		strncpy(oldpath, xlogfpath, MAXPGPATH);
+		/* same-size buffers, so this never truncates */
+		strlcpy(oldpath, xlogfpath, MAXPGPATH);
 #endif
 		if (unlink(oldpath) != 0)
 			ereport(FATAL,

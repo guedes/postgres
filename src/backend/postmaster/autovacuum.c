@@ -50,7 +50,7 @@
  * there is a window (caused by pgstat delay) on which a worker may choose a
  * table that was already vacuumed; this is a bug in the current design.
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -64,7 +64,6 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/time.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "access/heapam.h"
@@ -193,6 +192,7 @@ typedef struct autovac_table
 	int			at_multixact_freeze_table_age;
 	int			at_vacuum_cost_delay;
 	int			at_vacuum_cost_limit;
+	bool		at_dobalance;
 	bool		at_wraparound;
 	char	   *at_relname;
 	char	   *at_nspname;
@@ -223,6 +223,7 @@ typedef struct WorkerInfoData
 	Oid			wi_tableoid;
 	PGPROC	   *wi_proc;
 	TimestampTz wi_launchtime;
+	bool		wi_dobalance;
 	int			wi_cost_delay;
 	int			wi_cost_limit;
 	int			wi_cost_limit_base;
@@ -381,11 +382,10 @@ StartAutoVacLauncher(void)
 #ifndef EXEC_BACKEND
 		case 0:
 			/* in postmaster child ... */
+			InitPostmasterChild();
+
 			/* Close the postmaster's sockets */
 			ClosePostmasterPorts(false);
-
-			/* Lose the postmaster's on-exit routines */
-			on_exit_reset();
 
 			AutoVacLauncherMain(0, NULL);
 			break;
@@ -406,15 +406,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 {
 	sigjmp_buf	local_sigjmp_buf;
 
-	/* we are a postmaster subprocess now */
-	IsUnderPostmaster = true;
 	am_autovacuum_launcher = true;
-
-	/* reset MyProcPid */
-	MyProcPid = getpid();
-
-	/* record Start Time for logging */
-	MyStartTime = time(NULL);
 
 	/* Identify myself via ps */
 	init_ps_display("autovacuum launcher process", "", "", "");
@@ -426,17 +418,6 @@ AutoVacLauncherMain(int argc, char *argv[])
 		pg_usleep(PostAuthDelay * 1000000L);
 
 	SetProcessingMode(InitProcessing);
-
-	/*
-	 * If possible, make this process a group leader, so that the postmaster
-	 * can signal any child processes too.  (autovacuum probably never has any
-	 * child processes, but for consistency we make all postmaster child
-	 * processes do this.)
-	 */
-#ifdef HAVE_SETSID
-	if (setsid() < 0)
-		elog(FATAL, "setsid() failed: %m");
-#endif
 
 	/*
 	 * Set up signal handlers.  We operate on databases much like a regular
@@ -469,7 +450,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 	InitProcess();
 #endif
 
-	InitPostgres(NULL, InvalidOid, NULL, NULL);
+	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL);
 
 	SetProcessingMode(NormalProcessing);
 
@@ -601,20 +582,18 @@ AutoVacLauncherMain(int argc, char *argv[])
 		launcher_determine_sleep(!dlist_is_empty(&AutoVacuumShmem->av_freeWorkers),
 								 false, &nap);
 
-		/* Allow sinval catchup interrupts while sleeping */
-		EnableCatchupInterrupt();
-
 		/*
 		 * Wait until naptime expires or we get some type of signal (all the
 		 * signal handlers will wake us by calling SetLatch).
 		 */
-		rc = WaitLatch(&MyProc->procLatch,
+		rc = WaitLatch(MyLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
 					   (nap.tv_sec * 1000L) + (nap.tv_usec / 1000L));
 
-		ResetLatch(&MyProc->procLatch);
+		ResetLatch(MyLatch);
 
-		DisableCatchupInterrupt();
+		/* Process sinval catchup interrupts that happened while sleeping */
+		ProcessCatchupInterrupt();
 
 		/*
 		 * Emergency bailout if postmaster has died.  This is to avoid the
@@ -920,10 +899,9 @@ rebuild_database_list(Oid newdb)
 	 */
 	hctl.keysize = sizeof(Oid);
 	hctl.entrysize = sizeof(avl_dbase);
-	hctl.hash = oid_hash;
 	hctl.hcxt = tmpcxt;
 	dbhash = hash_create("db hash", 20, &hctl,	/* magic number here FIXME */
-						 HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+						 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	/* start by inserting the new database */
 	score = 0;
@@ -1361,8 +1339,7 @@ avl_sighup_handler(SIGNAL_ARGS)
 	int			save_errno = errno;
 
 	got_SIGHUP = true;
-	if (MyProc)
-		SetLatch(&MyProc->procLatch);
+	SetLatch(MyLatch);
 
 	errno = save_errno;
 }
@@ -1374,8 +1351,7 @@ avl_sigusr2_handler(SIGNAL_ARGS)
 	int			save_errno = errno;
 
 	got_SIGUSR2 = true;
-	if (MyProc)
-		SetLatch(&MyProc->procLatch);
+	SetLatch(MyLatch);
 
 	errno = save_errno;
 }
@@ -1387,8 +1363,7 @@ avl_sigterm_handler(SIGNAL_ARGS)
 	int			save_errno = errno;
 
 	got_SIGTERM = true;
-	if (MyProc)
-		SetLatch(&MyProc->procLatch);
+	SetLatch(MyLatch);
 
 	errno = save_errno;
 }
@@ -1454,11 +1429,10 @@ StartAutoVacWorker(void)
 #ifndef EXEC_BACKEND
 		case 0:
 			/* in postmaster child ... */
+			InitPostmasterChild();
+
 			/* Close the postmaster's sockets */
 			ClosePostmasterPorts(false);
-
-			/* Lose the postmaster's on-exit routines */
-			on_exit_reset();
 
 			AutoVacWorkerMain(0, NULL);
 			break;
@@ -1480,31 +1454,12 @@ AutoVacWorkerMain(int argc, char *argv[])
 	sigjmp_buf	local_sigjmp_buf;
 	Oid			dbid;
 
-	/* we are a postmaster subprocess now */
-	IsUnderPostmaster = true;
 	am_autovacuum_worker = true;
-
-	/* reset MyProcPid */
-	MyProcPid = getpid();
-
-	/* record Start Time for logging */
-	MyStartTime = time(NULL);
 
 	/* Identify myself via ps */
 	init_ps_display("autovacuum worker process", "", "", "");
 
 	SetProcessingMode(InitProcessing);
-
-	/*
-	 * If possible, make this process a group leader, so that the postmaster
-	 * can signal any child processes too.  (autovacuum probably never has any
-	 * child processes, but for consistency we make all postmaster child
-	 * processes do this.)
-	 */
-#ifdef HAVE_SETSID
-	if (setsid() < 0)
-		elog(FATAL, "setsid() failed: %m");
-#endif
 
 	/*
 	 * Set up signal handlers.  We operate on databases much like a regular
@@ -1663,7 +1618,7 @@ AutoVacWorkerMain(int argc, char *argv[])
 		 * Note: if we have selected a just-deleted database (due to using
 		 * stale stats info), we'll fail and exit here.
 		 */
-		InitPostgres(NULL, dbid, NULL, dbname);
+		InitPostgres(NULL, dbid, NULL, InvalidOid, dbname);
 		SetProcessingMode(NormalProcessing);
 		set_ps_display(dbname, false);
 		ereport(DEBUG1,
@@ -1716,6 +1671,7 @@ FreeWorkerInfo(int code, Datum arg)
 		MyWorkerInfo->wi_tableoid = InvalidOid;
 		MyWorkerInfo->wi_proc = NULL;
 		MyWorkerInfo->wi_launchtime = 0;
+		MyWorkerInfo->wi_dobalance = false;
 		MyWorkerInfo->wi_cost_delay = 0;
 		MyWorkerInfo->wi_cost_limit = 0;
 		MyWorkerInfo->wi_cost_limit_base = 0;
@@ -1776,17 +1732,19 @@ autovac_balance_cost(void)
 	if (vac_cost_limit <= 0 || vac_cost_delay <= 0)
 		return;
 
-	/* caculate the total base cost limit of active workers */
+	/* calculate the total base cost limit of participating active workers */
 	cost_total = 0.0;
 	dlist_foreach(iter, &AutoVacuumShmem->av_runningWorkers)
 	{
 		WorkerInfo	worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
 
 		if (worker->wi_proc != NULL &&
+			worker->wi_dobalance &&
 			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
 			cost_total +=
 				(double) worker->wi_cost_limit_base / worker->wi_cost_delay;
 	}
+
 	/* there are no cost limits -- nothing to do */
 	if (cost_total <= 0)
 		return;
@@ -1801,6 +1759,7 @@ autovac_balance_cost(void)
 		WorkerInfo	worker = dlist_container(WorkerInfoData, wi_links, iter.cur);
 
 		if (worker->wi_proc != NULL &&
+			worker->wi_dobalance &&
 			worker->wi_cost_limit_base > 0 && worker->wi_cost_delay > 0)
 		{
 			int			limit = (int)
@@ -1815,12 +1774,14 @@ autovac_balance_cost(void)
 			worker->wi_cost_limit = Max(Min(limit,
 											worker->wi_cost_limit_base),
 										1);
+		}
 
-			elog(DEBUG2, "autovac_balance_cost(pid=%u db=%u, rel=%u, cost_limit=%d, cost_limit_base=%d, cost_delay=%d)",
+		if (worker->wi_proc != NULL)
+			elog(DEBUG2, "autovac_balance_cost(pid=%u db=%u, rel=%u, dobalance=%s cost_limit=%d, cost_limit_base=%d, cost_delay=%d)",
 				 worker->wi_proc->pid, worker->wi_dboid, worker->wi_tableoid,
+				 worker->wi_dobalance ? "yes" : "no",
 				 worker->wi_cost_limit, worker->wi_cost_limit_base,
 				 worker->wi_cost_delay);
-		}
 	}
 }
 
@@ -1989,12 +1950,11 @@ do_autovacuum(void)
 	MemSet(&ctl, 0, sizeof(ctl));
 	ctl.keysize = sizeof(Oid);
 	ctl.entrysize = sizeof(av_relation);
-	ctl.hash = oid_hash;
 
 	table_toast_map = hash_create("TOAST to main relid map",
 								  100,
 								  &ctl,
-								  HASH_ELEM | HASH_FUNCTION);
+								  HASH_ELEM | HASH_BLOBS);
 
 	/*
 	 * Scan pg_class to determine which tables to vacuum.
@@ -2284,6 +2244,7 @@ do_autovacuum(void)
 		LWLockAcquire(AutovacuumLock, LW_EXCLUSIVE);
 
 		/* advertise my cost delay parameters for the balancing algorithm */
+		MyWorkerInfo->wi_dobalance = tab->at_dobalance;
 		MyWorkerInfo->wi_cost_delay = tab->at_vacuum_cost_delay;
 		MyWorkerInfo->wi_cost_limit = tab->at_vacuum_cost_limit;
 		MyWorkerInfo->wi_cost_limit_base = tab->at_vacuum_cost_limit;
@@ -2579,6 +2540,14 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		tab->at_relname = NULL;
 		tab->at_nspname = NULL;
 		tab->at_datname = NULL;
+
+		/*
+		 * If any of the cost delay parameters has been set individually for
+		 * this table, disable the balancing algorithm.
+		 */
+		tab->at_dobalance =
+			!(avopts && (avopts->vacuum_cost_limit > 0 ||
+						 avopts->vacuum_cost_delay > 0));
 	}
 
 	heap_freetuple(classTup);
@@ -2711,14 +2680,21 @@ relation_needs_vacanalyze(Oid relid,
 	*wraparound = force_vacuum;
 
 	/* User disabled it in pg_class.reloptions?  (But ignore if at risk) */
-	if (!force_vacuum && !av_enabled)
+	if (!av_enabled && !force_vacuum)
 	{
 		*doanalyze = false;
 		*dovacuum = false;
 		return;
 	}
 
-	if (PointerIsValid(tabentry))
+	/*
+	 * If we found the table in the stats hash, and autovacuum is currently
+	 * enabled, make a threshold-based decision whether to vacuum and/or
+	 * analyze.  If autovacuum is currently disabled, we must be here for
+	 * anti-wraparound vacuuming only, so don't vacuum (or analyze) anything
+	 * that's not being forced.
+	 */
+	if (PointerIsValid(tabentry) && AutoVacuumingActive())
 	{
 		reltuples = classForm->reltuples;
 		vactuples = tabentry->n_dead_tuples;

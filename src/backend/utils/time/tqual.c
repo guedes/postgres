@@ -44,7 +44,7 @@
  *	 HeapTupleSatisfiesAny()
  *		  all tuples are visible
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -60,6 +60,7 @@
 #include "access/subtrans.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "storage/bufmgr.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
@@ -607,7 +608,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 			 */
 			if ((tuple->t_infomask & (HEAP_XMAX_EXCL_LOCK |
 									  HEAP_XMAX_KEYSHR_LOCK)) &&
-				MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple)))
+				MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), true))
 				return HeapTupleBeingUpdated;
 
 			SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId);
@@ -615,6 +616,11 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 		}
 
 		xmax = HeapTupleGetUpdateXid(tuple);
+		if (!TransactionIdIsValid(xmax))
+		{
+			if (MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), false))
+				return HeapTupleBeingUpdated;
+		}
 
 		/* not LOCKED_ONLY, so it has to have an xmax */
 		Assert(TransactionIdIsValid(xmax));
@@ -627,7 +633,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 				return HeapTupleInvisible;		/* updated before scan started */
 		}
 
-		if (TransactionIdIsInProgress(xmax))
+		if (MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), false))
 			return HeapTupleBeingUpdated;
 
 		if (TransactionIdDidCommit(xmax))
@@ -638,7 +644,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 		 * what about the other members?
 		 */
 
-		if (!MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple)))
+		if (!MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), false))
 		{
 			/*
 			 * There's no member, even just a locker, alive anymore, so we can
@@ -1240,7 +1246,8 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 				 */
 				if ((tuple->t_infomask & (HEAP_XMAX_EXCL_LOCK |
 										  HEAP_XMAX_KEYSHR_LOCK)) &&
-					MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple)))
+					MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple),
+										 true))
 					return HEAPTUPLE_LIVE;
 				SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId);
 
@@ -1267,7 +1274,7 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 	{
 		TransactionId xmax;
 
-		if (MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple)))
+		if (MultiXactIdIsRunning(HeapTupleHeaderGetRawXmax(tuple), false))
 		{
 			/* already checked above */
 			Assert(!HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask));

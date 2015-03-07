@@ -10,7 +10,7 @@
  * via functions such as SubTransGetTopmostTransaction().
  *
  *
- *	Copyright (c) 2003-2014, PostgreSQL Global Development Group
+ *	Copyright (c) 2003-2015, PostgreSQL Global Development Group
  *	Author: Jan Wieck, Afilias USA INC.
  *	64-bit txids: Marko Kreen, Skype Technologies
  *
@@ -23,6 +23,7 @@
 
 #include "access/transam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "libpq/pqformat.h"
@@ -63,7 +64,8 @@ typedef struct
 	uint32		nxip;			/* number of txids in xip array */
 	txid		xmin;
 	txid		xmax;
-	txid		xip[1];			/* in-progress txids, xmin <= xip[i] < xmax */
+	/* in-progress txids, xmin <= xip[i] < xmax: */
+	txid		xip[FLEXIBLE_ARRAY_MEMBER];
 } TxidSnapshot;
 
 #define TXID_SNAPSHOT_SIZE(nxip) \

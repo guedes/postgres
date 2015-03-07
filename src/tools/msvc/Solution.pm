@@ -71,17 +71,9 @@ sub DeterminePlatform
 	my $self = shift;
 
 	# Examine CL help output to determine if we are in 32 or 64-bit mode.
-	$self->{platform} = 'Win32';
-	open(P, "cl /? 2>&1 |") || die "cl command not found";
-	while (<P>)
-	{
-		if (/^\/favor:<.+AMD64/)
-		{
-			$self->{platform} = 'x64';
-			last;
-		}
-	}
-	close(P);
+	my $output = `cl /? 2>&1`;
+	$? >> 8 == 0 or die "cl command not found";
+	$self->{platform} = ($output =~ /^\/favor:<.+AMD64/m) ? 'x64' : 'Win32';
 	print "Detected hardware platform: $self->{platform}\n";
 }
 
@@ -182,7 +174,7 @@ sub GenerateFiles
 		  if ($self->{options}->{integer_datetimes});
 		print O "#define USE_LDAP 1\n"   if ($self->{options}->{ldap});
 		print O "#define HAVE_LIBZ 1\n"  if ($self->{options}->{zlib});
-		print O "#define USE_SSL 1\n"    if ($self->{options}->{openssl});
+		print O "#define USE_OPENSSL 1\n" if ($self->{options}->{openssl});
 		print O "#define ENABLE_NLS 1\n" if ($self->{options}->{nls});
 
 		print O "#define BLCKSZ ", 1024 * $self->{options}->{blocksize}, "\n";
@@ -628,7 +620,7 @@ sub GetFakeConfigure
 	$cfg .= ' --with-ldap'  if ($self->{options}->{ldap});
 	$cfg .= ' --without-zlib' unless ($self->{options}->{zlib});
 	$cfg .= ' --with-extra-version' if ($self->{options}->{extraver});
-	$cfg .= ' --with-openssl'       if ($self->{options}->{ssl});
+	$cfg .= ' --with-openssl'       if ($self->{options}->{openssl});
 	$cfg .= ' --with-ossp-uuid'     if ($self->{options}->{uuid});
 	$cfg .= ' --with-libxml'        if ($self->{options}->{xml});
 	$cfg .= ' --with-libxslt'       if ($self->{options}->{xslt});

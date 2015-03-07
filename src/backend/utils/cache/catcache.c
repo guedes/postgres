@@ -3,7 +3,7 @@
  * catcache.c
  *	  System catalog cache for tuples matching a key.
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1590,7 +1590,7 @@ SearchCatCacheList(CatCache *cache,
 		oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 		nmembers = list_length(ctlist);
 		cl = (CatCList *)
-			palloc(sizeof(CatCList) + nmembers * sizeof(CatCTup *));
+			palloc(offsetof(CatCList, members) +nmembers * sizeof(CatCTup *));
 		heap_copytuple_with_tuple(ntp, &cl->tuple);
 		MemoryContextSwitchTo(oldcxt);
 		heap_freetuple(ntp);

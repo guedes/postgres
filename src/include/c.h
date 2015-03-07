@@ -9,7 +9,7 @@
  *	  polluting the namespace with lots of stuff...
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/c.h
@@ -288,6 +288,9 @@ typedef unsigned long long int uint64;
 #define UINT64CONST(x) ((uint64) x)
 #endif
 
+/* snprintf format strings to use for 64-bit integers */
+#define INT64_FORMAT "%" INT64_MODIFIER "d"
+#define UINT64_FORMAT "%" INT64_MODIFIER "u"
 
 /* Select timestamp representation (float8 or int64) */
 #ifdef USE_INTEGER_DATETIMES
@@ -388,7 +391,7 @@ typedef struct
 struct varlena
 {
 	char		vl_len_[4];		/* Do not touch this field directly! */
-	char		vl_dat[1];
+	char		vl_dat[FLEXIBLE_ARRAY_MEMBER];	/* Data content is here */
 };
 
 #define VARHDRSZ		((int32) sizeof(int32))
@@ -421,8 +424,8 @@ typedef struct
 	Oid			elemtype;
 	int			dim1;
 	int			lbound1;
-	int16		values[1];		/* VARIABLE LENGTH ARRAY */
-} int2vector;					/* VARIABLE LENGTH STRUCT */
+	int16		values[FLEXIBLE_ARRAY_MEMBER];
+} int2vector;
 
 typedef struct
 {
@@ -432,8 +435,8 @@ typedef struct
 	Oid			elemtype;
 	int			dim1;
 	int			lbound1;
-	Oid			values[1];		/* VARIABLE LENGTH ARRAY */
-} oidvector;					/* VARIABLE LENGTH STRUCT */
+	Oid			values[FLEXIBLE_ARRAY_MEMBER];
+} oidvector;
 
 /*
  * Representation of a Name: effectively just a C string, but null-padded to
@@ -534,6 +537,7 @@ typedef NameData *Name;
 #define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
 /* MAXALIGN covers only built-in types, not buffers */
 #define BUFFERALIGN(LEN)		TYPEALIGN(ALIGNOF_BUFFER, (LEN))
+#define CACHELINEALIGN(LEN)		TYPEALIGN(PG_CACHE_LINE_SIZE, (LEN))
 
 #define TYPEALIGN_DOWN(ALIGNVAL,LEN)  \
 	(((uintptr_t) (LEN)) & ~((uintptr_t) ((ALIGNVAL) - 1)))
@@ -575,11 +579,12 @@ typedef NameData *Name;
  */
 #ifndef USE_ASSERT_CHECKING
 
-#define Assert(condition)
+#define Assert(condition)	((void)true)
 #define AssertMacro(condition)	((void)true)
-#define AssertArg(condition)
-#define AssertState(condition)
-#define Trap(condition, errorType)
+#define AssertArg(condition)	((void)true)
+#define AssertState(condition)	((void)true)
+#define AssertPointerAlignment(ptr, bndr)	((void)true)
+#define Trap(condition, errorType)	((void)true)
 #define TrapMacro(condition, errorType) (true)
 
 #elif defined(FRONTEND)
@@ -589,6 +594,7 @@ typedef NameData *Name;
 #define AssertMacro(p)	((void) assert(p))
 #define AssertArg(condition) assert(condition)
 #define AssertState(condition) assert(condition)
+#define AssertPointerAlignment(ptr, bndr)	((void)true)
 #else							/* USE_ASSERT_CHECKING && !FRONTEND */
 
 /*
@@ -625,8 +631,15 @@ typedef NameData *Name;
 
 #define AssertState(condition) \
 		Trap(!(condition), "BadState")
-#endif   /* USE_ASSERT_CHECKING && !FRONTEND */
 
+/*
+ * Check that `ptr' is `bndr' aligned.
+ */
+#define AssertPointerAlignment(ptr, bndr) \
+	Trap(TYPEALIGN(bndr, (uintptr_t)(ptr)) != (uintptr_t)(ptr), \
+		 "UnalignedPointer")
+
+#endif   /* USE_ASSERT_CHECKING && !FRONTEND */
 
 /*
  * Macros to support compile-time assertion checks.
@@ -853,11 +866,21 @@ typedef NameData *Name;
  * The header must also declare the functions' prototypes, protected by
  * !PG_USE_INLINE.
  */
+
+/* declarations which are only visible when not inlining and in the .c file */
 #ifdef PG_USE_INLINE
 #define STATIC_IF_INLINE static inline
 #else
 #define STATIC_IF_INLINE
 #endif   /* PG_USE_INLINE */
+
+/* declarations which are marked inline when inlining, extern otherwise */
+#ifdef PG_USE_INLINE
+#define STATIC_IF_INLINE_DECLARE static inline
+#else
+#define STATIC_IF_INLINE_DECLARE extern
+#endif   /* PG_USE_INLINE */
+
 
 /* ----------------------------------------------------------------
  *				Section 8:	random stuff

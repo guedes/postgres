@@ -4,7 +4,7 @@
  *	  prototypes for files in optimizer/prep/
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/prep.h
@@ -57,5 +57,8 @@ extern void expand_inherited_tables(PlannerInfo *root);
 
 extern Node *adjust_appendrel_attrs(PlannerInfo *root, Node *node,
 					   AppendRelInfo *appinfo);
+
+extern Node *adjust_appendrel_attrs_multilevel(PlannerInfo *root, Node *node,
+								  RelOptInfo *child_rel);
 
 #endif   /* PREP_H */

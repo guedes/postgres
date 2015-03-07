@@ -3,7 +3,7 @@
  * dropcmds.c
  *	  handle various "DROP" operations
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -264,10 +264,14 @@ does_not_exist_skipping(ObjectType objtype, List *objname, List *objargs)
 	{
 		case OBJECT_TYPE:
 		case OBJECT_DOMAIN:
-			if (!schema_does_not_exist_skipping(objname, &msg, &name))
 			{
-				msg = gettext_noop("type \"%s\" does not exist, skipping");
-				name = TypeNameToString(makeTypeNameFromNameList(objname));
+				TypeName   *typ = linitial(objname);
+
+				if (!schema_does_not_exist_skipping(typ->names, &msg, &name))
+				{
+					msg = gettext_noop("type \"%s\" does not exist, skipping");
+					name = TypeNameToString(typ);
+				}
 			}
 			break;
 		case OBJECT_COLLATION:
@@ -366,6 +370,15 @@ does_not_exist_skipping(ObjectType objtype, List *objname, List *objargs)
 			if (!owningrel_does_not_exist_skipping(objname, &msg, &name))
 			{
 				msg = gettext_noop("trigger \"%s\" for relation \"%s\" does not exist, skipping");
+				name = strVal(llast(objname));
+				args = NameListToString(list_truncate(list_copy(objname),
+												  list_length(objname) - 1));
+			}
+			break;
+		case OBJECT_POLICY:
+			if (!owningrel_does_not_exist_skipping(objname, &msg, &name))
+			{
+				msg = gettext_noop("policy \"%s\" for relation \"%s\" does not exist, skipping");
 				name = strVal(llast(objname));
 				args = NameListToString(list_truncate(list_copy(objname),
 												  list_length(objname) - 1));

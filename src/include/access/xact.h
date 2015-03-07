@@ -4,7 +4,7 @@
  *	  postgres transaction system definitions
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/xact.h
@@ -14,9 +14,11 @@
 #ifndef XACT_H
 #define XACT_H
 
-#include "access/xlog.h"
+#include "access/xlogreader.h"
+#include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
 #include "storage/relfilenode.h"
+#include "utils/datetime.h"
 
 
 /*
@@ -116,7 +118,7 @@ typedef struct xl_xact_assignment
 {
 	TransactionId xtop;			/* assigned XID's top-level XID */
 	int			nsubxacts;		/* number of subtransaction XIDs */
-	TransactionId xsub[1];		/* assigned subxids */
+	TransactionId xsub[FLEXIBLE_ARRAY_MEMBER];	/* assigned subxids */
 } xl_xact_assignment;
 
 #define MinSizeOfXactAssignment offsetof(xl_xact_assignment, xsub)
@@ -126,7 +128,7 @@ typedef struct xl_xact_commit_compact
 	TimestampTz xact_time;		/* time of commit */
 	int			nsubxacts;		/* number of subtransaction XIDs */
 	/* ARRAY OF COMMITTED SUBTRANSACTION XIDs FOLLOWS */
-	TransactionId subxacts[1];	/* VARIABLE LENGTH ARRAY */
+	TransactionId subxacts[FLEXIBLE_ARRAY_MEMBER];
 } xl_xact_commit_compact;
 
 #define MinSizeOfXactCommitCompact offsetof(xl_xact_commit_compact, subxacts)
@@ -141,7 +143,7 @@ typedef struct xl_xact_commit
 	Oid			dbId;			/* MyDatabaseId */
 	Oid			tsId;			/* MyDatabaseTableSpace */
 	/* Array of RelFileNode(s) to drop at commit */
-	RelFileNode xnodes[1];		/* VARIABLE LENGTH ARRAY */
+	RelFileNode xnodes[FLEXIBLE_ARRAY_MEMBER];
 	/* ARRAY OF COMMITTED SUBTRANSACTION XIDs FOLLOWS */
 	/* ARRAY OF SHARED INVALIDATION MESSAGES FOLLOWS */
 } xl_xact_commit;
@@ -169,7 +171,7 @@ typedef struct xl_xact_abort
 	int			nrels;			/* number of RelFileNodes */
 	int			nsubxacts;		/* number of subtransaction XIDs */
 	/* Array of RelFileNode(s) to drop at abort */
-	RelFileNode xnodes[1];		/* VARIABLE LENGTH ARRAY */
+	RelFileNode xnodes[FLEXIBLE_ARRAY_MEMBER];
 	/* ARRAY OF ABORTED SUBTRANSACTION XIDs FOLLOWS */
 } xl_xact_abort;
 
@@ -180,8 +182,7 @@ typedef struct xl_xact_abort
 /*
  * COMMIT_PREPARED and ABORT_PREPARED are identical to COMMIT/ABORT records
  * except that we have to store the XID of the prepared transaction explicitly
- * --- the XID in the record header will be for the transaction doing the
- * COMMIT PREPARED or ABORT PREPARED command.
+ * --- the XID in the record header will be invalid.
  */
 
 typedef struct xl_xact_commit_prepared
@@ -255,7 +256,8 @@ extern void UnregisterSubXactCallback(SubXactCallback callback, void *arg);
 
 extern int	xactGetCommittedChildren(TransactionId **ptr);
 
-extern void xact_redo(XLogRecPtr lsn, XLogRecord *record);
-extern void xact_desc(StringInfo buf, XLogRecord *record);
+extern void xact_redo(XLogReaderState *record);
+extern void xact_desc(StringInfo buf, XLogReaderState *record);
+extern const char *xact_identify(uint8 info);
 
 #endif   /* XACT_H */

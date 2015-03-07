@@ -3,7 +3,7 @@
 # parser generater for ecpg version 2
 # call with backend parser as stdin
 #
-# Copyright (c) 2007-2014, PostgreSQL Global Development Group
+# Copyright (c) 2007-2015, PostgreSQL Global Development Group
 #
 # Written by Mike Aubury <mike.aubury@aubit.com>
 #            Michael Meskes <meskes@postgresql.org>
@@ -42,10 +42,8 @@ my %replace_token = (
 
 # or in the block
 my %replace_string = (
-	'WITH_TIME'       => 'with time',
-	'WITH_ORDINALITY' => 'with ordinality',
-	'NULLS_FIRST'     => 'nulls first',
-	'NULLS_LAST'      => 'nulls last',
+	'NULLS_LA'        => 'nulls',
+	'WITH_LA'         => 'with',
 	'TYPECAST'        => '::',
 	'DOT_DOT'         => '..',
 	'COLON_EQUALS'    => ':=',);

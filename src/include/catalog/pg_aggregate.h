@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_aggregate.h
@@ -20,6 +20,7 @@
 #define PG_AGGREGATE_H
 
 #include "catalog/genbki.h"
+#include "catalog/objectaddress.h"
 #include "nodes/pg_list.h"
 
 /* ----------------------------------------------------------------
@@ -164,6 +165,7 @@ DATA(insert ( 2050	n 0 array_larger	-				-				-				-				f f 1073	2277	0	0		0	_nu
 DATA(insert ( 2244	n 0 bpchar_larger	-				-				-				-				f f 1060	1042	0	0		0	_null_ _null_ ));
 DATA(insert ( 2797	n 0 tidlarger		-				-				-				-				f f 2800	27		0	0		0	_null_ _null_ ));
 DATA(insert ( 3526	n 0 enum_larger		-				-				-				-				f f 3519	3500	0	0		0	_null_ _null_ ));
+DATA(insert ( 3564	n 0 network_larger	-				-				-				-				f f 1205	869		0	0		0	_null_ _null_ ));
 
 /* min */
 DATA(insert ( 2131	n 0 int8smaller		-				-				-				-				f f 412		20		0	0		0	_null_ _null_ ));
@@ -186,6 +188,7 @@ DATA(insert ( 2051	n 0 array_smaller	-				-				-				-				f f 1072	2277	0	0		0	_n
 DATA(insert ( 2245	n 0 bpchar_smaller	-				-				-				-				f f 1058	1042	0	0		0	_null_ _null_ ));
 DATA(insert ( 2798	n 0 tidsmaller		-				-				-				-				f f 2799	27		0	0		0	_null_ _null_ ));
 DATA(insert ( 3527	n 0 enum_smaller	-				-				-				-				f f 3518	3500	0	0		0	_null_ _null_ ));
+DATA(insert ( 3565	n 0 network_smaller -				-				-				-				f f 1203	869		0	0		0	_null_ _null_ ));
 
 /* count */
 DATA(insert ( 2147	n 0 int8inc_any		-				int8inc_any		int8dec_any		-				f f 0		20		0	20		0	"0" "0" ));
@@ -273,6 +276,7 @@ DATA(insert ( 2901	n 0 xmlconcat2	-					-				-				-				f f 0	142		0	0		0	_null_ 
 
 /* array */
 DATA(insert ( 2335	n 0 array_agg_transfn	array_agg_finalfn	-				-				-				t f 0	2281	0	0		0	_null_ _null_ ));
+DATA(insert ( 4053	n 0 array_agg_array_transfn array_agg_array_finalfn -		-				-				t f 0	2281	0	0		0	_null_ _null_ ));
 
 /* text */
 DATA(insert ( 3538	n 0 string_agg_transfn	string_agg_finalfn	-				-				-				f f 0	2281	0	0		0	_null_ _null_ ));
@@ -283,6 +287,10 @@ DATA(insert ( 3545	n 0 bytea_string_agg_transfn	bytea_string_agg_finalfn	-				-	
 /* json */
 DATA(insert ( 3175	n 0 json_agg_transfn	json_agg_finalfn			-				-				-				f f 0	2281	0	0		0	_null_ _null_ ));
 DATA(insert ( 3197	n 0 json_object_agg_transfn json_object_agg_finalfn -				-				-				f f 0	2281	0	0		0	_null_ _null_ ));
+
+/* jsonb */
+DATA(insert ( 3267	n 0 jsonb_agg_transfn	jsonb_agg_finalfn			-				-				-				f f 0	2281	0	0		0	_null_ _null_ ));
+DATA(insert ( 3270	n 0 jsonb_object_agg_transfn jsonb_object_agg_finalfn -				-				-				f f 0	2281	0	0		0	_null_ _null_ ));
 
 /* ordered-set and hypothetical-set aggregates */
 DATA(insert ( 3972	o 1 ordered_set_transition			percentile_disc_final					-		-		-		t f 0	2281	0	0		0	_null_ _null_ ));
@@ -301,7 +309,7 @@ DATA(insert ( 3992	h 1 ordered_set_transition_multi	dense_rank_final						-		-		
 /*
  * prototypes for functions in pg_aggregate.c
  */
-extern Oid AggregateCreate(const char *aggName,
+extern ObjectAddress AggregateCreate(const char *aggName,
 				Oid aggNamespace,
 				char aggKind,
 				int numArgs,

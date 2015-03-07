@@ -48,7 +48,7 @@
  * in the file to be read or written while holding only shared lock.
  *
  *
- * Copyright (c) 2008-2014, PostgreSQL Global Development Group
+ * Copyright (c) 2008-2015, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/pg_stat_statements/pg_stat_statements.c
@@ -954,10 +954,13 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 	 * calculated from the query tree) would be used to accumulate costs of
 	 * ensuing EXECUTEs.  This would be confusing, and inconsistent with other
 	 * cases where planning time is not included at all.
+	 *
+	 * Likewise, we don't track execution of DEALLOCATE.
 	 */
 	if (pgss_track_utility && pgss_enabled() &&
 		!IsA(parsetree, ExecuteStmt) &&
-		!IsA(parsetree, PrepareStmt))
+		!IsA(parsetree, PrepareStmt) &&
+		!IsA(parsetree, DeallocateStmt))
 	{
 		instr_time	start;
 		instr_time	duration;
@@ -2812,6 +2815,9 @@ fill_in_constant_lengths(pgssJumbleState *jstate, const char *query)
 							 &yyextra,
 							 ScanKeywords,
 							 NumScanKeywords);
+
+	/* we don't want to re-emit any escape string warnings */
+	yyextra.escape_string_warning = false;
 
 	/* Search for each constant, in sequence */
 	for (i = 0; i < jstate->clocations_count; i++)

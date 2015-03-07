@@ -3,7 +3,7 @@
  * socket.c
  *	  Microsoft Windows Win32 Socket Functions
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/port/win32/socket.c
@@ -623,7 +623,8 @@ pgwin32_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, c
 		return 0;
 	}
 
-	if (r == WAIT_OBJECT_0 + numevents)
+	/* Signal-like events. */
+	if (r == WAIT_OBJECT_0 + numevents || r == WAIT_IO_COMPLETION)
 	{
 		pgwin32_dispatch_queued_signals();
 		errno = EINTR;

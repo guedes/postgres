@@ -4,7 +4,7 @@
  *	  prototypes for functions in backend/catalog/heap.c
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/heap.h
@@ -14,8 +14,9 @@
 #ifndef HEAP_H
 #define HEAP_H
 
-#include "parser/parse_node.h"
 #include "catalog/indexing.h"
+#include "catalog/objectaddress.h"
+#include "parser/parse_node.h"
 
 
 typedef struct RawColumnDefault
@@ -68,7 +69,8 @@ extern Oid heap_create_with_catalog(const char *relname,
 						 Datum reloptions,
 						 bool use_user_acl,
 						 bool allow_system_table_mods,
-						 bool is_internal);
+						 bool is_internal,
+						 ObjectAddress *typaddress);
 
 extern void heap_create_init_fork(Relation rel);
 

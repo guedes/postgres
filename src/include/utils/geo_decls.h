@@ -3,7 +3,7 @@
  * geo_decls.h - Declarations for various 2D constructs.
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/geo_decls.h
@@ -68,8 +68,6 @@ typedef struct
 typedef struct
 {
 	Point		p[2];
-
-	double		m;				/* precomputed to save time, not in tuple */
 } LSEG;
 
 
@@ -82,7 +80,7 @@ typedef struct
 	int32		npts;
 	int32		closed;			/* is this a closed polygon? */
 	int32		dummy;			/* padding to make it double align */
-	Point		p[1];			/* variable length array of POINTs */
+	Point		p[FLEXIBLE_ARRAY_MEMBER];
 } PATH;
 
 
@@ -117,7 +115,7 @@ typedef struct
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int32		npts;
 	BOX			boundbox;
-	Point		p[1];			/* variable length array of POINTs */
+	Point		p[FLEXIBLE_ARRAY_MEMBER];
 } POLYGON;
 
 /*---------------------------------------------------------------------
@@ -395,6 +393,7 @@ extern Datum circle_radius(PG_FUNCTION_ARGS);
 extern Datum circle_distance(PG_FUNCTION_ARGS);
 extern Datum dist_pc(PG_FUNCTION_ARGS);
 extern Datum dist_cpoly(PG_FUNCTION_ARGS);
+extern Datum dist_ppoly(PG_FUNCTION_ARGS);
 extern Datum circle_center(PG_FUNCTION_ARGS);
 extern Datum cr_circle(PG_FUNCTION_ARGS);
 extern Datum box_circle(PG_FUNCTION_ARGS);

@@ -7,7 +7,7 @@
  *	  and join trees.
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/primnodes.h
@@ -179,9 +179,10 @@ typedef struct Const
 	int			location;		/* token location, or -1 if unknown */
 } Const;
 
-/* ----------------
+/*
  * Param
- *		paramkind - specifies the kind of parameter. The possible values
+ *
+ *		paramkind specifies the kind of parameter. The possible values
  *		for this field are:
  *
  *		PARAM_EXTERN:  The parameter value is supplied from outside the plan.
@@ -204,12 +205,6 @@ typedef struct Const
  *				of the `paramid' field contain the SubLink's subLinkId, and
  *				the low-order 16 bits contain the column number.  (This type
  *				of Param is also converted to PARAM_EXEC during planning.)
- *
- * Note: currently, paramtypmod is always -1 for PARAM_EXTERN params, since
- * the APIs that supply values for such parameters don't carry any typmod
- * info.  It is valid in other types of Params, if they represent expressions
- * with determinable typmod.
- * ----------------
  */
 typedef enum ParamKind
 {
@@ -994,7 +989,6 @@ typedef struct MinMaxExpr
  * Note: result type/typmod/collation are not stored, but can be deduced
  * from the XmlExprOp.  The type/typmod fields are just used for display
  * purposes, and are NOT necessarily the true result type of the node.
- * (We also use type == InvalidOid to mark a not-yet-parse-analyzed XmlExpr.)
  */
 typedef enum XmlExprOp
 {
@@ -1050,6 +1044,7 @@ typedef struct NullTest
 	Expr	   *arg;			/* input expression */
 	NullTestType nulltesttype;	/* IS NULL, IS NOT NULL */
 	bool		argisrow;		/* T if input is of a composite type */
+	int			location;		/* token location, or -1 if unknown */
 } NullTest;
 
 /*
@@ -1071,6 +1066,7 @@ typedef struct BooleanTest
 	Expr		xpr;
 	Expr	   *arg;			/* input expression */
 	BoolTestType booltesttype;	/* test type */
+	int			location;		/* token location, or -1 if unknown */
 } BooleanTest;
 
 /*

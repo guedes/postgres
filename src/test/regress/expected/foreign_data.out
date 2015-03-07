@@ -247,7 +247,7 @@ CREATE USER MAPPING FOR current_user SERVER s1;
 DROP FOREIGN DATA WRAPPER foo;                              -- ERROR
 ERROR:  cannot drop foreign-data wrapper foo because other objects depend on it
 DETAIL:  server s1 depends on foreign-data wrapper foo
-user mapping for foreign_data_user depends on server s1
+user mapping for foreign_data_user on server s1 depends on server s1
 HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 SET ROLE regress_test_role;
 DROP FOREIGN DATA WRAPPER foo CASCADE;                      -- ERROR
@@ -256,7 +256,7 @@ RESET ROLE;
 DROP FOREIGN DATA WRAPPER foo CASCADE;
 NOTICE:  drop cascades to 2 other objects
 DETAIL:  drop cascades to server s1
-drop cascades to user mapping for foreign_data_user
+drop cascades to user mapping for foreign_data_user on server s1
 \dew+
                                             List of foreign-data wrappers
     Name    |       Owner       | Handler |        Validator         | Access privileges | FDW Options | Description 
@@ -422,40 +422,38 @@ ERROR:  role "regress_test_indirect" cannot be dropped because some objects depe
 DETAIL:  owner of server s1
 privileges for foreign-data wrapper foo
 \des+
-                                                                        List of foreign servers
- Name |         Owner         | Foreign-data wrapper |            Access privileges            |  Type  | Version |             FDW Options              | Description 
-------+-----------------------+----------------------+-----------------------------------------+--------+---------+--------------------------------------+-------------
- s1   | regress_test_indirect | foo                  | foreign_data_user=U/foreign_data_user  +|        | 1.1     | (servername 's1')                    | 
-      |                       |                      | regress_test_role=U/foreign_data_user   |        |         |                                      | 
- s2   | foreign_data_user     | foo                  |                                         |        | 1.1     | (host 'a', dbname 'b')               | 
- s3   | foreign_data_user     | foo                  |                                         | oracle |         | ("tns name" 'orcl', port '1521')     | 
- s4   | foreign_data_user     | foo                  |                                         | oracle |         | (host 'a', dbname 'b')               | 
- s5   | foreign_data_user     | foo                  |                                         |        | 15.0    |                                      | 
- s6   | foreign_data_user     | foo                  | foreign_data_user=U/foreign_data_user  +|        | 16.0    | (host 'a', dbname 'b')               | 
-      |                       |                      | regress_test_role2=U*/foreign_data_user |        |         |                                      | 
- s7   | foreign_data_user     | foo                  |                                         | oracle | 17.0    | (host 'a', dbname 'b')               | 
- s8   | foreign_data_user     | postgresql           |                                         |        |         | (dbname 'db1', connect_timeout '30') | 
- t1   | regress_test_role     | foo                  |                                         |        |         |                                      | 
- t2   | regress_test_role     | foo                  |                                         |        |         |                                      | 
+                                                                           List of foreign servers
+ Name |         Owner         | Foreign-data wrapper |               Access privileges               |  Type  | Version |             FDW Options              | Description 
+------+-----------------------+----------------------+-----------------------------------------------+--------+---------+--------------------------------------+-------------
+ s1   | regress_test_indirect | foo                  | regress_test_indirect=U/regress_test_indirect |        | 1.1     | (servername 's1')                    | 
+ s2   | foreign_data_user     | foo                  |                                               |        | 1.1     | (host 'a', dbname 'b')               | 
+ s3   | foreign_data_user     | foo                  |                                               | oracle |         | ("tns name" 'orcl', port '1521')     | 
+ s4   | foreign_data_user     | foo                  |                                               | oracle |         | (host 'a', dbname 'b')               | 
+ s5   | foreign_data_user     | foo                  |                                               |        | 15.0    |                                      | 
+ s6   | foreign_data_user     | foo                  | foreign_data_user=U/foreign_data_user        +|        | 16.0    | (host 'a', dbname 'b')               | 
+      |                       |                      | regress_test_role2=U*/foreign_data_user       |        |         |                                      | 
+ s7   | foreign_data_user     | foo                  |                                               | oracle | 17.0    | (host 'a', dbname 'b')               | 
+ s8   | foreign_data_user     | postgresql           |                                               |        |         | (dbname 'db1', connect_timeout '30') | 
+ t1   | regress_test_role     | foo                  |                                               |        |         |                                      | 
+ t2   | regress_test_role     | foo                  |                                               |        |         |                                      | 
 (10 rows)
 
 ALTER SERVER s8 RENAME to s8new;
 \des+
-                                                                        List of foreign servers
- Name  |         Owner         | Foreign-data wrapper |            Access privileges            |  Type  | Version |             FDW Options              | Description 
--------+-----------------------+----------------------+-----------------------------------------+--------+---------+--------------------------------------+-------------
- s1    | regress_test_indirect | foo                  | foreign_data_user=U/foreign_data_user  +|        | 1.1     | (servername 's1')                    | 
-       |                       |                      | regress_test_role=U/foreign_data_user   |        |         |                                      | 
- s2    | foreign_data_user     | foo                  |                                         |        | 1.1     | (host 'a', dbname 'b')               | 
- s3    | foreign_data_user     | foo                  |                                         | oracle |         | ("tns name" 'orcl', port '1521')     | 
- s4    | foreign_data_user     | foo                  |                                         | oracle |         | (host 'a', dbname 'b')               | 
- s5    | foreign_data_user     | foo                  |                                         |        | 15.0    |                                      | 
- s6    | foreign_data_user     | foo                  | foreign_data_user=U/foreign_data_user  +|        | 16.0    | (host 'a', dbname 'b')               | 
-       |                       |                      | regress_test_role2=U*/foreign_data_user |        |         |                                      | 
- s7    | foreign_data_user     | foo                  |                                         | oracle | 17.0    | (host 'a', dbname 'b')               | 
- s8new | foreign_data_user     | postgresql           |                                         |        |         | (dbname 'db1', connect_timeout '30') | 
- t1    | regress_test_role     | foo                  |                                         |        |         |                                      | 
- t2    | regress_test_role     | foo                  |                                         |        |         |                                      | 
+                                                                           List of foreign servers
+ Name  |         Owner         | Foreign-data wrapper |               Access privileges               |  Type  | Version |             FDW Options              | Description 
+-------+-----------------------+----------------------+-----------------------------------------------+--------+---------+--------------------------------------+-------------
+ s1    | regress_test_indirect | foo                  | regress_test_indirect=U/regress_test_indirect |        | 1.1     | (servername 's1')                    | 
+ s2    | foreign_data_user     | foo                  |                                               |        | 1.1     | (host 'a', dbname 'b')               | 
+ s3    | foreign_data_user     | foo                  |                                               | oracle |         | ("tns name" 'orcl', port '1521')     | 
+ s4    | foreign_data_user     | foo                  |                                               | oracle |         | (host 'a', dbname 'b')               | 
+ s5    | foreign_data_user     | foo                  |                                               |        | 15.0    |                                      | 
+ s6    | foreign_data_user     | foo                  | foreign_data_user=U/foreign_data_user        +|        | 16.0    | (host 'a', dbname 'b')               | 
+       |                       |                      | regress_test_role2=U*/foreign_data_user       |        |         |                                      | 
+ s7    | foreign_data_user     | foo                  |                                               | oracle | 17.0    | (host 'a', dbname 'b')               | 
+ s8new | foreign_data_user     | postgresql           |                                               |        |         | (dbname 'db1', connect_timeout '30') | 
+ t1    | regress_test_role     | foo                  |                                               |        |         |                                      | 
+ t2    | regress_test_role     | foo                  |                                               |        |         |                                      | 
 (10 rows)
 
 ALTER SERVER s8new RENAME to s8;
@@ -528,10 +526,10 @@ CREATE USER MAPPING FOR current_user SERVER s3;
 
 DROP SERVER s3;                                             -- ERROR
 ERROR:  cannot drop server s3 because other objects depend on it
-DETAIL:  user mapping for foreign_data_user depends on server s3
+DETAIL:  user mapping for foreign_data_user on server s3 depends on server s3
 HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP SERVER s3 CASCADE;
-NOTICE:  drop cascades to user mapping for foreign_data_user
+NOTICE:  drop cascades to user mapping for foreign_data_user on server s3
 \des
              List of foreign servers
  Name |       Owner       | Foreign-data wrapper 
@@ -665,13 +663,41 @@ LINE 1: CREATE FOREIGN TABLE ft1 ();
 CREATE FOREIGN TABLE ft1 () SERVER no_server;                   -- ERROR
 ERROR:  server "no_server" does not exist
 CREATE FOREIGN TABLE ft1 () SERVER s0 WITH OIDS;                -- ERROR
-ERROR:  syntax error at or near "WITH OIDS"
+ERROR:  syntax error at or near "WITH"
 LINE 1: CREATE FOREIGN TABLE ft1 () SERVER s0 WITH OIDS;
                                               ^
 CREATE FOREIGN TABLE ft1 (
-	c1 integer OPTIONS ("param 1" 'val1') NOT NULL,
+	c1 integer OPTIONS ("param 1" 'val1') PRIMARY KEY,
 	c2 text OPTIONS (param2 'val2', param3 'val3'),
 	c3 date
+) SERVER s0 OPTIONS (delimiter ',', quote '"', "be quoted" 'value'); -- ERROR
+ERROR:  primary key constraints are not supported on foreign tables
+LINE 2:  c1 integer OPTIONS ("param 1" 'val1') PRIMARY KEY,
+                                               ^
+CREATE TABLE ref_table (id integer PRIMARY KEY);
+CREATE FOREIGN TABLE ft1 (
+	c1 integer OPTIONS ("param 1" 'val1') REFERENCES ref_table (id),
+	c2 text OPTIONS (param2 'val2', param3 'val3'),
+	c3 date
+) SERVER s0 OPTIONS (delimiter ',', quote '"', "be quoted" 'value'); -- ERROR
+ERROR:  foreign key constraints are not supported on foreign tables
+LINE 2:  c1 integer OPTIONS ("param 1" 'val1') REFERENCES ref_table ...
+                                               ^
+DROP TABLE ref_table;
+CREATE FOREIGN TABLE ft1 (
+	c1 integer OPTIONS ("param 1" 'val1') NOT NULL,
+	c2 text OPTIONS (param2 'val2', param3 'val3'),
+	c3 date,
+	UNIQUE (c3)
+) SERVER s0 OPTIONS (delimiter ',', quote '"', "be quoted" 'value'); -- ERROR
+ERROR:  unique constraints are not supported on foreign tables
+LINE 5:  UNIQUE (c3)
+         ^
+CREATE FOREIGN TABLE ft1 (
+	c1 integer OPTIONS ("param 1" 'val1') NOT NULL,
+	c2 text OPTIONS (param2 'val2', param3 'val3') CHECK (c2 <> ''),
+	c3 date,
+	CHECK (c3 BETWEEN '1994-01-01'::date AND '1994-01-31'::date)
 ) SERVER s0 OPTIONS (delimiter ',', quote '"', "be quoted" 'value');
 COMMENT ON FOREIGN TABLE ft1 IS 'ft1';
 COMMENT ON COLUMN ft1.c1 IS 'ft1.c1';
@@ -682,6 +708,9 @@ COMMENT ON COLUMN ft1.c1 IS 'ft1.c1';
  c1     | integer | not null  | ("param 1" 'val1')             | plain    |              | ft1.c1
  c2     | text    |           | (param2 'val2', param3 'val3') | extended |              | 
  c3     | date    |           |                                | plain    |              | 
+Check constraints:
+    "ft1_c2_check" CHECK (c2 <> ''::text)
+    "ft1_c3_check" CHECK (c3 >= '01-01-1994'::date AND c3 <= '01-31-1994'::date)
 Server: s0
 FDW Options: (delimiter ',', quote '"', "be quoted" 'value')
 
@@ -740,6 +769,9 @@ ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 SET STATISTICS -1;
  c8     | text    |           | (p2 'V2')                      | extended |              | 
  c9     | integer |           |                                | plain    |              | 
  c10    | integer |           | (p1 'v1')                      | plain    |              | 
+Check constraints:
+    "ft1_c2_check" CHECK (c2 <> ''::text)
+    "ft1_c3_check" CHECK (c3 >= '01-01-1994'::date AND c3 <= '01-31-1994'::date)
 Server: s0
 FDW Options: (delimiter ',', quote '"', "be quoted" 'value')
 
@@ -748,16 +780,20 @@ CREATE TABLE use_ft1_column_type (x ft1);
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 SET DATA TYPE integer;	-- ERROR
 ERROR:  cannot alter foreign table "ft1" because column "use_ft1_column_type.x" uses its row type
 DROP TABLE use_ft1_column_type;
-ALTER FOREIGN TABLE ft1 ADD CONSTRAINT ft1_c9_check CHECK (c9 < 0); -- ERROR
-ERROR:  constraints are not supported on foreign tables
-LINE 1: ALTER FOREIGN TABLE ft1 ADD CONSTRAINT ft1_c9_check CHECK (c...
+ALTER FOREIGN TABLE ft1 ADD PRIMARY KEY (c7);                   -- ERROR
+ERROR:  primary key constraints are not supported on foreign tables
+LINE 1: ALTER FOREIGN TABLE ft1 ADD PRIMARY KEY (c7);
                                     ^
+ALTER FOREIGN TABLE ft1 ADD CONSTRAINT ft1_c9_check CHECK (c9 < 0) NOT VALID;  -- ERROR
+ERROR:  CHECK constraints on foreign tables cannot be marked NOT VALID
+ALTER FOREIGN TABLE ft1 ADD CONSTRAINT ft1_c9_check CHECK (c9 < 0);
+ALTER FOREIGN TABLE ft1 ALTER CONSTRAINT ft1_c9_check DEFERRABLE; -- ERROR
+ERROR:  "ft1" is not a table
+ALTER FOREIGN TABLE ft1 DROP CONSTRAINT ft1_c9_check;
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT no_const;               -- ERROR
-ERROR:  "ft1" is not a table
+ERROR:  constraint "no_const" of relation "ft1" does not exist
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT IF EXISTS no_const;
-ERROR:  "ft1" is not a table
-ALTER FOREIGN TABLE ft1 DROP CONSTRAINT ft1_c1_check;
-ERROR:  "ft1" is not a table
+NOTICE:  constraint "no_const" of relation "ft1" does not exist, skipping
 ALTER FOREIGN TABLE ft1 SET WITH OIDS;                          -- ERROR
 ERROR:  "ft1" is not a table
 ALTER FOREIGN TABLE ft1 OWNER TO regress_test_role;
@@ -785,6 +821,9 @@ ALTER FOREIGN TABLE foreign_schema.ft1 RENAME TO foreign_table_1;
  c7               | integer |           | (p1 'v1', p2 'v2')
  c8               | text    |           | (p2 'V2')
  c10              | integer |           | (p1 'v1')
+Check constraints:
+    "ft1_c2_check" CHECK (c2 <> ''::text)
+    "ft1_c3_check" CHECK (c3 >= '01-01-1994'::date AND c3 <= '01-31-1994'::date)
 Server: s0
 FDW Options: (quote '~', "be quoted" 'value', escape '@')
 
@@ -896,21 +935,21 @@ SELECT * FROM information_schema.user_mapping_options ORDER BY lower(authorizati
 (7 rows)
 
 SELECT * FROM information_schema.usage_privileges WHERE object_type LIKE 'FOREIGN%' AND object_name IN ('s6', 'foo') ORDER BY 1, 2, 3, 4, 5;
-      grantor      |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
--------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
- foreign_data_user | foreign_data_user     | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | YES
- foreign_data_user | foreign_data_user     | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
- foreign_data_user | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
- foreign_data_user | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+        grantor        |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
+-----------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
+ foreign_data_user     | foreign_data_user     | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | YES
+ foreign_data_user     | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
+ regress_test_indirect | regress_test_indirect | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+ regress_test_indirect | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
 (4 rows)
 
 SELECT * FROM information_schema.role_usage_grants WHERE object_type LIKE 'FOREIGN%' AND object_name IN ('s6', 'foo') ORDER BY 1, 2, 3, 4, 5;
-      grantor      |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
--------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
- foreign_data_user | foreign_data_user     | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | YES
- foreign_data_user | foreign_data_user     | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
- foreign_data_user | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
- foreign_data_user | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+        grantor        |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
+-----------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
+ foreign_data_user     | foreign_data_user     | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | YES
+ foreign_data_user     | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
+ regress_test_indirect | regress_test_indirect | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+ regress_test_indirect | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
 (4 rows)
 
 SELECT * FROM information_schema.foreign_tables ORDER BY 1, 2, 3;
@@ -939,18 +978,20 @@ SELECT * FROM information_schema.user_mapping_options ORDER BY 1, 2, 3, 4;
 (5 rows)
 
 SELECT * FROM information_schema.usage_privileges WHERE object_type LIKE 'FOREIGN%' AND object_name IN ('s6', 'foo') ORDER BY 1, 2, 3, 4, 5;
-      grantor      |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
--------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
- foreign_data_user | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
- foreign_data_user | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
-(2 rows)
+        grantor        |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
+-----------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
+ foreign_data_user     | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
+ regress_test_indirect | regress_test_indirect | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+ regress_test_indirect | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+(3 rows)
 
 SELECT * FROM information_schema.role_usage_grants WHERE object_type LIKE 'FOREIGN%' AND object_name IN ('s6', 'foo') ORDER BY 1, 2, 3, 4, 5;
-      grantor      |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
--------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
- foreign_data_user | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
- foreign_data_user | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
-(2 rows)
+        grantor        |        grantee        | object_catalog | object_schema | object_name |     object_type      | privilege_type | is_grantable 
+-----------------------+-----------------------+----------------+---------------+-------------+----------------------+----------------+--------------
+ foreign_data_user     | regress_test_indirect | regression     |               | foo         | FOREIGN DATA WRAPPER | USAGE          | NO
+ regress_test_indirect | regress_test_indirect | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+ regress_test_indirect | regress_test_role2    | regression     |               | s6          | FOREIGN SERVER       | USAGE          | YES
+(3 rows)
 
 DROP USER MAPPING FOR current_user SERVER t1;
 SET ROLE regress_test_role2;
@@ -1142,8 +1183,8 @@ GRANT USAGE ON FOREIGN SERVER s9 TO regress_test_role;
 CREATE USER MAPPING FOR current_user SERVER s9;
 DROP SERVER s9 CASCADE;
 NOTICE:  drop cascades to 2 other objects
-DETAIL:  drop cascades to user mapping for public
-drop cascades to user mapping for unprivileged_role
+DETAIL:  drop cascades to user mapping for public on server s9
+drop cascades to user mapping for unprivileged_role on server s9
 RESET ROLE;
 CREATE SERVER s9 FOREIGN DATA WRAPPER foo;
 GRANT USAGE ON FOREIGN SERVER s9 TO unprivileged_role;
@@ -1215,14 +1256,14 @@ DROP ROLE regress_test_role;                                -- ERROR
 ERROR:  role "regress_test_role" cannot be dropped because some objects depend on it
 DETAIL:  privileges for server s4
 privileges for foreign-data wrapper foo
-owner of user mapping for regress_test_role
-owner of user mapping for regress_test_role
+owner of user mapping for regress_test_role on server s6
+owner of user mapping for regress_test_role on server s5
 owner of server s5
 owner of server t2
 DROP SERVER s5 CASCADE;
-NOTICE:  drop cascades to user mapping for regress_test_role
+NOTICE:  drop cascades to user mapping for regress_test_role on server s5
 DROP SERVER t1 CASCADE;
-NOTICE:  drop cascades to user mapping for public
+NOTICE:  drop cascades to user mapping for public on server t1
 DROP SERVER t2;
 DROP USER MAPPING FOR regress_test_role SERVER s6;
 -- This test causes some order dependent cascade detail output,
@@ -1233,8 +1274,8 @@ NOTICE:  drop cascades to 5 other objects
 \set VERBOSITY default
 DROP SERVER s8 CASCADE;
 NOTICE:  drop cascades to 2 other objects
-DETAIL:  drop cascades to user mapping for foreign_data_user
-drop cascades to user mapping for public
+DETAIL:  drop cascades to user mapping for foreign_data_user on server s8
+drop cascades to user mapping for public on server s8
 DROP ROLE regress_test_indirect;
 DROP ROLE regress_test_role;
 DROP ROLE unprivileged_role;                                -- ERROR

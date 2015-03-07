@@ -3,7 +3,7 @@
  * pgstatfuncs.c
  *	  Functions for accessing the statistics collector data
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -115,6 +115,7 @@ extern Datum pg_stat_get_xact_function_calls(PG_FUNCTION_ARGS);
 extern Datum pg_stat_get_xact_function_total_time(PG_FUNCTION_ARGS);
 extern Datum pg_stat_get_xact_function_self_time(PG_FUNCTION_ARGS);
 
+extern Datum pg_stat_get_snapshot_timestamp(PG_FUNCTION_ARGS);
 extern Datum pg_stat_clear_snapshot(PG_FUNCTION_ARGS);
 extern Datum pg_stat_reset(PG_FUNCTION_ARGS);
 extern Datum pg_stat_reset_shared(PG_FUNCTION_ARGS);
@@ -1682,6 +1683,13 @@ pg_stat_get_xact_function_self_time(PG_FUNCTION_ARGS)
 }
 
 
+/* Get the timestamp of the current statistics snapshot */
+Datum
+pg_stat_get_snapshot_timestamp(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TIMESTAMPTZ(pgstat_fetch_global()->stats_timestamp);
+}
+
 /* Discard the active statistics snapshot */
 Datum
 pg_stat_clear_snapshot(PG_FUNCTION_ARGS)
@@ -1712,7 +1720,7 @@ pg_stat_reset_shared(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-/* Reset a a single counter in the current database */
+/* Reset a single counter in the current database */
 Datum
 pg_stat_reset_single_table_counters(PG_FUNCTION_ARGS)
 {

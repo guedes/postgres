@@ -10,7 +10,7 @@
  * the location.
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/parsenodes.h
@@ -23,6 +23,7 @@
 #include "nodes/bitmapset.h"
 #include "nodes/primnodes.h"
 #include "nodes/value.h"
+#include "utils/lockwaitpolicy.h"
 
 /* Possible sources of a Query */
 typedef enum QuerySource
@@ -120,6 +121,7 @@ typedef struct Query
 	bool		hasRecursive;	/* WITH RECURSIVE was specified */
 	bool		hasModifyingCTE;	/* has INSERT/UPDATE/DELETE in WITH */
 	bool		hasForUpdate;	/* FOR [KEY] UPDATE/SHARE was specified */
+	bool		hasRowSecurity;	/* row security applied? */
 
 	List	   *cteList;		/* WITH list (of CommonTableExpr's) */
 
@@ -230,7 +232,14 @@ typedef enum A_Expr_Kind
 	AEXPR_DISTINCT,				/* IS DISTINCT FROM - name must be "=" */
 	AEXPR_NULLIF,				/* NULLIF - name must be "=" */
 	AEXPR_OF,					/* IS [NOT] OF - name must be "=" or "<>" */
-	AEXPR_IN					/* [NOT] IN - name must be "=" or "<>" */
+	AEXPR_IN,					/* [NOT] IN - name must be "=" or "<>" */
+	AEXPR_LIKE,					/* [NOT] LIKE - name must be "~~" or "!~~" */
+	AEXPR_ILIKE,				/* [NOT] ILIKE - name must be "~~*" or "!~~*" */
+	AEXPR_SIMILAR,				/* [NOT] SIMILAR - name must be "~" or "!~" */
+	AEXPR_BETWEEN,				/* name must be "BETWEEN" */
+	AEXPR_NOT_BETWEEN,			/* name must be "NOT BETWEEN" */
+	AEXPR_BETWEEN_SYM,			/* name must be "BETWEEN SYMMETRIC" */
+	AEXPR_NOT_BETWEEN_SYM		/* name must be "NOT BETWEEN SYMMETRIC" */
 } A_Expr_Kind;
 
 typedef struct A_Expr
@@ -630,7 +639,7 @@ typedef struct LockingClause
 	NodeTag		type;
 	List	   *lockedRels;		/* FOR [KEY] UPDATE/SHARE relations */
 	LockClauseStrength strength;
-	bool		noWait;			/* NOWAIT option */
+	LockWaitPolicy	waitPolicy;	/* NOWAIT and SKIP LOCKED */
 } LockingClause;
 
 /*
@@ -975,7 +984,7 @@ typedef struct RowMarkClause
 	NodeTag		type;
 	Index		rti;			/* range table index of target relation */
 	LockClauseStrength strength;
-	bool		noWait;			/* NOWAIT option */
+	LockWaitPolicy waitPolicy;	/* NOWAIT and SKIP LOCKED */
 	bool		pushedDown;		/* pushed down from higher query level? */
 } RowMarkClause;
 
@@ -1206,11 +1215,12 @@ typedef enum ObjectType
 	OBJECT_ATTRIBUTE,			/* type's attribute, when distinct from column */
 	OBJECT_CAST,
 	OBJECT_COLUMN,
-	OBJECT_CONSTRAINT,
 	OBJECT_COLLATION,
 	OBJECT_CONVERSION,
 	OBJECT_DATABASE,
+	OBJECT_DEFAULT,
 	OBJECT_DOMAIN,
+	OBJECT_DOMCONSTRAINT,
 	OBJECT_EVENT_TRIGGER,
 	OBJECT_EXTENSION,
 	OBJECT_FDW,
@@ -1224,10 +1234,12 @@ typedef enum ObjectType
 	OBJECT_OPCLASS,
 	OBJECT_OPERATOR,
 	OBJECT_OPFAMILY,
+	OBJECT_POLICY,
 	OBJECT_ROLE,
 	OBJECT_RULE,
 	OBJECT_SCHEMA,
 	OBJECT_SEQUENCE,
+	OBJECT_TABCONSTRAINT,
 	OBJECT_TABLE,
 	OBJECT_TABLESPACE,
 	OBJECT_TRIGGER,
@@ -1307,6 +1319,8 @@ typedef enum AlterTableType
 	AT_ChangeOwner,				/* change owner */
 	AT_ClusterOn,				/* CLUSTER ON */
 	AT_DropCluster,				/* SET WITHOUT CLUSTER */
+	AT_SetLogged,				/* SET LOGGED */
+	AT_SetUnLogged,				/* SET UNLOGGED */
 	AT_AddOids,					/* SET WITH OIDS */
 	AT_AddOidsRecurse,			/* internal to commands/tablecmds.c */
 	AT_DropOids,				/* SET WITHOUT OIDS */
@@ -1331,6 +1345,8 @@ typedef enum AlterTableType
 	AT_AddOf,					/* OF <type_name> */
 	AT_DropOf,					/* NOT OF */
 	AT_ReplicaIdentity,			/* REPLICA IDENTITY */
+	AT_EnableRowSecurity,		/* ENABLE ROW SECURITY */
+	AT_DisableRowSecurity,		/* DISABLE ROW SECURITY */
 	AT_GenericOptions			/* OPTIONS (...) */
 } AlterTableType;
 
@@ -1703,16 +1719,15 @@ typedef struct AlterTableSpaceOptionsStmt
 	bool		isReset;
 } AlterTableSpaceOptionsStmt;
 
-typedef struct AlterTableSpaceMoveStmt
+typedef struct AlterTableMoveAllStmt
 {
 	NodeTag		type;
 	char	   *orig_tablespacename;
-	ObjectType	objtype;		/* set to -1 if move_all is true */
-	bool		move_all;		/* move all, or just objtype objects? */
+	ObjectType	objtype;		/* Object type to move */
 	List	   *roles;			/* List of roles to move objects of */
 	char	   *new_tablespacename;
 	bool		nowait;
-} AlterTableSpaceMoveStmt;
+} AlterTableMoveAllStmt;
 
 /* ----------------------
  *		Create/Alter Extension Statements
@@ -1854,6 +1869,35 @@ typedef struct ImportForeignSchemaStmt
 	List	   *options;		/* list of options to pass to FDW */
 } ImportForeignSchemaStmt;
 
+/*----------------------
+ *		Create POLICY Statement
+ *----------------------
+ */
+typedef struct CreatePolicyStmt
+{
+	NodeTag		type;
+	char	   *policy_name;	/* Policy's name */
+	RangeVar   *table;			/* the table name the policy applies to */
+	char	   *cmd;			/* the command name the policy applies to */
+	List	   *roles;			/* the roles associated with the policy */
+	Node	   *qual;			/* the policy's condition */
+	Node	   *with_check;		/* the policy's WITH CHECK condition. */
+} CreatePolicyStmt;
+
+/*----------------------
+ *		Alter POLICY Statement
+ *----------------------
+ */
+typedef struct AlterPolicyStmt
+{
+	NodeTag		type;
+	char	   *policy_name;	/* Policy's name */
+	RangeVar   *table;			/* the table name the policy applies to */
+	List	   *roles;			/* the roles associated with the policy */
+	Node	   *qual;			/* the policy's condition */
+	Node	   *with_check;		/* the policy's WITH CHECK condition. */
+} AlterPolicyStmt;
+
 /* ----------------------
  *		Create TRIGGER Statement
  * ----------------------
@@ -1978,6 +2022,7 @@ typedef struct CreateSeqStmt
 	RangeVar   *sequence;		/* the sequence to create */
 	List	   *options;
 	Oid			ownerId;		/* ID of owner, or InvalidOid for default */
+	bool		if_not_exists;	/* just do nothing if it already exists? */
 } CreateSeqStmt;
 
 typedef struct AlterSeqStmt
@@ -2219,7 +2264,9 @@ typedef struct IndexStmt
 	bool		isconstraint;	/* is it for a pkey/unique constraint? */
 	bool		deferrable;		/* is the constraint DEFERRABLE? */
 	bool		initdeferred;	/* is the constraint INITIALLY DEFERRED? */
+	bool		transformed;	/* true when transformIndexStmt is finished */
 	bool		concurrent;		/* should this be a concurrent index build? */
+	bool		if_not_exists;	/* just do nothing if index already exists? */
 } IndexStmt;
 
 /* ----------------------
@@ -2615,6 +2662,7 @@ typedef struct CreateTableAsStmt
 	IntoClause *into;			/* destination table */
 	ObjectType	relkind;		/* OBJECT_TABLE or OBJECT_MATVIEW */
 	bool		is_select_into; /* it was written as SELECT INTO */
+	bool		if_not_exists;	/* just do nothing if it already exists? */
 } CreateTableAsStmt;
 
 /* ----------------------
@@ -2684,14 +2732,21 @@ typedef struct ConstraintsSetStmt
  *		REINDEX Statement
  * ----------------------
  */
+typedef enum ReindexObjectType
+{
+	REINDEX_OBJECT_INDEX,	/* index */
+	REINDEX_OBJECT_TABLE,	/* table or materialized view */
+	REINDEX_OBJECT_SCHEMA,	/* schema */
+	REINDEX_OBJECT_SYSTEM,	/* system catalogs */
+	REINDEX_OBJECT_DATABASE	/* database */
+} ReindexObjectType;
+
 typedef struct ReindexStmt
 {
 	NodeTag		type;
-	ObjectType	kind;			/* OBJECT_INDEX, OBJECT_TABLE, etc. */
+	ReindexObjectType	kind;	/* REINDEX_OBJECT_INDEX, REINDEX_OBJECT_TABLE, etc. */
 	RangeVar   *relation;		/* Table or index to reindex */
 	const char *name;			/* name of database to reindex */
-	bool		do_system;		/* include system tables in database case */
-	bool		do_user;		/* include user tables in database case */
 } ReindexStmt;
 
 /* ----------------------

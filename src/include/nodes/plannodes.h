@@ -4,7 +4,7 @@
  *	  definitions for query plan nodes
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/plannodes.h
@@ -15,8 +15,10 @@
 #define PLANNODES_H
 
 #include "access/sdir.h"
+#include "lib/stringinfo.h"
 #include "nodes/bitmapset.h"
 #include "nodes/primnodes.h"
+#include "utils/lockwaitpolicy.h"
 
 
 /* ----------------------------------------------------------------
@@ -67,6 +69,9 @@ typedef struct PlannedStmt
 	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
 
 	int			nParamExec;		/* number of PARAM_EXEC Params used */
+
+	bool		hasRowSecurity; /* row security applied? */
+
 } PlannedStmt;
 
 /* macro for fetching the Plan associated with a SubPlan node */
@@ -169,6 +174,7 @@ typedef struct ModifyTable
 	Plan		plan;
 	CmdType		operation;		/* INSERT, UPDATE, or DELETE */
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
+	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
 	List	   *resultRelations;	/* integer list of RT indexes */
 	int			resultRelIndex; /* index of first resultRel in plan's list */
 	List	   *plans;			/* plan(s) producing source data */
@@ -479,6 +485,36 @@ typedef struct ForeignScan
 	bool		fsSystemCol;	/* true if any "system column" is needed */
 } ForeignScan;
 
+/* ----------------
+ *	   CustomScan node
+ *
+ * The comments for ForeignScan's fdw_exprs and fdw_private fields apply
+ * equally to custom_exprs and custom_private.  Note that since Plan trees
+ * can be copied, custom scan providers *must* fit all plan data they need
+ * into those fields; embedding CustomScan in a larger struct will not work.
+ * ----------------
+ */
+struct CustomScan;
+
+typedef struct CustomScanMethods
+{
+	const char *CustomName;
+
+	/* Create execution state (CustomScanState) from a CustomScan plan node */
+	Node	   *(*CreateCustomScanState) (struct CustomScan *cscan);
+	/* Optional: print custom_xxx fields in some special way */
+	void		(*TextOutCustomScan) (StringInfo str,
+											  const struct CustomScan *node);
+} CustomScanMethods;
+
+typedef struct CustomScan
+{
+	Scan		scan;
+	uint32		flags;			/* mask of CUSTOMPATH_* flags, see relation.h */
+	List	   *custom_exprs;	/* expressions that custom code may evaluate */
+	List	   *custom_private; /* private data for custom code */
+	const CustomScanMethods *methods;
+} CustomScan;
 
 /*
  * ==========
@@ -831,7 +867,7 @@ typedef struct PlanRowMark
 	Index		prti;			/* range table index of parent relation */
 	Index		rowmarkId;		/* unique identifier for resjunk columns */
 	RowMarkType markType;		/* see enum above */
-	bool		noWait;			/* NOWAIT option */
+	LockWaitPolicy waitPolicy;	/* NOWAIT and SKIP LOCKED options */
 	bool		isParent;		/* true if this is a "dummy" parent entry */
 } PlanRowMark;
 

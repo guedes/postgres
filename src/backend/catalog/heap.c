@@ -3,7 +3,7 @@
  * heap.c
  *	  code to create and destroy POSTGRES heap relations
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -34,6 +34,7 @@
 #include "access/sysattr.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
@@ -69,6 +70,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
@@ -87,7 +89,7 @@ static void AddNewRelationTuple(Relation pg_class_desc,
 					char relkind,
 					Datum relacl,
 					Datum reloptions);
-static Oid AddNewRelationType(const char *typeName,
+static ObjectAddress AddNewRelationType(const char *typeName,
 				   Oid typeNamespace,
 				   Oid new_rel_oid,
 				   char new_rel_kind,
@@ -799,6 +801,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relhaspkey - 1] = BoolGetDatum(rd_rel->relhaspkey);
 	values[Anum_pg_class_relhasrules - 1] = BoolGetDatum(rd_rel->relhasrules);
 	values[Anum_pg_class_relhastriggers - 1] = BoolGetDatum(rd_rel->relhastriggers);
+	values[Anum_pg_class_relrowsecurity - 1] = BoolGetDatum(rd_rel->relrowsecurity);
 	values[Anum_pg_class_relhassubclass - 1] = BoolGetDatum(rd_rel->relhassubclass);
 	values[Anum_pg_class_relispopulated - 1] = BoolGetDatum(rd_rel->relispopulated);
 	values[Anum_pg_class_relreplident - 1] = CharGetDatum(rd_rel->relreplident);
@@ -932,7 +935,7 @@ AddNewRelationTuple(Relation pg_class_desc,
  *		define a composite type corresponding to the new relation
  * --------------------------------
  */
-static Oid
+static ObjectAddress
 AddNewRelationType(const char *typeName,
 				   Oid typeNamespace,
 				   Oid new_rel_oid,
@@ -1001,6 +1004,10 @@ AddNewRelationType(const char *typeName,
  *	use_user_acl: TRUE if should look for user-defined default permissions;
  *		if FALSE, relacl is always set NULL
  *	allow_system_table_mods: TRUE to allow creation in system namespaces
+ *	is_internal: is this a system-generated catalog?
+ *
+ * Output parameters:
+ *	typaddress: if not null, gets the object address of the new pg_type entry
  *
  * Returns the OID of the new relation
  * --------------------------------
@@ -1025,7 +1032,8 @@ heap_create_with_catalog(const char *relname,
 						 Datum reloptions,
 						 bool use_user_acl,
 						 bool allow_system_table_mods,
-						 bool is_internal)
+						 bool is_internal,
+						 ObjectAddress *typaddress)
 {
 	Relation	pg_class_desc;
 	Relation	new_rel_desc;
@@ -1033,6 +1041,7 @@ heap_create_with_catalog(const char *relname,
 	Oid			existing_relid;
 	Oid			old_type_oid;
 	Oid			new_type_oid;
+	ObjectAddress new_type_addr;
 	Oid			new_array_oid = InvalidOid;
 
 	pg_class_desc = heap_open(RelationRelationId, RowExclusiveLock);
@@ -1088,19 +1097,21 @@ heap_create_with_catalog(const char *relname,
 	 */
 	if (!OidIsValid(relid))
 	{
-		/*
-		 * Use binary-upgrade override for pg_class.oid/relfilenode, if
-		 * supplied.
-		 */
+		/* Use binary-upgrade override for pg_class.oid/relfilenode? */
 		if (IsBinaryUpgrade &&
-			OidIsValid(binary_upgrade_next_heap_pg_class_oid) &&
 			(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE ||
 			 relkind == RELKIND_VIEW || relkind == RELKIND_MATVIEW ||
 			 relkind == RELKIND_COMPOSITE_TYPE || relkind == RELKIND_FOREIGN_TABLE))
 		{
+			if (!OidIsValid(binary_upgrade_next_heap_pg_class_oid))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("pg_class heap OID value not set when in binary upgrade mode")));
+
 			relid = binary_upgrade_next_heap_pg_class_oid;
 			binary_upgrade_next_heap_pg_class_oid = InvalidOid;
 		}
+		/* There might be no TOAST table, so we have to test for it. */
 		else if (IsBinaryUpgrade &&
 				 OidIsValid(binary_upgrade_next_toast_pg_class_oid) &&
 				 relkind == RELKIND_TOASTVALUE)
@@ -1181,13 +1192,16 @@ heap_create_with_catalog(const char *relname,
 	 * creating the same type name in parallel but hadn't committed yet when
 	 * we checked for a duplicate name above.
 	 */
-	new_type_oid = AddNewRelationType(relname,
-									  relnamespace,
-									  relid,
-									  relkind,
-									  ownerid,
-									  reltypeid,
-									  new_array_oid);
+	new_type_addr = AddNewRelationType(relname,
+									   relnamespace,
+									   relid,
+									   relkind,
+									   ownerid,
+									   reltypeid,
+									   new_array_oid);
+	new_type_oid = new_type_addr.objectId;
+	if (typaddress)
+		*typaddress = new_type_addr;
 
 	/*
 	 * Now make the array type if wanted.
@@ -2238,6 +2252,13 @@ AddRelationNewConstraints(Relation rel,
 			 */
 			expr = stringToNode(cdef->cooked_expr);
 		}
+
+		/* Don't allow NOT VALID for foreign tables */
+		if (cdef->skip_validation &&
+			rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("CHECK constraints on foreign tables cannot be marked NOT VALID")));
 
 		/*
 		 * Check name uniqueness, or generate a name if none was given.

@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2014, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2015, PostgreSQL Global Development Group
  *
  * src/bin/psql/common.h
  */
@@ -11,6 +11,8 @@
 #include "postgres_fe.h"
 #include <setjmp.h>
 #include "libpq-fe.h"
+
+#include "print.h"
 
 #define atooid(x)  ((Oid) strtoul((x), NULL, 10))
 
@@ -36,7 +38,8 @@ extern void setup_cancel_handler(void);
 extern void SetCancelConn(void);
 extern void ResetCancelConn(void);
 
-extern PGresult *PSQLexec(const char *query, bool start_xact);
+extern PGresult *PSQLexec(const char *query);
+extern int PSQLexecWatch(const char *query, const printQueryOpt *opt);
 
 extern bool SendQuery(const char *query);
 

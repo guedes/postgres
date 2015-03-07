@@ -4,7 +4,7 @@
  *	  Post-processing of a completed plan tree: fix references to subplan
  *	  vars, compute regproc values for operators, etc
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -41,9 +41,8 @@ typedef struct
 	int			num_vars;		/* number of plain Var tlist entries */
 	bool		has_ph_vars;	/* are there PlaceHolderVar entries? */
 	bool		has_non_vars;	/* are there other entries? */
-	/* array of num_vars entries: */
-	tlist_vinfo vars[1];		/* VARIABLE LENGTH ARRAY */
-} indexed_tlist;				/* VARIABLE LENGTH STRUCT */
+	tlist_vinfo vars[FLEXIBLE_ARRAY_MEMBER];	/* has num_vars entries */
+} indexed_tlist;
 
 typedef struct
 {
@@ -579,6 +578,20 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			}
 			break;
 
+		case T_CustomScan:
+			{
+				CustomScan *splan = (CustomScan *) plan;
+
+				splan->scan.scanrelid += rtoffset;
+				splan->scan.plan.targetlist =
+					fix_scan_list(root, splan->scan.plan.targetlist, rtoffset);
+				splan->scan.plan.qual =
+					fix_scan_list(root, splan->scan.plan.qual, rtoffset);
+				splan->custom_exprs =
+					fix_scan_list(root, splan->custom_exprs, rtoffset);
+			}
+			break;
+
 		case T_NestLoop:
 		case T_MergeJoin:
 		case T_HashJoin:
@@ -696,6 +709,9 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				Assert(splan->plan.targetlist == NIL);
 				Assert(splan->plan.qual == NIL);
 
+				splan->withCheckOptionLists =
+					fix_scan_list(root, splan->withCheckOptionLists, rtoffset);
+
 				if (splan->returningLists)
 				{
 					List	   *newRL = NIL;
@@ -736,6 +752,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 					 */
 					splan->plan.targetlist = copyObject(linitial(newRL));
 				}
+
+				splan->nominalRelation += rtoffset;
 
 				foreach(l, splan->resultRelations)
 				{
@@ -2081,7 +2099,8 @@ record_plan_function_dependency(PlannerInfo *root, Oid funcid)
 void
 extract_query_dependencies(Node *query,
 						   List **relationOids,
-						   List **invalItems)
+						   List **invalItems,
+						   bool *hasRowSecurity)
 {
 	PlannerGlobal glob;
 	PlannerInfo root;
@@ -2091,6 +2110,7 @@ extract_query_dependencies(Node *query,
 	glob.type = T_PlannerGlobal;
 	glob.relationOids = NIL;
 	glob.invalItems = NIL;
+	glob.hasRowSecurity = false;
 
 	MemSet(&root, 0, sizeof(root));
 	root.type = T_PlannerInfo;
@@ -2100,6 +2120,7 @@ extract_query_dependencies(Node *query,
 
 	*relationOids = glob.relationOids;
 	*invalItems = glob.invalItems;
+	*hasRowSecurity = glob.hasRowSecurity;
 }
 
 static bool
@@ -2114,6 +2135,9 @@ extract_query_dependencies_walker(Node *node, PlannerInfo *context)
 	{
 		Query	   *query = (Query *) node;
 		ListCell   *lc;
+
+		/* Collect row security information */
+		context->glob->hasRowSecurity = query->hasRowSecurity;
 
 		if (query->commandType == CMD_UTILITY)
 		{

@@ -3,7 +3,7 @@
  * planner.c
  *	  The query optimizer external interface.
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -177,6 +177,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	glob->lastPHId = 0;
 	glob->lastRowMarkId = 0;
 	glob->transientPlan = false;
+	glob->hasRowSecurity = false;
 
 	/* Determine what fraction of the plan is likely to be scanned */
 	if (cursorOptions & CURSOR_OPT_FAST_PLAN)
@@ -254,6 +255,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	result->relationOids = glob->relationOids;
 	result->invalItems = glob->invalItems;
 	result->nParamExec = glob->nParamExec;
+	result->hasRowSecurity = glob->hasRowSecurity;
 
 	return result;
 }
@@ -605,6 +607,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 			plan = (Plan *) make_modifytable(root,
 											 parse->commandType,
 											 parse->canSetTag,
+											 parse->resultRelation,
 									   list_make1_int(parse->resultRelation),
 											 list_make1(plan),
 											 withCheckOptionLists,
@@ -788,6 +791,7 @@ inheritance_planner(PlannerInfo *root)
 {
 	Query	   *parse = root->parse;
 	int			parentRTindex = parse->resultRelation;
+	int			nominalRelation = -1;
 	List	   *final_rtable = NIL;
 	int			save_rel_array_size = 0;
 	RelOptInfo **save_rel_array = NULL;
@@ -923,6 +927,20 @@ inheritance_planner(PlannerInfo *root)
 		appinfo->child_relid = subroot.parse->resultRelation;
 
 		/*
+		 * We'll use the first child relation (even if it's excluded) as the
+		 * nominal target relation of the ModifyTable node.  Because of the
+		 * way expand_inherited_rtentry works, this should always be the RTE
+		 * representing the parent table in its role as a simple member of the
+		 * inheritance set.  (It would be logically cleaner to use the
+		 * inheritance parent RTE as the nominal target; but since that RTE
+		 * will not be otherwise referenced in the plan, doing so would give
+		 * rise to confusing use of multiple aliases in EXPLAIN output for
+		 * what the user will think is the "same" table.)
+		 */
+		if (nominalRelation < 0)
+			nominalRelation = appinfo->child_relid;
+
+		/*
 		 * If this child rel was excluded by constraint exclusion, exclude it
 		 * from the result plan.
 		 */
@@ -1049,6 +1067,7 @@ inheritance_planner(PlannerInfo *root)
 	return (Plan *) make_modifytable(root,
 									 parse->commandType,
 									 parse->canSetTag,
+									 nominalRelation,
 									 resultRelations,
 									 subplans,
 									 withCheckOptionLists,
@@ -1206,6 +1225,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		 * This may add new security barrier subquery RTEs to the rangetable.
 		 */
 		expand_security_quals(root, tlist);
+		root->glob->hasRowSecurity = parse->hasRowSecurity;
 
 		/*
 		 * Locate any window functions in the tlist.  (We don't need to look
@@ -2229,7 +2249,7 @@ preprocess_rowmarks(PlannerInfo *root)
 				newrc->markType = ROW_MARK_KEYSHARE;
 				break;
 		}
-		newrc->noWait = rc->noWait;
+		newrc->waitPolicy = rc->waitPolicy;
 		newrc->isParent = false;
 
 		prowmarks = lappend(prowmarks, newrc);
@@ -2257,7 +2277,7 @@ preprocess_rowmarks(PlannerInfo *root)
 			newrc->markType = ROW_MARK_REFERENCE;
 		else
 			newrc->markType = ROW_MARK_COPY;
-		newrc->noWait = false;	/* doesn't matter */
+		newrc->waitPolicy = LockWaitBlock;		/* doesn't matter */
 		newrc->isParent = false;
 
 		prowmarks = lappend(prowmarks, newrc);
@@ -2335,7 +2355,7 @@ preprocess_limit(PlannerInfo *root, double tuple_fraction,
 			{
 				*offset_est = DatumGetInt64(((Const *) est)->constvalue);
 				if (*offset_est < 0)
-					*offset_est = 0;	/* less than 0 is same as 0 */
+					*offset_est = 0;	/* treat as not present */
 			}
 		}
 		else
@@ -2496,9 +2516,8 @@ limit_needed(Query *parse)
 			{
 				int64		offset = DatumGetInt64(((Const *) node)->constvalue);
 
-				/* Executor would treat less-than-zero same as zero */
-				if (offset > 0)
-					return true;	/* OFFSET with a positive value */
+				if (offset != 0)
+					return true;	/* OFFSET with a nonzero value */
 			}
 		}
 		else
@@ -2736,7 +2755,7 @@ choose_hashed_grouping(PlannerInfo *root,
 	 */
 
 	/* Estimate per-hash-entry space at tuple width... */
-	hashentrysize = MAXALIGN(path_width) + MAXALIGN(sizeof(MinimalTupleData));
+	hashentrysize = MAXALIGN(path_width) + MAXALIGN(SizeofMinimalTupleHeader);
 	/* plus space for pass-by-ref transition values... */
 	hashentrysize += agg_costs->transitionSpace;
 	/* plus the per-hash-entry overhead */
@@ -2904,7 +2923,7 @@ choose_hashed_distinct(PlannerInfo *root,
 	 */
 
 	/* Estimate per-hash-entry space at tuple width... */
-	hashentrysize = MAXALIGN(path_width) + MAXALIGN(sizeof(MinimalTupleData));
+	hashentrysize = MAXALIGN(path_width) + MAXALIGN(SizeofMinimalTupleHeader);
 	/* plus the per-hash-entry overhead */
 	hashentrysize += hash_agg_entry_size(0);
 

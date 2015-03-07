@@ -3,7 +3,7 @@
  * user.c
  *	  Commands for manipulating roles (formerly called users).
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/commands/user.c
@@ -87,6 +87,7 @@ CreateRole(CreateRoleStmt *stmt)
 	bool		createdb = false;		/* Can the user create databases? */
 	bool		canlogin = false;		/* Can this user login? */
 	bool		isreplication = false;	/* Is this a replication role? */
+	bool		bypassrls = false;		/* Is this a row security enabled role? */
 	int			connlimit = -1; /* maximum connections allowed */
 	List	   *addroleto = NIL;	/* roles to make this a member of */
 	List	   *rolemembers = NIL;		/* roles to be members of this role */
@@ -106,6 +107,7 @@ CreateRole(CreateRoleStmt *stmt)
 	DefElem    *drolemembers = NULL;
 	DefElem    *dadminmembers = NULL;
 	DefElem    *dvalidUntil = NULL;
+	DefElem    *dbypassRLS = NULL;
 
 	/* The defaults can vary depending on the original statement type */
 	switch (stmt->stmt_type)
@@ -232,6 +234,14 @@ CreateRole(CreateRoleStmt *stmt)
 						 errmsg("conflicting or redundant options")));
 			dvalidUntil = defel;
 		}
+		else if (strcmp(defel->defname, "bypassrls") == 0)
+		{
+			if (dbypassRLS)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options")));
+			dbypassRLS = defel;
+		}
 		else
 			elog(ERROR, "option \"%s\" not recognized",
 				 defel->defname);
@@ -267,6 +277,8 @@ CreateRole(CreateRoleStmt *stmt)
 		adminmembers = (List *) dadminmembers->arg;
 	if (dvalidUntil)
 		validUntil = strVal(dvalidUntil->arg);
+	if (dbypassRLS)
+		bypassrls = intVal(dbypassRLS->arg) != 0;
 
 	/* Check some permissions first */
 	if (issuper)
@@ -282,6 +294,13 @@ CreateRole(CreateRoleStmt *stmt)
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				   errmsg("must be superuser to create replication users")));
+	}
+	else if (bypassrls)
+	{
+		if (!superuser())
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser to change bypassrls attribute.")));
 	}
 	else
 	{
@@ -349,8 +368,6 @@ CreateRole(CreateRoleStmt *stmt)
 	new_record[Anum_pg_authid_rolinherit - 1] = BoolGetDatum(inherit);
 	new_record[Anum_pg_authid_rolcreaterole - 1] = BoolGetDatum(createrole);
 	new_record[Anum_pg_authid_rolcreatedb - 1] = BoolGetDatum(createdb);
-	/* superuser gets catupdate right by default */
-	new_record[Anum_pg_authid_rolcatupdate - 1] = BoolGetDatum(issuper);
 	new_record[Anum_pg_authid_rolcanlogin - 1] = BoolGetDatum(canlogin);
 	new_record[Anum_pg_authid_rolreplication - 1] = BoolGetDatum(isreplication);
 	new_record[Anum_pg_authid_rolconnlimit - 1] = Int32GetDatum(connlimit);
@@ -375,14 +392,21 @@ CreateRole(CreateRoleStmt *stmt)
 	new_record[Anum_pg_authid_rolvaliduntil - 1] = validUntil_datum;
 	new_record_nulls[Anum_pg_authid_rolvaliduntil - 1] = validUntil_null;
 
+	new_record[Anum_pg_authid_rolbypassrls - 1] = BoolGetDatum(bypassrls);
+
 	tuple = heap_form_tuple(pg_authid_dsc, new_record, new_record_nulls);
 
 	/*
 	 * pg_largeobject_metadata contains pg_authid.oid's, so we use the
-	 * binary-upgrade override, if specified.
+	 * binary-upgrade override.
 	 */
-	if (IsBinaryUpgrade && OidIsValid(binary_upgrade_next_pg_authid_oid))
+	if (IsBinaryUpgrade)
 	{
+		if (!OidIsValid(binary_upgrade_next_pg_authid_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("pg_authid OID value not set when in binary upgrade mode")));
+
 		HeapTupleSetOid(tuple, binary_upgrade_next_pg_authid_oid);
 		binary_upgrade_next_pg_authid_oid = InvalidOid;
 	}
@@ -469,6 +493,7 @@ AlterRole(AlterRoleStmt *stmt)
 	char	   *validUntil = NULL;		/* time the login is valid until */
 	Datum		validUntil_datum;		/* same, as timestamptz Datum */
 	bool		validUntil_null;
+	bool		bypassrls = -1;
 	DefElem    *dpassword = NULL;
 	DefElem    *dissuper = NULL;
 	DefElem    *dinherit = NULL;
@@ -479,6 +504,7 @@ AlterRole(AlterRoleStmt *stmt)
 	DefElem    *dconnlimit = NULL;
 	DefElem    *drolemembers = NULL;
 	DefElem    *dvalidUntil = NULL;
+	DefElem    *dbypassRLS = NULL;
 	Oid			roleid;
 
 	/* Extract options from the statement node tree */
@@ -573,6 +599,14 @@ AlterRole(AlterRoleStmt *stmt)
 						 errmsg("conflicting or redundant options")));
 			dvalidUntil = defel;
 		}
+		else if (strcmp(defel->defname, "bypassrls") == 0)
+		{
+			if (dbypassRLS)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options")));
+			dbypassRLS = defel;
+		}
 		else
 			elog(ERROR, "option \"%s\" not recognized",
 				 defel->defname);
@@ -604,6 +638,8 @@ AlterRole(AlterRoleStmt *stmt)
 		rolemembers = (List *) drolemembers->arg;
 	if (dvalidUntil)
 		validUntil = strVal(dvalidUntil->arg);
+	if (dbypassRLS)
+		bypassrls = intVal(dbypassRLS->arg);
 
 	/*
 	 * Scan the pg_authid relation to be certain the user exists.
@@ -636,6 +672,13 @@ AlterRole(AlterRoleStmt *stmt)
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 					 errmsg("must be superuser to alter replication users")));
+	}
+	else if (((Form_pg_authid) GETSTRUCT(tuple))->rolbypassrls || bypassrls >= 0)
+	{
+		if (!superuser())
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser to change bypassrls attribute")));
 	}
 	else if (!have_createrole_privilege())
 	{
@@ -689,20 +732,12 @@ AlterRole(AlterRoleStmt *stmt)
 	MemSet(new_record_repl, false, sizeof(new_record_repl));
 
 	/*
-	 * issuper/createrole/catupdate/etc
-	 *
-	 * XXX It's rather unclear how to handle catupdate.  It's probably best to
-	 * keep it equal to the superuser status, otherwise you could end up with
-	 * a situation where no existing superuser can alter the catalogs,
-	 * including pg_authid!
+	 * issuper/createrole/etc
 	 */
 	if (issuper >= 0)
 	{
 		new_record[Anum_pg_authid_rolsuper - 1] = BoolGetDatum(issuper > 0);
 		new_record_repl[Anum_pg_authid_rolsuper - 1] = true;
-
-		new_record[Anum_pg_authid_rolcatupdate - 1] = BoolGetDatum(issuper > 0);
-		new_record_repl[Anum_pg_authid_rolcatupdate - 1] = true;
 	}
 
 	if (inherit >= 0)
@@ -769,6 +804,12 @@ AlterRole(AlterRoleStmt *stmt)
 	new_record[Anum_pg_authid_rolvaliduntil - 1] = validUntil_datum;
 	new_record_nulls[Anum_pg_authid_rolvaliduntil - 1] = validUntil_null;
 	new_record_repl[Anum_pg_authid_rolvaliduntil - 1] = true;
+
+	if (bypassrls >= 0)
+	{
+		new_record[Anum_pg_authid_rolbypassrls - 1] = BoolGetDatum(bypassrls > 0);
+		new_record_repl[Anum_pg_authid_rolbypassrls - 1] = true;
+	}
 
 	new_tuple = heap_modify_tuple(tuple, pg_authid_dsc, new_record,
 								  new_record_nulls, new_record_repl);
@@ -1063,7 +1104,7 @@ DropRole(DropRoleStmt *stmt)
 /*
  * Rename role
  */
-Oid
+ObjectAddress
 RenameRole(const char *oldname, const char *newname)
 {
 	HeapTuple	oldtuple,
@@ -1077,6 +1118,7 @@ RenameRole(const char *oldname, const char *newname)
 	bool		repl_repl[Natts_pg_authid];
 	int			i;
 	Oid			roleid;
+	ObjectAddress address;
 
 	rel = heap_open(AuthIdRelationId, RowExclusiveLock);
 	dsc = RelationGetDescr(rel);
@@ -1165,6 +1207,8 @@ RenameRole(const char *oldname, const char *newname)
 
 	InvokeObjectPostAlterHook(AuthIdRelationId, roleid, 0);
 
+	ObjectAddressSet(address, AuthIdRelationId, roleid);
+
 	ReleaseSysCache(oldtuple);
 
 	/*
@@ -1172,7 +1216,7 @@ RenameRole(const char *oldname, const char *newname)
 	 */
 	heap_close(rel, NoLock);
 
-	return roleid;
+	return address;
 }
 
 /*

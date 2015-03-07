@@ -3,7 +3,7 @@
  * parse_clause.c
  *	  handle clauses in parser
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -339,10 +339,11 @@ transformJoinUsingClause(ParseState *pstate,
 
 	/*
 	 * We cheat a little bit here by building an untransformed operator tree
-	 * whose leaves are the already-transformed Vars.  This is OK because
-	 * transformExpr() won't complain about already-transformed subnodes.
-	 * However, this does mean that we have to mark the columns as requiring
-	 * SELECT privilege for ourselves; transformExpr() won't do it.
+	 * whose leaves are the already-transformed Vars.  This requires collusion
+	 * from transformExpr(), which normally could be expected to complain
+	 * about already-transformed subnodes.  However, this does mean that we
+	 * have to mark the columns as requiring SELECT privilege for ourselves;
+	 * transformExpr() won't do it.
 	 */
 	forboth(lvars, leftVars, rvars, rightVars)
 	{

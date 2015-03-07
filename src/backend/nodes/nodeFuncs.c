@@ -3,7 +3,7 @@
  * nodeFuncs.c
  *		Various general-purpose manipulations of Node trees
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -108,7 +108,7 @@ exprType(const Node *expr)
 					type = exprType((Node *) tent->expr);
 					if (sublink->subLinkType == ARRAY_SUBLINK)
 					{
-						type = get_array_type(type);
+						type = get_promoted_array_type(type);
 						if (!OidIsValid(type))
 							ereport(ERROR,
 									(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -139,7 +139,7 @@ exprType(const Node *expr)
 					type = subplan->firstColType;
 					if (subplan->subLinkType == ARRAY_SUBLINK)
 					{
-						type = get_array_type(type);
+						type = get_promoted_array_type(type);
 						if (!OidIsValid(type))
 							ereport(ERROR,
 									(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -1346,12 +1346,22 @@ exprLocation(const Node *expr)
 			}
 			break;
 		case T_NullTest:
-			/* just use argument's location */
-			loc = exprLocation((Node *) ((const NullTest *) expr)->arg);
+			{
+				const NullTest *nexpr = (const NullTest *) expr;
+
+				/* Much as above */
+				loc = leftmostLoc(nexpr->location,
+								  exprLocation((Node *) nexpr->arg));
+			}
 			break;
 		case T_BooleanTest:
-			/* just use argument's location */
-			loc = exprLocation((Node *) ((const BooleanTest *) expr)->arg);
+			{
+				const BooleanTest *bexpr = (const BooleanTest *) expr;
+
+				/* Much as above */
+				loc = leftmostLoc(bexpr->location,
+								  exprLocation((Node *) bexpr->arg));
+			}
 			break;
 		case T_CoerceToDomain:
 			{

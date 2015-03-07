@@ -3,7 +3,7 @@
  * nbtutils.c
  *	  Utility code for Postgres btree implementation.
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1429,6 +1429,13 @@ _bt_checkkeys(IndexScanDesc scan,
 		bool		isNull;
 		Datum		test;
 
+		/*
+		 * If the scan key has already matched we can skip this key, as
+		 * long as the index tuple does not contain NULL values.
+		 */
+		if (key->sk_flags & SK_BT_MATCHED && !IndexTupleHasNulls(tuple))
+			continue;
+
 		/* row-comparison keys need special processing */
 		if (key->sk_flags & SK_ROW_HEADER)
 		{
@@ -1829,7 +1836,7 @@ typedef struct BTVacInfo
 	BTCycleId	cycle_ctr;		/* cycle ID most recently assigned */
 	int			num_vacuums;	/* number of currently active VACUUMs */
 	int			max_vacuums;	/* allocated length of vacuums[] array */
-	BTOneVacInfo vacuums[1];	/* VARIABLE LENGTH ARRAY */
+	BTOneVacInfo vacuums[FLEXIBLE_ARRAY_MEMBER];
 } BTVacInfo;
 
 static BTVacInfo *btvacinfo;
@@ -1977,7 +1984,7 @@ BTreeShmemSize(void)
 {
 	Size		size;
 
-	size = offsetof(BTVacInfo, vacuums[0]);
+	size = offsetof(BTVacInfo, vacuums);
 	size = add_size(size, mul_size(MaxBackends, sizeof(BTOneVacInfo)));
 	return size;
 }

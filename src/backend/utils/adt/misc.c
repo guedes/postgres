@@ -3,7 +3,7 @@
  * misc.c
  *
  *
- * Portions Copyright (c) 1996-2014, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,6 +35,7 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/lsyscache.h"
+#include "utils/ruleutils.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
@@ -412,10 +413,10 @@ pg_sleep(PG_FUNCTION_ARGS)
 		else
 			break;
 
-		(void) WaitLatch(&MyProc->procLatch,
+		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_TIMEOUT,
 						 delay_ms);
-		ResetLatch(&MyProc->procLatch);
+		ResetLatch(MyLatch);
 	}
 
 	PG_RETURN_VOID();
