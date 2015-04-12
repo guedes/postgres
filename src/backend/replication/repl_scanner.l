@@ -205,7 +205,7 @@ addlitchar(unsigned char ychar)
 	appendStringInfoChar(&litbuf, ychar);
 }
 
-void __attribute__((noreturn))
+void
 yyerror(const char *message)
 {
 	ereport(ERROR,

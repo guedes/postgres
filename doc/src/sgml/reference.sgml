@@ -257,9 +257,11 @@
   </partintro>
 
    &initdb;
+   &pgarchivecleanup;
    &pgControldata;
    &pgCtl;
    &pgResetxlog;
+   &pgRewind;
    &postgres;
    &postmaster;
 

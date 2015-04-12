@@ -31,7 +31,7 @@ extern ObjectAddress DefineIndex(Oid relationId,
 			bool quiet);
 extern Oid	ReindexIndex(RangeVar *indexRelation);
 extern Oid	ReindexTable(RangeVar *relation);
-extern Oid ReindexObject(const char *databaseName, ReindexObjectType kind);
+extern void ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind);
 extern char *makeObjectName(const char *name1, const char *name2,
 			   const char *label);
 extern char *ChooseRelationName(const char *name1, const char *name2,
@@ -101,7 +101,8 @@ extern ObjectAddress AlterTSDictionary(AlterTSDictionaryStmt *stmt);
 extern ObjectAddress DefineTSTemplate(List *names, List *parameters);
 extern void RemoveTSTemplateById(Oid tmplId);
 
-extern ObjectAddress DefineTSConfiguration(List *names, List *parameters);
+extern ObjectAddress DefineTSConfiguration(List *names, List *parameters,
+					  ObjectAddress *copied);
 extern void RemoveTSConfigurationById(Oid cfgId);
 extern ObjectAddress AlterTSConfiguration(AlterTSConfigurationStmt *stmt);
 

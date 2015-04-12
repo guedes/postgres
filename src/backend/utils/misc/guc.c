@@ -112,9 +112,6 @@ extern char *temp_tablespaces;
 extern bool ignore_checksum_failure;
 extern bool synchronize_seqscans;
 
-#ifdef TRACE_SORT
-extern bool trace_sort;
-#endif
 #ifdef TRACE_SYNCSCAN
 extern bool trace_syncscan;
 #endif
@@ -129,10 +126,7 @@ char	   *GUC_check_errmsg_string;
 char	   *GUC_check_errdetail_string;
 char	   *GUC_check_errhint_string;
 
-static void
-do_serialize(char **destptr, Size *maxbytes, const char *fmt,...)
-/* This lets gcc check the format string for consistency. */
-__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
+static void do_serialize(char **destptr, Size *maxbytes, const char *fmt,...) pg_attribute_printf(3, 4);
 
 static void set_config_sourcefile(const char *name, char *sourcefile,
 					  int sourceline);
@@ -997,6 +991,16 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"wal_compression", PGC_USERSET, WAL_SETTINGS,
+			 gettext_noop("Compresses full-page writes written in WAL file."),
+			 NULL
+		},
+		&wal_compression,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"log_checkpoints", PGC_SIGHUP, LOGGING_WHAT,
 			gettext_noop("Logs each checkpoint."),
 			NULL
@@ -1590,6 +1594,16 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"operator_precedence_warning", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
+			gettext_noop("Emit a warning for constructs that changed meaning since PostgreSQL 9.4."),
+			NULL,
+		},
+		&operator_precedence_warning,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"quote_all_identifiers", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
 			gettext_noop("When generating SQL fragments, quote all identifiers."),
 			NULL,
@@ -2171,7 +2185,7 @@ static struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_XSEGS
 		},
 		&max_wal_size,
-		8, 2, INT_MAX,
+		64, 2, INT_MAX,
 		NULL, assign_max_wal_size, NULL
 	},
 
@@ -8456,7 +8470,7 @@ read_nondefault_variables(void)
  * particular postmaster.  Most PGC_INTERNAL variables are compile-time
  * constants; a few, like server_encoding and lc_ctype, are handled specially
  * outside the serialize/restore procedure.  Therefore, SerializeGUCState()
- * never sends these, and and RestoreGUCState() never changes them.
+ * never sends these, and RestoreGUCState() never changes them.
  */
 static bool
 can_skip_gucvar(struct config_generic * gconf)

@@ -107,6 +107,11 @@ grant all on table event_trigger_fire1 to public;
 comment on table event_trigger_fire1 is 'here is a comment';
 revoke all on table event_trigger_fire1 from public;
 drop table event_trigger_fire1;
+create foreign data wrapper useless;
+create server useless_server foreign data wrapper useless;
+create user mapping for regression_bob server useless_server;
+alter default privileges for role regression_bob
+ revoke delete on tables from regression_bob;
 
 -- alter owner to non-superuser should fail
 alter event trigger regress_event_trigger owner to regression_bob;
@@ -124,7 +129,7 @@ alter event trigger regress_event_trigger rename to regress_event_trigger3;
 -- should fail, doesn't exist any more
 drop event trigger regress_event_trigger;
 
--- should fail, regression_bob owns regress_event_trigger2/3
+-- should fail, regression_bob owns some objects
 drop role regression_bob;
 
 -- cleanup before next test
@@ -138,6 +143,7 @@ drop event trigger regress_event_trigger_end;
 CREATE SCHEMA schema_one authorization regression_bob;
 CREATE SCHEMA schema_two authorization regression_bob;
 CREATE SCHEMA audit_tbls authorization regression_bob;
+CREATE TEMP TABLE a_temp_tbl ();
 SET SESSION AUTHORIZATION regression_bob;
 
 CREATE TABLE schema_one.table_one(a int);
@@ -248,9 +254,9 @@ BEGIN
     IF NOT r.normal AND NOT r.original THEN
         CONTINUE;
     END IF;
-    RAISE NOTICE 'NORMAL: orig=% normal=% type=% identity=% name=% args=%',
-        r.original, r.normal, r.object_type, r.object_identity,
-		r.address_names, r.address_args;
+    RAISE NOTICE 'NORMAL: orig=% normal=% istemp=% type=% identity=% name=% args=%',
+        r.original, r.normal, r.is_temporary, r.object_type,
+        r.object_identity, r.address_names, r.address_args;
     END LOOP;
 END; $$;
 CREATE EVENT TRIGGER regress_event_trigger_report_dropped ON sql_drop
@@ -265,6 +271,7 @@ ALTER TABLE evttrig.one ALTER COLUMN col_b DROP DEFAULT;
 ALTER TABLE evttrig.one DROP CONSTRAINT one_pkey;
 DROP INDEX evttrig.one_idx;
 DROP SCHEMA evttrig CASCADE;
+DROP TABLE a_temp_tbl;
 
 DROP EVENT TRIGGER regress_event_trigger_report_dropped;
 

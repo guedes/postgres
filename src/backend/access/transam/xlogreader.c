@@ -20,6 +20,7 @@
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
 #include "catalog/pg_control.h"
+#include "common/pg_lzcompress.h"
 
 static bool allocate_recordbuf(XLogReaderState *state, uint32 reclength);
 
@@ -31,11 +32,7 @@ static bool ValidXLogRecord(XLogReaderState *state, XLogRecord *record,
 				XLogRecPtr recptr);
 static int ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr,
 				 int reqLen);
-static void
-report_invalid_record(XLogReaderState *state, const char *fmt,...)
-/* This extension allows gcc to check the format string for consistency with
-   the supplied arguments. */
-__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+static void report_invalid_record(XLogReaderState *state, const char *fmt,...) pg_attribute_printf(2, 3);
 
 static void ResetDecoder(XLogReaderState *state);
 
@@ -61,15 +58,18 @@ report_invalid_record(XLogReaderState *state, const char *fmt,...)
 /*
  * Allocate and initialize a new XLogReader.
  *
- * The returned XLogReader is palloc'd. (In FRONTEND code, that means that
- * running out-of-memory causes an immediate exit(1).
+ * Returns NULL if the xlogreader couldn't be allocated.
  */
 XLogReaderState *
 XLogReaderAllocate(XLogPageReadCB pagereadfunc, void *private_data)
 {
 	XLogReaderState *state;
 
-	state = (XLogReaderState *) palloc0(sizeof(XLogReaderState));
+	state = (XLogReaderState *)
+		palloc_extended(sizeof(XLogReaderState),
+						MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
+	if (!state)
+		return NULL;
 
 	state->max_block_id = -1;
 
@@ -77,17 +77,30 @@ XLogReaderAllocate(XLogPageReadCB pagereadfunc, void *private_data)
 	 * Permanently allocate readBuf.  We do it this way, rather than just
 	 * making a static array, for two reasons: (1) no need to waste the
 	 * storage in most instantiations of the backend; (2) a static char array
-	 * isn't guaranteed to have any particular alignment, whereas palloc()
-	 * will provide MAXALIGN'd storage.
+	 * isn't guaranteed to have any particular alignment, whereas
+	 * palloc_extended() will provide MAXALIGN'd storage.
 	 */
-	state->readBuf = (char *) palloc(XLOG_BLCKSZ);
+	state->readBuf = (char *) palloc_extended(XLOG_BLCKSZ,
+											  MCXT_ALLOC_NO_OOM);
+	if (!state->readBuf)
+	{
+		pfree(state);
+		return NULL;
+	}
 
 	state->read_page = pagereadfunc;
 	/* system_identifier initialized to zeroes above */
 	state->private_data = private_data;
 	/* ReadRecPtr and EndRecPtr initialized to zeroes above */
 	/* readSegNo, readOff, readLen, readPageTLI initialized to zeroes above */
-	state->errormsg_buf = palloc(MAX_ERRORMSG_LEN + 1);
+	state->errormsg_buf = palloc_extended(MAX_ERRORMSG_LEN + 1,
+										  MCXT_ALLOC_NO_OOM);
+	if (!state->errormsg_buf)
+	{
+		pfree(state->readBuf);
+		pfree(state);
+		return NULL;
+	}
 	state->errormsg_buf[0] = '\0';
 
 	/*
@@ -149,7 +162,13 @@ allocate_recordbuf(XLogReaderState *state, uint32 reclength)
 
 	if (state->readRecordBuf)
 		pfree(state->readRecordBuf);
-	state->readRecordBuf = (char *) palloc(newSize);
+	state->readRecordBuf =
+		(char *) palloc_extended(newSize, MCXT_ALLOC_NO_OOM);
+	if (state->readRecordBuf == NULL)
+	{
+		state->readRecordBufSize = 0;
+		return false;
+	}
 	state->readRecordBufSize = newSize;
 	return true;
 }
@@ -1019,21 +1038,96 @@ DecodeXLogRecord(XLogReaderState *state, XLogRecord *record, char **errormsg)
 			COPY_HEADER_FIELD(&blk->data_len, sizeof(uint16));
 			/* cross-check that the HAS_DATA flag is set iff data_length > 0 */
 			if (blk->has_data && blk->data_len == 0)
+			{
 				report_invalid_record(state,
 					  "BKPBLOCK_HAS_DATA set, but no data included at %X/%X",
 									  (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+				goto err;
+			}
 			if (!blk->has_data && blk->data_len != 0)
+			{
 				report_invalid_record(state,
 				 "BKPBLOCK_HAS_DATA not set, but data length is %u at %X/%X",
 									  (unsigned int) blk->data_len,
 									  (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+				goto err;
+			}
 			datatotal += blk->data_len;
 
 			if (blk->has_image)
 			{
+				COPY_HEADER_FIELD(&blk->bimg_len, sizeof(uint16));
 				COPY_HEADER_FIELD(&blk->hole_offset, sizeof(uint16));
-				COPY_HEADER_FIELD(&blk->hole_length, sizeof(uint16));
-				datatotal += BLCKSZ - blk->hole_length;
+				COPY_HEADER_FIELD(&blk->bimg_info, sizeof(uint8));
+				if (blk->bimg_info & BKPIMAGE_IS_COMPRESSED)
+				{
+					if (blk->bimg_info & BKPIMAGE_HAS_HOLE)
+						COPY_HEADER_FIELD(&blk->hole_length, sizeof(uint16));
+					else
+						blk->hole_length = 0;
+				}
+				else
+					blk->hole_length = BLCKSZ - blk->bimg_len;
+				datatotal += blk->bimg_len;
+
+				/*
+				 * cross-check that hole_offset > 0, hole_length > 0 and
+				 * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
+				 */
+				if ((blk->bimg_info & BKPIMAGE_HAS_HOLE) &&
+					(blk->hole_offset == 0 ||
+					 blk->hole_length == 0 ||
+					 blk->bimg_len == BLCKSZ))
+				{
+					report_invalid_record(state,
+					  "BKPIMAGE_HAS_HOLE set, but hole offset %u length %u block image length %u at %X/%X",
+										  (unsigned int) blk->hole_offset,
+										  (unsigned int) blk->hole_length,
+										  (unsigned int) blk->bimg_len,
+										  (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+					goto err;
+				}
+				/*
+				 * cross-check that hole_offset == 0 and hole_length == 0
+				 * if the HAS_HOLE flag is not set.
+				 */
+				if (!(blk->bimg_info & BKPIMAGE_HAS_HOLE) &&
+					(blk->hole_offset != 0 || blk->hole_length != 0))
+				{
+					report_invalid_record(state,
+					  "BKPIMAGE_HAS_HOLE not set, but hole offset %u length %u at %X/%X",
+										  (unsigned int) blk->hole_offset,
+										  (unsigned int) blk->hole_length,
+										  (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+					goto err;
+				}
+				/*
+				 * cross-check that bimg_len < BLCKSZ
+				 * if the IS_COMPRESSED flag is set.
+				 */
+				if ((blk->bimg_info & BKPIMAGE_IS_COMPRESSED) &&
+					blk->bimg_len == BLCKSZ)
+				{
+					report_invalid_record(state,
+					  "BKPIMAGE_IS_COMPRESSED set, but block image length %u at %X/%X",
+										  (unsigned int) blk->bimg_len,
+										  (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+					goto err;
+				}
+				/*
+				 * cross-check that bimg_len = BLCKSZ if neither
+				 * HAS_HOLE nor IS_COMPRESSED flag is set.
+				 */
+				if (!(blk->bimg_info & BKPIMAGE_HAS_HOLE) &&
+					!(blk->bimg_info & BKPIMAGE_IS_COMPRESSED) &&
+					blk->bimg_len != BLCKSZ)
+				{
+					report_invalid_record(state,
+					  "neither BKPIMAGE_HAS_HOLE nor BKPIMAGE_IS_COMPRESSED set, but block image length is %u at %X/%X",
+										  (unsigned int) blk->data_len,
+										  (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+					goto err;
+				}
 			}
 			if (!(fork_flags & BKPBLOCK_SAME_REL))
 			{
@@ -1088,7 +1182,7 @@ DecodeXLogRecord(XLogReaderState *state, XLogRecord *record, char **errormsg)
 		if (blk->has_image)
 		{
 			blk->bkp_image = ptr;
-			ptr += BLCKSZ - blk->hole_length;
+			ptr += blk->bimg_len;
 		}
 		if (blk->has_data)
 		{
@@ -1194,6 +1288,8 @@ bool
 RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 {
 	DecodedBkpBlock *bkpb;
+	char   *ptr;
+	char	tmp[BLCKSZ];
 
 	if (!record->blocks[block_id].in_use)
 		return false;
@@ -1201,18 +1297,35 @@ RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 		return false;
 
 	bkpb = &record->blocks[block_id];
+	ptr = bkpb->bkp_image;
 
+	if (bkpb->bimg_info & BKPIMAGE_IS_COMPRESSED)
+	{
+		/* If a backup block image is compressed, decompress it */
+		if (pglz_decompress(ptr, bkpb->bimg_len, tmp,
+							BLCKSZ - bkpb->hole_length) < 0)
+		{
+			report_invalid_record(record, "invalid compressed image at %X/%X, block %d",
+								  (uint32) (record->ReadRecPtr >> 32),
+								  (uint32) record->ReadRecPtr,
+								  block_id);
+			return false;
+		}
+		ptr = tmp;
+	}
+
+	/* generate page, taking into account hole if necessary */
 	if (bkpb->hole_length == 0)
 	{
-		memcpy(page, bkpb->bkp_image, BLCKSZ);
+		memcpy(page, ptr, BLCKSZ);
 	}
 	else
 	{
-		memcpy(page, bkpb->bkp_image, bkpb->hole_offset);
+		memcpy(page, ptr, bkpb->hole_offset);
 		/* must zero-fill the hole */
 		MemSet(page + bkpb->hole_offset, 0, bkpb->hole_length);
 		memcpy(page + (bkpb->hole_offset + bkpb->hole_length),
-			   bkpb->bkp_image + bkpb->hole_offset,
+			   ptr + bkpb->hole_offset,
 			   BLCKSZ - (bkpb->hole_offset + bkpb->hole_length));
 	}
 

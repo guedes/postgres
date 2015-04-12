@@ -289,6 +289,8 @@ Inherits: constraint_rename_test
 
 DROP TABLE constraint_rename_test2;
 DROP TABLE constraint_rename_test;
+ALTER TABLE IF EXISTS constraint_not_exist RENAME CONSTRAINT con3 TO con3foo; -- ok
+NOTICE:  relation "constraint_not_exist" does not exist, skipping
 ALTER TABLE IF EXISTS constraint_rename_test ADD CONSTRAINT con4 UNIQUE (a);
 NOTICE:  relation "constraint_rename_test" does not exist, skipping
 -- FOREIGN KEY CONSTRAINT adding TEST
@@ -536,6 +538,7 @@ create table atacc1 ( test int );
 -- add a check constraint (fails)
 alter table atacc1 add constraint atacc_test1 check (test1>3);
 ERROR:  column "test1" does not exist
+HINT:  Perhaps you meant to reference the column "atacc1"."test".
 drop table atacc1;
 -- something a little more complicated
 create table atacc1 ( test int, test2 int, test3 int);
@@ -1342,6 +1345,7 @@ select f1 from c1;
 ERROR:  column "f1" does not exist
 LINE 1: select f1 from c1;
                ^
+HINT:  Perhaps you meant to reference the column "c1"."f2".
 drop table p1 cascade;
 NOTICE:  drop cascades to table c1
 create table p1 (f1 int, f2 int);
@@ -1355,6 +1359,7 @@ select f1 from c1;
 ERROR:  column "f1" does not exist
 LINE 1: select f1 from c1;
                ^
+HINT:  Perhaps you meant to reference the column "c1"."f2".
 drop table p1 cascade;
 NOTICE:  drop cascades to table c1
 create table p1 (f1 int, f2 int);
@@ -1952,9 +1957,9 @@ create trigger ttdummy
 	execute procedure
 	ttdummy (1, 1);
 select * from my_locks order by 1;
-  relname  |    max_lockmode     
------------+---------------------
- alterlock | AccessExclusiveLock
+  relname  |     max_lockmode      
+-----------+-----------------------
+ alterlock | ShareRowExclusiveLock
 (1 row)
 
 rollback;
@@ -1966,10 +1971,10 @@ select * from my_locks order by 1;
 
 alter table alterlock2 add foreign key (f1) references alterlock (f1);
 select * from my_locks order by 1;
-     relname     |    max_lockmode     
------------------+---------------------
- alterlock       | AccessExclusiveLock
- alterlock2      | AccessExclusiveLock
+     relname     |     max_lockmode      
+-----------------+-----------------------
+ alterlock       | ShareRowExclusiveLock
+ alterlock2      | ShareRowExclusiveLock
  alterlock2_pkey | AccessShareLock
  alterlock_pkey  | AccessShareLock
 (4 rows)
@@ -1979,10 +1984,10 @@ begin;
 alter table alterlock2
 add constraint alterlock2nv foreign key (f1) references alterlock (f1) NOT VALID;
 select * from my_locks order by 1;
-  relname   |    max_lockmode     
-------------+---------------------
- alterlock  | AccessExclusiveLock
- alterlock2 | AccessExclusiveLock
+  relname   |     max_lockmode      
+------------+-----------------------
+ alterlock  | ShareRowExclusiveLock
+ alterlock2 | ShareRowExclusiveLock
 (2 rows)
 
 commit;

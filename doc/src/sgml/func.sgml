@@ -2998,14 +2998,15 @@
            <para>
             <literal>I</literal> treats the argument value as an SQL
             identifier, double-quoting it if necessary.
-            It is an error for the value to be null.
+            It is an error for the value to be null (equivalent to
+            <function>quote_ident</>).
            </para>
           </listitem>
           <listitem>
            <para>
             <literal>L</literal> quotes the argument value as an SQL literal.
             A null value is displayed as the string <literal>NULL</>, without
-            quotes.
+            quotes (equivalent to <function>quote_nullable</function>).
            </para>
           </listitem>
          </itemizedlist>
@@ -6785,7 +6786,7 @@ SELECT SUBSTRING('XY1234Z', 'Y*?([0-9]{1,3})');
          Create interval from years, months, weeks, days, hours, minutes and
          seconds fields
         </entry>
-        <entry><literal>make_interval(days := 10)</literal></entry>
+        <entry><literal>make_interval(days => 10)</literal></entry>
         <entry><literal>10 days</literal></entry>
        </row>
 
@@ -11480,6 +11481,12 @@ SELECT NULLIF(value, '(none)') ...
     <primary>array_lower</primary>
   </indexterm>
   <indexterm>
+    <primary>array_position</primary>
+  </indexterm>
+  <indexterm>
+    <primary>array_positions</primary>
+  </indexterm>
+  <indexterm>
     <primary>array_prepend</primary>
   </indexterm>
   <indexterm>
@@ -11599,6 +11606,32 @@ SELECT NULLIF(value, '(none)') ...
        <row>
         <entry>
          <literal>
+          <function>array_position</function>(<type>anyarray</type>, <type>anyelement</type> <optional>, <type>int</type></optional>)
+         </literal>
+        </entry>
+        <entry><type>int</type></entry>
+        <entry>returns the subscript of the first occurrence of the second
+        argument in the array, starting at the element indicated by the third
+        argument or at the first element (array must be one-dimensional)</entry>
+        <entry><literal>array_position(ARRAY['sun','mon','tue','wed','thu','fri','sat'], 'mon')</literal></entry>
+        <entry><literal>2</literal></entry>
+       </row>
+       <row>
+        <entry>
+         <literal>
+          <function>array_positions</function>(<type>anyarray</type>, <type>anyelement</type>)
+         </literal>
+        </entry>
+        <entry><type>int[]</type></entry>
+        <entry>returns an array of subscripts of all occurrences of the second
+        argument in the array given as first argument (array must be
+        one-dimensional)</entry>
+        <entry><literal>array_positions(ARRAY['A','A','B','A'], 'A')</literal></entry>
+        <entry><literal>{1,2,4}</literal></entry>
+       </row>
+       <row>
+        <entry>
+         <literal>
           <function>array_prepend</function>(<type>anyelement</type>, <type>anyarray</type>)
          </literal>
         </entry>
@@ -11706,6 +11739,23 @@ NULL baz</literallayout>(3 rows)</entry>
       </tbody>
      </tgroup>
     </table>
+
+   <para>
+    In <function>array_position</function> and <function>array_positions</>,
+    each array element is compared to the searched value using
+    <literal>IS NOT DISTINCT FROM</literal> semantics.
+   </para>
+
+   <para>
+    In <function>array_position</function>, <literal>NULL</literal> is returned
+    if the value is not found.
+   </para>
+
+   <para>
+    In <function>array_positions</function>, <literal>NULL</literal> is returned
+    only if the array is <literal>NULL</literal>; if the value is not found in
+    the array, an empty array is returned instead.
+   </para>
 
    <para>
     In <function>string_to_array</function>, if the delimiter parameter is
@@ -16279,9 +16329,9 @@ SELECT set_config('log_statement_stats', 'off', false);
         <literal><function>pg_cancel_backend(<parameter>pid</parameter> <type>int</>)</function></literal>
         </entry>
        <entry><type>boolean</type></entry>
-       <entry>Cancel a backend's current query.  You can execute this against
-        another backend that has exactly the same role as the user calling the
-        function.  In all other cases, you must be a superuser.
+       <entry>Cancel a backend's current query.  This is also allowed if the
+        calling role is a member of the role whose backend is being cancelled,
+        however only superusers can cancel superuser backends.
         </entry>
       </row>
       <row>
@@ -16303,10 +16353,9 @@ SELECT set_config('log_statement_stats', 'off', false);
         <literal><function>pg_terminate_backend(<parameter>pid</parameter> <type>int</>)</function></literal>
         </entry>
        <entry><type>boolean</type></entry>
-       <entry>Terminate a backend.  You can execute this against
-        another backend that has exactly the same role as the user
-        calling the function.  In all other cases, you must be a
-        superuser.
+       <entry>Terminate a backend.  This is also allowed if the calling role
+        is a member of the role whose backend is being terminated, however only
+        superusers can terminate superuser backends.
        </entry>
       </row>
      </tbody>
@@ -17826,6 +17875,13 @@ FOR EACH ROW EXECUTE PROCEDURE suppress_redundant_updates_trigger();
         <entry>
          Flag indicating that there's a normal dependency relationship
          in the dependency graph leading to this object
+        </entry>
+       </row>
+       <row>
+        <entry><literal>is_temporary</literal></entry>
+        <entry><type>bool</type></entry>
+        <entry>
+         Flag indicating that the object was a temporary object.
         </entry>
        </row>
        <row>

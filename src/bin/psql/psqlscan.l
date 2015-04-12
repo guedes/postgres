@@ -114,8 +114,6 @@ static int	backtick_start_offset;
 #define LEXRES_OK			3	/* OK completion of backslash argument */
 
 
-int	yylex(void);
-
 static void evaluate_backtick(void);
 static void push_new_buffer(const char *newstr, const char *varname);
 static void pop_buffer_stack(PsqlScanState state);
@@ -355,9 +353,15 @@ ident_cont		[A-Za-z\200-\377_0-9\$]
 
 identifier		{ident_start}{ident_cont}*
 
+/* Assorted special-case operators and operator-like tokens */
 typecast		"::"
 dot_dot			\.\.
 colon_equals	":="
+equals_greater	"=>"
+less_equals		"<="
+greater_equals	">="
+less_greater	"<>"
+not_equals		"!="
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -666,6 +670,26 @@ other			.
 				}
 
 {colon_equals}	{
+					ECHO;
+				}
+
+{equals_greater} {
+					ECHO;
+				}
+
+{less_equals}	{
+					ECHO;
+				}
+
+{greater_equals} {
+					ECHO;
+				}
+
+{less_greater}	{
+					ECHO;
+				}
+
+{not_equals}	{
 					ECHO;
 				}
 
