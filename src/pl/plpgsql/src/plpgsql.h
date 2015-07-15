@@ -183,6 +183,7 @@ typedef struct
 	char		typtype;
 	Oid			typrelid;
 	Oid			collation;		/* from pg_type, but can be overridden */
+	bool		typisarray;		/* is "true" array, or domain over one */
 	int32		atttypmod;		/* typmod (taken from someplace else) */
 } PLpgSQL_type;
 
@@ -216,6 +217,7 @@ typedef struct PLpgSQL_expr
 	char	   *query;
 	SPIPlanPtr	plan;
 	Bitmapset  *paramnos;		/* all dnos referenced by this query */
+	int			rwparam;		/* dno of read/write param, or -1 if none */
 
 	/* function containing this expr (not set until we first parse query) */
 	struct PLpgSQL_function *func;
@@ -750,8 +752,12 @@ typedef struct PLpgSQL_function
 	int			extra_warnings;
 	int			extra_errors;
 
+	/* the datums representing the function's local variables */
 	int			ndatums;
 	PLpgSQL_datum **datums;
+	Bitmapset  *resettable_datums;		/* dnos of non-simple vars */
+
+	/* function body parsetree */
 	PLpgSQL_stmt_block *action;
 
 	/* table for performing casts needed in this function */
@@ -794,6 +800,7 @@ typedef struct PLpgSQL_execstate
 
 	/* we pass datums[i] to the executor, when needed, in paramLI->params[i] */
 	ParamListInfo paramLI;
+	bool		params_dirty;	/* T if any resettable datum has been passed */
 
 	/* EState to use for "simple" expression evaluation */
 	EState	   *simple_eval_estate;

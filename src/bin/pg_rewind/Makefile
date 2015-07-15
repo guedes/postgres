@@ -24,7 +24,7 @@ OBJS	= pg_rewind.o parsexlog.o xlogreader.o datapagemap.o timeline.o \
 	fetch.o file_ops.o copy_fetch.o libpq_fetch.o filemap.o logging.o \
 	$(WIN32RES)
 
-EXTRA_CLEAN = $(RMGRDESCSOURCES) xlogreader.c
+EXTRA_CLEAN = xlogreader.c
 
 all: pg_rewind
 
@@ -45,8 +45,10 @@ uninstall:
 
 clean distclean maintainer-clean:
 	rm -f pg_rewind$(X) $(OBJS) xlogreader.c
-	rm -rf tmp_check regress_log
+	rm -rf tmp_check
 
-check: all
-	$(prove_check) :: local
-	$(prove_check) :: remote
+check:
+	$(prove_check)
+
+installcheck:
+	$(prove_installcheck)

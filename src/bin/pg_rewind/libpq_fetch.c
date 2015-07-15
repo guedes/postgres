@@ -52,10 +52,10 @@ libpqConnect(const char *connstr)
 
 	conn = PQconnectdb(connstr);
 	if (PQstatus(conn) == CONNECTION_BAD)
-		pg_fatal("could not connect to remote server: %s\n",
+		pg_fatal("could not connect to server: %s",
 				 PQerrorMessage(conn));
 
-	pg_log(PG_PROGRESS, "connected to remote server\n");
+	pg_log(PG_PROGRESS, "connected to server\n");
 
 	/*
 	 * Check that the server is not in hot standby mode. There is no
@@ -69,7 +69,7 @@ libpqConnect(const char *connstr)
 	pg_free(str);
 
 	/*
-	 * Also check that full_page-writes are enabled. We can get torn pages if
+	 * Also check that full_page_writes is enabled.  We can get torn pages if
 	 * a page is modified while we read it with pg_read_binary_file(), and we
 	 * rely on full page images to fix them.
 	 */
@@ -81,6 +81,7 @@ libpqConnect(const char *connstr)
 
 /*
  * Runs a query that returns a single value.
+ * The result should be pg_free'd after use.
  */
 static char *
 run_simple_query(const char *sql)
@@ -91,12 +92,12 @@ run_simple_query(const char *sql)
 	res = PQexec(conn, sql);
 
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		pg_fatal("error running query (%s) in source server: %s\n",
+		pg_fatal("error running query (%s) in source server: %s",
 				 sql, PQresultErrorMessage(res));
 
 	/* sanity check the result set */
 	if (PQnfields(res) != 1 || PQntuples(res) != 1 || PQgetisnull(res, 0, 0))
-		pg_fatal("unexpected result set while running query\n");
+		pg_fatal("unexpected result set from query\n");
 
 	result = pg_strdup(PQgetvalue(res, 0, 0));
 
@@ -119,9 +120,11 @@ libpqGetCurrentXlogInsertLocation(void)
 	val = run_simple_query("SELECT pg_current_xlog_insert_location()");
 
 	if (sscanf(val, "%X/%X", &hi, &lo) != 2)
-		pg_fatal("unexpected result \"%s\" while fetching current XLOG insert location\n", val);
+		pg_fatal("unrecognized result \"%s\" for current XLOG insert location\n", val);
 
 	result = ((uint64) hi) << 32 | lo;
+
+	pg_free(val);
 
 	return result;
 }
@@ -149,14 +152,14 @@ libpqProcessFileList(void)
 	sql =
 		"WITH RECURSIVE files (path, filename, size, isdir) AS (\n"
 		"  SELECT '' AS path, filename, size, isdir FROM\n"
-		"  (SELECT pg_ls_dir('.') AS filename) AS fn,\n"
-		"        pg_stat_file(fn.filename) AS this\n"
+		"  (SELECT pg_ls_dir('.', true, false) AS filename) AS fn,\n"
+		"        pg_stat_file(fn.filename, true) AS this\n"
 		"  UNION ALL\n"
 		"  SELECT parent.path || parent.filename || '/' AS path,\n"
 		"         fn, this.size, this.isdir\n"
 		"  FROM files AS parent,\n"
-		"       pg_ls_dir(parent.path || parent.filename) AS fn,\n"
-		"       pg_stat_file(parent.path || parent.filename || '/' || fn) AS this\n"
+		"       pg_ls_dir(parent.path || parent.filename, true, false) AS fn,\n"
+		"       pg_stat_file(parent.path || parent.filename || '/' || fn, true) AS this\n"
 		"       WHERE parent.isdir = 't'\n"
 		")\n"
 		"SELECT path || filename, size, isdir,\n"
@@ -167,7 +170,7 @@ libpqProcessFileList(void)
 	res = PQexec(conn, sql);
 
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		pg_fatal("unexpected result while fetching file list: %s\n",
+		pg_fatal("could not fetch file list: %s",
 				 PQresultErrorMessage(res));
 
 	/* sanity check the result set */
@@ -183,6 +186,15 @@ libpqProcessFileList(void)
 		char	   *link_target = PQgetvalue(res, i, 3);
 		file_type_t type;
 
+		if (PQgetisnull(res, 0, 1))
+		{
+			/*
+			 * The file was removed from the server while the query was
+			 * running. Ignore it.
+			 */
+			continue;
+		}
+
 		if (link_target[0])
 			type = FILE_TYPE_SYMLINK;
 		else if (isdir)
@@ -190,8 +202,9 @@ libpqProcessFileList(void)
 		else
 			type = FILE_TYPE_REGULAR;
 
-		process_remote_file(path, type, filesize, link_target);
+		process_source_file(path, type, filesize, link_target);
 	}
+	PQclear(res);
 }
 
 /*----
@@ -210,9 +223,9 @@ receiveFileChunks(const char *sql)
 	PGresult   *res;
 
 	if (PQsendQueryParams(conn, sql, 0, NULL, NULL, NULL, NULL, 1) != 1)
-		pg_fatal("could not send query: %s\n", PQerrorMessage(conn));
+		pg_fatal("could not send query: %s", PQerrorMessage(conn));
 
-	pg_log(PG_DEBUG, "getting file chunks");
+	pg_log(PG_DEBUG, "getting file chunks\n");
 
 	if (PQsetSingleRowMode(conn) != 1)
 		pg_fatal("could not set libpq connection to single row mode\n");
@@ -259,10 +272,9 @@ receiveFileChunks(const char *sql)
 		}
 
 		if (PQgetisnull(res, 0, 0) ||
-			PQgetisnull(res, 0, 1) ||
-			PQgetisnull(res, 0, 2))
+			PQgetisnull(res, 0, 1))
 		{
-			pg_fatal("unexpected NULL result while fetching remote files\n");
+			pg_fatal("unexpected null values in result while fetching remote files\n");
 		}
 
 		if (PQgetlength(res, 0, 1) != sizeof(int32))
@@ -280,7 +292,22 @@ receiveFileChunks(const char *sql)
 
 		chunk = PQgetvalue(res, 0, 2);
 
-		pg_log(PG_DEBUG, "received chunk for file \"%s\", off %d, len %d\n",
+		/*
+		 * It's possible that the file was deleted on remote side after we
+		 * created the file map. In this case simply ignore it, as if it was
+		 * not there in the first place, and move on.
+		 */
+		if (PQgetisnull(res, 0, 2))
+		{
+			pg_log(PG_DEBUG,
+			  "received NULL chunk for file \"%s\", file has been deleted\n",
+				   filename);
+			pg_free(filename);
+			PQclear(res);
+			continue;
+		}
+
+		pg_log(PG_DEBUG, "received chunk for file \"%s\", offset %d, size %d\n",
 			   filename, chunkoff, chunksize);
 
 		open_target_file(filename, false);
@@ -309,7 +336,7 @@ libpqGetFile(const char *filename, size_t *filesize)
 					   1, NULL, paramValues, NULL, NULL, 1);
 
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		pg_fatal("unexpected result while fetching remote file \"%s\": %s\n",
+		pg_fatal("could not fetch remote file \"%s\": %s",
 				 filename, PQresultErrorMessage(res));
 
 	/* sanity check the result set */
@@ -355,7 +382,7 @@ fetch_file_range(const char *path, unsigned int begin, unsigned int end)
 		snprintf(linebuf, sizeof(linebuf), "%s\t%u\t%u\n", path, begin, len);
 
 		if (PQputCopyData(conn, linebuf, strlen(linebuf)) != 1)
-			pg_fatal("error sending COPY data: %s\n",
+			pg_fatal("could not send COPY data: %s",
 					 PQerrorMessage(conn));
 
 		begin += len;
@@ -381,14 +408,14 @@ libpq_executeFileMap(filemap_t *map)
 	res = PQexec(conn, sql);
 
 	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-		pg_fatal("error creating temporary table: %s\n",
+		pg_fatal("could not create temporary table: %s",
 				 PQresultErrorMessage(res));
 
 	sql = "COPY fetchchunks FROM STDIN";
 	res = PQexec(conn, sql);
 
 	if (PQresultStatus(res) != PGRES_COPY_IN)
-		pg_fatal("unexpected result while sending file list: %s\n",
+		pg_fatal("could not send file list: %s",
 				 PQresultErrorMessage(res));
 
 	for (i = 0; i < map->narray; i++)
@@ -429,13 +456,13 @@ libpq_executeFileMap(filemap_t *map)
 	}
 
 	if (PQputCopyEnd(conn, NULL) != 1)
-		pg_fatal("error sending end-of-COPY: %s\n",
+		pg_fatal("could not send end-of-COPY: %s",
 				 PQerrorMessage(conn));
 
 	while ((res = PQgetResult(conn)) != NULL)
 	{
 		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			pg_fatal("unexpected result while sending file list: %s\n",
+			pg_fatal("unexpected result while sending file list: %s",
 					 PQresultErrorMessage(res));
 	}
 
@@ -445,7 +472,7 @@ libpq_executeFileMap(filemap_t *map)
 	 */
 	sql =
 		"SELECT path, begin, \n"
-		"  pg_read_binary_file(path, begin, len) AS chunk\n"
+		"  pg_read_binary_file(path, begin, len, true) AS chunk\n"
 		"FROM fetchchunks\n";
 
 	receiveFileChunks(sql);
@@ -465,5 +492,5 @@ execute_pagemap(datapagemap_t *pagemap, const char *path)
 
 		fetch_file_range(path, offset, offset + BLCKSZ);
 	}
-	free(iter);
+	pg_free(iter);
 }

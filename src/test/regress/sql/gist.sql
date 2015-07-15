@@ -22,7 +22,7 @@ delete from gist_point_tbl where id % 2 = 1;
 -- would exercise it)
 delete from gist_point_tbl where id < 10000;
 
-vacuum gist_point_tbl;
+vacuum analyze gist_point_tbl;
 
 
 --
@@ -37,7 +37,7 @@ select box(point(0.05*i, 0.05*i), point(0.05*i, 0.05*i)),
        circle(point(0.05*i, 0.05*i), 1.0)
 from generate_series(0,10000) as i;
 
-vacuum analyze;
+vacuum analyze gist_tbl;
 
 set enable_seqscan=off;
 set enable_bitmapscan=off;
@@ -60,6 +60,14 @@ order by p <-> point(0.2, 0.2);
 
 select p from gist_tbl where p <@ box(point(0,0), point(0.5, 0.5))
 order by p <-> point(0.2, 0.2);
+
+-- Check commuted case as well
+explain (costs off)
+select p from gist_tbl where p <@ box(point(0,0), point(0.5, 0.5))
+order by point(0.1, 0.1) <-> p;
+
+select p from gist_tbl where p <@ box(point(0,0), point(0.5, 0.5))
+order by point(0.1, 0.1) <-> p;
 
 drop index gist_tbl_point_index;
 

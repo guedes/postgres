@@ -220,32 +220,45 @@ socket_comm_reset(void)
 /* --------------------------------
  *		socket_close - shutdown libpq at backend exit
  *
- * Note: in a standalone backend MyProcPort will be null,
- * don't crash during exit...
+ * This is the one pg_on_exit_callback in place during BackendInitialize().
+ * That function's unusual signal handling constrains that this callback be
+ * safe to run at any instant.
  * --------------------------------
  */
 static void
 socket_close(int code, Datum arg)
 {
+	/* Nothing to do in a standalone backend, where MyProcPort is NULL. */
 	if (MyProcPort != NULL)
 	{
 #if defined(ENABLE_GSS) || defined(ENABLE_SSPI)
 #ifdef ENABLE_GSS
 		OM_uint32	min_s;
 
-		/* Shutdown GSSAPI layer */
+		/*
+		 * Shutdown GSSAPI layer.  This section does nothing when interrupting
+		 * BackendInitialize(), because pg_GSS_recvauth() makes first use of
+		 * "ctx" and "cred".
+		 */
 		if (MyProcPort->gss->ctx != GSS_C_NO_CONTEXT)
 			gss_delete_sec_context(&min_s, &MyProcPort->gss->ctx, NULL);
 
 		if (MyProcPort->gss->cred != GSS_C_NO_CREDENTIAL)
 			gss_release_cred(&min_s, &MyProcPort->gss->cred);
 #endif   /* ENABLE_GSS */
-		/* GSS and SSPI share the port->gss struct */
 
+		/*
+		 * GSS and SSPI share the port->gss struct.  Since nowhere else does a
+		 * postmaster child free this, doing so is safe when interrupting
+		 * BackendInitialize().
+		 */
 		free(MyProcPort->gss);
 #endif   /* ENABLE_GSS || ENABLE_SSPI */
 
-		/* Cleanly shut down SSL layer */
+		/*
+		 * Cleanly shut down SSL layer.  Nowhere else does a postmaster child
+		 * call this, so this is safe when interrupting BackendInitialize().
+		 */
 		secure_close(MyProcPort);
 
 		/*
@@ -713,6 +726,11 @@ StreamConnection(pgsocket server_fd, Port *port)
 	if (!IS_AF_UNIX(port->laddr.addr.ss_family))
 	{
 		int			on;
+#ifdef WIN32
+		int			oldopt;
+		int			optlen;
+		int			newopt;
+#endif
 
 #ifdef	TCP_NODELAY
 		on = 1;
@@ -734,15 +752,42 @@ StreamConnection(pgsocket server_fd, Port *port)
 #ifdef WIN32
 
 		/*
-		 * This is a Win32 socket optimization.  The ideal size is 32k.
-		 * http://support.microsoft.com/kb/823764/EN-US/
+		 * This is a Win32 socket optimization.  The OS send buffer should be
+		 * large enough to send the whole Postgres send buffer in one go, or
+		 * performance suffers.  The Postgres send buffer can be enlarged if a
+		 * very large message needs to be sent, but we won't attempt to
+		 * enlarge the OS buffer if that happens, so somewhat arbitrarily
+		 * ensure that the OS buffer is at least PQ_SEND_BUFFER_SIZE * 4.
+		 * (That's 32kB with the current default).
+		 *
+		 * The default OS buffer size used to be 8kB in earlier Windows
+		 * versions, but was raised to 64kB in Windows 2012.  So it shouldn't
+		 * be necessary to change it in later versions anymore.  Changing it
+		 * unnecessarily can even reduce performance, because setting
+		 * SO_SNDBUF in the application disables the "dynamic send buffering"
+		 * feature that was introduced in Windows 7.  So before fiddling with
+		 * SO_SNDBUF, check if the current buffer size is already large enough
+		 * and only increase it if necessary.
+		 *
+		 * See https://support.microsoft.com/kb/823764/EN-US/ and
+		 * https://msdn.microsoft.com/en-us/library/bb736549%28v=vs.85%29.aspx
 		 */
-		on = PQ_SEND_BUFFER_SIZE * 4;
-		if (setsockopt(port->sock, SOL_SOCKET, SO_SNDBUF, (char *) &on,
-					   sizeof(on)) < 0)
+		optlen = sizeof(oldopt);
+		if (getsockopt(port->sock, SOL_SOCKET, SO_SNDBUF, (char *) &oldopt,
+					   &optlen) < 0)
 		{
-			elog(LOG, "setsockopt(SO_SNDBUF) failed: %m");
+			elog(LOG, "getsockopt(SO_SNDBUF) failed: %m");
 			return STATUS_ERROR;
+		}
+		newopt = PQ_SEND_BUFFER_SIZE * 4;
+		if (oldopt < newopt)
+		{
+			if (setsockopt(port->sock, SOL_SOCKET, SO_SNDBUF, (char *) &newopt,
+						   sizeof(newopt)) < 0)
+			{
+				elog(LOG, "setsockopt(SO_SNDBUF) failed: %m");
+				return STATUS_ERROR;
+			}
 		}
 #endif
 
@@ -1112,7 +1157,7 @@ pq_getstring(StringInfo s)
 
 
 /* --------------------------------
- *		pq_startmsgread	- begin reading a message from the client.
+ *		pq_startmsgread - begin reading a message from the client.
  *
  *		This must be called before any of the pq_get* functions.
  * --------------------------------
@@ -1127,7 +1172,7 @@ pq_startmsgread(void)
 	if (PqCommReadingMsg)
 		ereport(FATAL,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("terminating connection because protocol sync was lost")));
+		   errmsg("terminating connection because protocol sync was lost")));
 
 	PqCommReadingMsg = true;
 }
@@ -1561,7 +1606,7 @@ socket_endcopyout(bool errorAbort)
 /*
  * On Windows, we need to set both idle and interval at the same time.
  * We also cannot reset them to the default (setting to zero will
- * actually set them to zero, not default), therefor we fallback to
+ * actually set them to zero, not default), therefore we fallback to
  * the out-of-the-box default instead.
  */
 #if defined(WIN32) && defined(SIO_KEEPALIVE_VALS)

@@ -392,10 +392,10 @@ vacuum_one_database(const char *dbname, vacuumingOptions *vacopts,
 		ntups = PQntuples(res);
 		for (i = 0; i < ntups; i++)
 		{
-			appendPQExpBuffer(&buf, "%s",
-							  fmtQualifiedId(PQserverVersion(conn),
-											 PQgetvalue(res, i, 1),
-											 PQgetvalue(res, i, 0)));
+			appendPQExpBufferStr(&buf,
+								 fmtQualifiedId(PQserverVersion(conn),
+												PQgetvalue(res, i, 1),
+												PQgetvalue(res, i, 0)));
 
 			simple_string_list_append(&dbtables, buf.data);
 			resetPQExpBuffer(&buf);
@@ -412,6 +412,7 @@ vacuum_one_database(const char *dbname, vacuumingOptions *vacopts,
 			concurrentCons = ntups;
 		if (concurrentCons <= 1)
 			parallel = false;
+		PQclear(res);
 	}
 
 	/*
@@ -643,7 +644,7 @@ prepare_vacuum_command(PQExpBuffer sql, PGconn *conn, vacuumingOptions *vacopts,
 				sep = comma;
 			}
 			if (sep != paren)
-				appendPQExpBufferStr(sql, ")");
+				appendPQExpBufferChar(sql, ')');
 		}
 		else
 		{
@@ -674,7 +675,7 @@ run_vacuum_command(PGconn *conn, const char *sql, bool echo,
 				   const char *dbname, const char *table,
 				   const char *progname, bool async)
 {
-	bool	status;
+	bool		status;
 
 	if (async)
 	{
@@ -943,7 +944,7 @@ help(const char *progname)
 	printf(_("  -Z, --analyze-only              only update optimizer statistics;  no vacuum\n"));
 	printf(_("  -j, --jobs=NUM                  use this many concurrent connections to vacuum\n"));
 	printf(_("      --analyze-in-stages         only update optimizer statistics, in multiple\n"
-		   "                                  stages for faster results;  no vacuum\n"));
+			 "                                  stages for faster results;  no vacuum\n"));
 	printf(_("  -?, --help                      show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
 	printf(_("  -h, --host=HOSTNAME       database server host or socket directory\n"));

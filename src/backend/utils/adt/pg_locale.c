@@ -183,6 +183,12 @@ pg_perm_setlocale(int category, const char *locale)
 	 */
 	if (category == LC_CTYPE)
 	{
+		static char save_lc_ctype[LC_ENV_BUFSIZE];
+
+		/* copy setlocale() return value before callee invokes it again */
+		strlcpy(save_lc_ctype, result, sizeof(save_lc_ctype));
+		result = save_lc_ctype;
+
 #ifdef ENABLE_NLS
 		SetMessageEncoding(pg_bind_textdomain_codeset(textdomain(NULL)));
 #else
@@ -575,22 +581,32 @@ PGLC_localeconv(void)
  * pg_strftime(), which isn't locale-aware and does not need to be replaced.
  */
 static size_t
-strftime_win32(char *dst, size_t dstlen, const wchar_t *format, const struct tm * tm)
+strftime_win32(char *dst, size_t dstlen,
+			   const char *format, const struct tm * tm)
 {
 	size_t		len;
+	wchar_t		wformat[8];		/* formats used below need 3 bytes */
 	wchar_t		wbuf[MAX_L10N_DATA];
 
-	len = wcsftime(wbuf, MAX_L10N_DATA, format, tm);
+	/* get a wchar_t version of the format string */
+	len = MultiByteToWideChar(CP_UTF8, 0, format, -1,
+							  wformat, lengthof(wformat));
+	if (len == 0)
+		elog(ERROR, "could not convert format string from UTF-8: error code %lu",
+			 GetLastError());
+
+	len = wcsftime(wbuf, MAX_L10N_DATA, wformat, tm);
 	if (len == 0)
 	{
 		/*
-		 * strftime call failed - return 0 with the contents of dst
-		 * unspecified
+		 * strftime failed, possibly because the result would not fit in
+		 * MAX_L10N_DATA.  Return 0 with the contents of dst unspecified.
 		 */
 		return 0;
 	}
 
-	len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, dst, dstlen, NULL, NULL);
+	len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, dst, dstlen - 1,
+							  NULL, NULL);
 	if (len == 0)
 		elog(ERROR, "could not convert string to UTF-8: error code %lu",
 			 GetLastError());
@@ -612,9 +628,33 @@ strftime_win32(char *dst, size_t dstlen, const wchar_t *format, const struct tm 
 }
 
 /* redefine strftime() */
-#define strftime(a,b,c,d) strftime_win32(a,b,L##c,d)
+#define strftime(a,b,c,d) strftime_win32(a,b,c,d)
 #endif   /* WIN32 */
 
+/* Subroutine for cache_locale_time(). */
+static void
+cache_single_time(char **dst, const char *format, const struct tm * tm)
+{
+	char		buf[MAX_L10N_DATA];
+	char	   *ptr;
+
+	/*
+	 * MAX_L10N_DATA is sufficient buffer space for every known locale, and
+	 * POSIX defines no strftime() errors.  (Buffer space exhaustion is not an
+	 * error.)	An implementation might report errors (e.g. ENOMEM) by
+	 * returning 0 (or, less plausibly, a negative value) and setting errno.
+	 * Report errno just in case the implementation did that, but clear it in
+	 * advance of the call so we don't emit a stale, unrelated errno.
+	 */
+	errno = 0;
+	if (strftime(buf, MAX_L10N_DATA, format, tm) <= 0)
+		elog(ERROR, "strftime(%s) failed: %m", format);
+
+	ptr = MemoryContextStrdup(TopMemoryContext, buf);
+	if (*dst)
+		pfree(*dst);
+	*dst = ptr;
+}
 
 /*
  * Update the lc_time localization cache variables if needed.
@@ -625,8 +665,6 @@ cache_locale_time(void)
 	char	   *save_lc_time;
 	time_t		timenow;
 	struct tm  *timeinfo;
-	char		buf[MAX_L10N_DATA];
-	char	   *ptr;
 	int			i;
 
 #ifdef WIN32
@@ -673,17 +711,8 @@ cache_locale_time(void)
 	for (i = 0; i < 7; i++)
 	{
 		timeinfo->tm_wday = i;
-		strftime(buf, MAX_L10N_DATA, "%a", timeinfo);
-		ptr = MemoryContextStrdup(TopMemoryContext, buf);
-		if (localized_abbrev_days[i])
-			pfree(localized_abbrev_days[i]);
-		localized_abbrev_days[i] = ptr;
-
-		strftime(buf, MAX_L10N_DATA, "%A", timeinfo);
-		ptr = MemoryContextStrdup(TopMemoryContext, buf);
-		if (localized_full_days[i])
-			pfree(localized_full_days[i]);
-		localized_full_days[i] = ptr;
+		cache_single_time(&localized_abbrev_days[i], "%a", timeinfo);
+		cache_single_time(&localized_full_days[i], "%A", timeinfo);
 	}
 
 	/* localized months */
@@ -691,17 +720,8 @@ cache_locale_time(void)
 	{
 		timeinfo->tm_mon = i;
 		timeinfo->tm_mday = 1;	/* make sure we don't have invalid date */
-		strftime(buf, MAX_L10N_DATA, "%b", timeinfo);
-		ptr = MemoryContextStrdup(TopMemoryContext, buf);
-		if (localized_abbrev_months[i])
-			pfree(localized_abbrev_months[i]);
-		localized_abbrev_months[i] = ptr;
-
-		strftime(buf, MAX_L10N_DATA, "%B", timeinfo);
-		ptr = MemoryContextStrdup(TopMemoryContext, buf);
-		if (localized_full_months[i])
-			pfree(localized_full_months[i]);
-		localized_full_months[i] = ptr;
+		cache_single_time(&localized_abbrev_months[i], "%b", timeinfo);
+		cache_single_time(&localized_full_months[i], "%B", timeinfo);
 	}
 
 	/* try to restore internal settings */
@@ -832,6 +852,64 @@ IsoLocaleName(const char *winlocname)
 #endif   /* _MSC_VER >= 1400 */
 }
 #endif   /* WIN32 && LC_MESSAGES */
+
+
+/*
+ * Detect aging strxfrm() implementations that, in a subset of locales, write
+ * past the specified buffer length.  Affected users must update OS packages
+ * before using PostgreSQL 9.5 or later.
+ *
+ * Assume that the bug can come and go from one postmaster startup to another
+ * due to physical replication among diverse machines.  Assume that the bug's
+ * presence will not change during the life of a particular postmaster.  Given
+ * those assumptions, call this no less than once per postmaster startup per
+ * LC_COLLATE setting used.  No known-affected system offers strxfrm_l(), so
+ * there is no need to consider pg_collation locales.
+ */
+void
+check_strxfrm_bug(void)
+{
+	char		buf[32];
+	const int	canary = 0x7F;
+	bool		ok = true;
+
+	/*
+	 * Given a two-byte ASCII string and length limit 7, 8 or 9, Solaris 10
+	 * 05/08 returns 18 and modifies 10 bytes.  It respects limits above or
+	 * below that range.
+	 *
+	 * The bug is present in Solaris 8 as well; it is absent in Solaris 10
+	 * 01/13 and Solaris 11.2.  Affected locales include is_IS.ISO8859-1,
+	 * en_US.UTF-8, en_US.ISO8859-1, and ru_RU.KOI8-R.  Unaffected locales
+	 * include de_DE.UTF-8, de_DE.ISO8859-1, zh_TW.UTF-8, and C.
+	 */
+	buf[7] = canary;
+	(void) strxfrm(buf, "ab", 7);
+	if (buf[7] != canary)
+		ok = false;
+
+	/*
+	 * illumos bug #1594 was present in the source tree from 2010-10-11 to
+	 * 2012-02-01.  Given an ASCII string of any length and length limit 1,
+	 * affected systems ignore the length limit and modify a number of bytes
+	 * one less than the return value.  The problem inputs for this bug do not
+	 * overlap those for the Solaris bug, hence a distinct test.
+	 *
+	 * Affected systems include smartos-20110926T021612Z.  Affected locales
+	 * include en_US.ISO8859-1 and en_US.UTF-8.  Unaffected locales include C.
+	 */
+	buf[1] = canary;
+	(void) strxfrm(buf, "a", 1);
+	if (buf[1] != canary)
+		ok = false;
+
+	if (!ok)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYSTEM_ERROR),
+				 errmsg_internal("strxfrm(), in locale \"%s\", writes past the specified array length",
+								 setlocale(LC_COLLATE, NULL)),
+				 errhint("Apply system library package updates.")));
+}
 
 
 /*

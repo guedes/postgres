@@ -9,6 +9,7 @@
 *.sl.[0-9].[0-9]
 *.dylib
 *.dll
+*.exp
 *.a
 *.mo
 *.pot
@@ -38,3 +39,4 @@ lib*.pc
 /pgsql.sln.cache
 /Debug/
 /Release/
+/tmp_install/

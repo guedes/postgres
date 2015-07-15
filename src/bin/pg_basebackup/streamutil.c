@@ -31,6 +31,8 @@
 #include "common/fe_memutils.h"
 #include "datatype/timestamp.h"
 
+#define ERRCODE_DUPLICATE_OBJECT  "42710"
+
 const char *progname;
 char	   *connection_string = NULL;
 char	   *dbhost = NULL;
@@ -182,7 +184,7 @@ GetConnection(void)
 
 	if (PQstatus(tmpconn) != CONNECTION_OK)
 	{
-		fprintf(stderr, _("%s: could not connect to server: %s\n"),
+		fprintf(stderr, _("%s: could not connect to server: %s"),
 				progname, PQerrorMessage(tmpconn));
 		PQfinish(tmpconn);
 		free(values);
@@ -241,7 +243,8 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 				  XLogRecPtr *startpos, char **db_name)
 {
 	PGresult   *res;
-	uint32		hi, lo;
+	uint32		hi,
+				lo;
 
 	/* Check connection existence */
 	Assert(conn != NULL);
@@ -279,7 +282,7 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 		if (sscanf(PQgetvalue(res, 0, 2), "%X/%X", &hi, &lo) != 2)
 		{
 			fprintf(stderr,
-					_("%s: could not parse transaction log location \"%s\"\n"),
+				  _("%s: could not parse transaction log location \"%s\"\n"),
 					progname, PQgetvalue(res, 0, 2));
 
 			PQclear(res);
@@ -289,7 +292,7 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 	}
 
 	/* Get database name, only available in 9.4 and newer versions */
-	if  (db_name != NULL)
+	if (db_name != NULL)
 	{
 		if (PQnfields(res) < 4)
 			fprintf(stderr,
@@ -297,7 +300,7 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 					progname, PQntuples(res), PQnfields(res), 1, 4);
 
 		if (PQgetisnull(res, 0, 3))
-			*db_name =  NULL;
+			*db_name = NULL;
 		else
 			*db_name = pg_strdup(PQgetvalue(res, 0, 3));
 	}
@@ -313,7 +316,7 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
  */
 bool
 CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
-					  XLogRecPtr *startpos, bool is_physical)
+					  bool is_physical, bool slot_exists_ok)
 {
 	PQExpBuffer query;
 	PGresult   *res;
@@ -335,12 +338,23 @@ CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
 	res = PQexec(conn, query->data);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
-				progname, query->data, PQerrorMessage(conn));
+		const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
 
-		destroyPQExpBuffer(query);
-		PQclear(res);
-		return false;
+		if (slot_exists_ok && strcmp(sqlstate, ERRCODE_DUPLICATE_OBJECT) == 0)
+		{
+			destroyPQExpBuffer(query);
+			PQclear(res);
+			return true;
+		}
+		else
+		{
+			fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
+					progname, query->data, PQerrorMessage(conn));
+
+			destroyPQExpBuffer(query);
+			PQclear(res);
+			return false;
+		}
 	}
 
 	if (PQntuples(res) != 1 || PQnfields(res) != 4)
@@ -353,24 +367,6 @@ CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
 		destroyPQExpBuffer(query);
 		PQclear(res);
 		return false;
-	}
-
-	/* Get LSN start position if necessary */
-	if (startpos != NULL)
-	{
-		uint32		hi, lo;
-
-		if (sscanf(PQgetvalue(res, 0, 1), "%X/%X", &hi, &lo) != 2)
-		{
-			fprintf(stderr,
-					_("%s: could not parse transaction log location \"%s\"\n"),
-					progname, PQgetvalue(res, 0, 1));
-
-			destroyPQExpBuffer(query);
-			PQclear(res);
-			return false;
-		}
-		*startpos = ((uint64) hi) << 32 | lo;
 	}
 
 	destroyPQExpBuffer(query);
@@ -418,6 +414,7 @@ DropReplicationSlot(PGconn *conn, const char *slot_name)
 		return false;
 	}
 
+	destroyPQExpBuffer(query);
 	PQclear(res);
 	return true;
 }
