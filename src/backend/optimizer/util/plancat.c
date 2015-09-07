@@ -27,6 +27,7 @@
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
+#include "catalog/pg_cstore.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -71,6 +72,7 @@ static List *build_index_tlist(PlannerInfo *root, IndexOptInfo *index,
  *	min_attr	lowest valid AttrNumber
  *	max_attr	highest valid AttrNumber
  *	indexlist	list of IndexOptInfos for relation's indexes
+ *	cstlist		list of ColumnStoreOptInfos for relation's colstores
  *	serverid	if it's a foreign table, the server OID
  *	fdwroutine	if it's a foreign table, the FDW function pointers
  *	pages		number of pages
@@ -93,6 +95,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	Relation	relation;
 	bool		hasindex;
 	List	   *indexinfos = NIL;
+	List	   *colstoreinfos = NIL;
 
 	/*
 	 * We need not lock the relation since it was already locked, either by
@@ -380,6 +383,91 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	}
 
 	rel->indexlist = indexinfos;
+
+	/* Grab column store info using the relcache, while we have it */
+	if (relation->rd_rel->relhascstore)
+	{
+		List	   *colstoreoidlist;
+		ListCell   *l;
+		LOCKMODE	lmode;
+
+		colstoreoidlist = RelationGetColStoreList(relation);
+
+		/*
+		 * For each column store, we get the same type of lock that the
+		 * executor will need, and do not release it.  This saves a couple
+		 * of trips to the shared lock manager while not creating any real
+		 * loss of concurrency, because no schema changes could be
+		 * happening on the colstore while we hold lock on the parent rel,
+		 * and neither lock type blocks any other kind of colstore operation.
+		 */
+		if (rel->relid == root->parse->resultRelation)
+			lmode = RowExclusiveLock;
+		else
+			lmode = AccessShareLock;
+
+		foreach(l, colstoreoidlist)
+		{
+			Oid			colstoreoid = lfirst_oid(l);
+			Relation	colstoreRelation;
+			Form_pg_cstore colstore;
+			ColumnStoreOptInfo *info;
+			int			ncolumns;
+			int			i;
+
+			/*
+			 * Extract info from the relation descriptor for the colstore.
+			 *
+			 * FIXME There's no 'rd_cstore' in RelationData at the moment,
+			 *       so it needs to be added and integrated into relcache
+			 *       (just a bit of copy'n'paste programming using the
+			 *       rd_index logic).
+			 *
+			 * TODO  Define colstore_open(), similar to index_open().
+			 */
+			colstoreRelation = relation_open(colstoreoid, lmode);
+			colstore = colstoreRelation->rd_cstore;
+
+			/* XXX Invalid and not-yet-usable colstores would be handled here. */
+
+			info = makeNode(ColumnStoreOptInfo);
+
+			info->colstoreoid = colstore->cststoreid;
+			info->reltablespace =
+				RelationGetForm(colstoreRelation)->reltablespace;
+			info->rel = rel;
+			info->ncolumns = ncolumns = colstore->cstnatts;
+			info->cstkeys = (int *) palloc(sizeof(int) * ncolumns);
+
+			for (i = 0; i < ncolumns; i++)
+				info->cstkeys[i] = colstore->cstatts.values[i];
+
+			/*
+			 * TODO This is where to fetch AM for the colstore (see how
+			 *      the index are handled above.
+			 */
+
+			/*
+			 * XXX this is where indexes build targetlists. Colstores don't
+			 * have these (at least not ATM).
+			 */
+
+			/*
+			 * Estimate the colstore size. We don't support partial
+			 * colstores, we just use the same reltuples as the parent.
+			 */
+			info->pages = RelationGetNumberOfBlocks(colstoreRelation);
+			info->tuples = rel->tuples;
+
+			relation_close(colstoreRelation, NoLock);
+
+			colstoreinfos = lcons(info, colstoreinfos);
+		}
+
+		list_free(colstoreoidlist);
+	}
+
+	rel->cstlist = colstoreinfos;
 
 	/* Grab foreign-table info using the relcache, while we have it */
 	if (relation->rd_rel->relkind == RELKIND_FOREIGN_TABLE)

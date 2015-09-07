@@ -77,6 +77,25 @@ typedef struct IndexInfo
 } IndexInfo;
 
 /* ----------------
+ *	  ColumnStoreInfo information
+ *
+ *		this struct holds the information needed to construct new column store
+ *		entries for a particular column store.
+ *
+ *		NumColumnStoreAttrs	number of columns in this column store
+ *		KeyAttrNumbers		underlying-rel attribute numbers used as keys
+ *		ColumnStoreRoutine	ColumnStore callback functions
+ * ----------------
+ */
+typedef struct ColumnStoreInfo
+{
+	NodeTag		type;
+	int			csi_NumColumnStoreAttrs;
+	AttrNumber	csi_KeyAttrNumbers[INDEX_MAX_KEYS];
+	struct ColumnStoreRoutine *csi_ColumnStoreRoutine;
+} ColumnStoreInfo;
+
+/* ----------------
  *	  ExprContext_CB
  *
  *		List of callbacks to be called at ExprContext shutdown.
@@ -305,6 +324,9 @@ typedef struct JunkFilter
  *		NumIndices				# of indices existing on result relation
  *		IndexRelationDescs		array of relation descriptors for indices
  *		IndexRelationInfo		array of key/attr info for indices
+ *		NumColumnStores			# of column stores existing on result relation
+ *		ColumnStoreRelationDescs	array of rel. descriptors for column stores
+ *		ColumnStoreRelationInfo		array of key/attr info for column stores
  *		TrigDesc				triggers to be fired, if any
  *		TrigFunctions			cached lookup info for trigger functions
  *		TrigWhenExprs			array of trigger WHEN expr states
@@ -328,6 +350,9 @@ typedef struct ResultRelInfo
 	int			ri_NumIndices;
 	RelationPtr ri_IndexRelationDescs;
 	IndexInfo **ri_IndexRelationInfo;
+	int			ri_NumColumnStores;
+	RelationPtr ri_ColumnStoreRelationDescs;
+	ColumnStoreInfo **ri_ColumnStoreRelationInfo;
 	TriggerDesc *ri_TrigDesc;
 	FmgrInfo   *ri_TrigFunctions;
 	List	  **ri_TrigWhenExprs;
@@ -1780,6 +1805,31 @@ typedef struct MaterialState
 	bool		eof_underlying; /* reached end of underlying plan? */
 	Tuplestorestate *tuplestorestate;
 } MaterialState;
+
+/* ----------------
+ *	 ColumnStoreMaterialState information
+ *
+ *		materialize nodes are used to fill-in values from a column store
+ *		into an ordinary tuple
+ *
+ *		unlike the regular Materialize node it does not store the data
+ *		into a tuple store or so, it just fills-in the values and
+ *		streams the tuple out (it may perform some internal batching
+ *		to benefit from the columnar storage, but it's not required to
+ *		materialize the whole result set)
+ *
+ *		ss.ss_ScanTupleSlot refers to output of underlying plan.
+ * ----------------
+ */
+typedef struct ColumnStoreMaterialState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	int			eflags;			/* capability flags */
+
+	/* TODO This likely requires additional fields (info about the
+	 *      colstore (ColumnScanDesc?) etc. */
+
+} ColumnStoreMaterialState;
 
 /* ----------------
  *	 SortState information

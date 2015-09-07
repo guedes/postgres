@@ -1523,6 +1523,10 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&title, _("Composite type \"%s.%s\""),
 							  schemaname, relationname);
 			break;
+		case 'C':
+			printfPQExpBuffer(&title, _("Column store \"%s.%s\""),
+							  schemaname, relationname);
+			break;
 		case 'f':
 			printfPQExpBuffer(&title, _("Foreign table \"%s.%s\""),
 							  schemaname, relationname);
@@ -2526,6 +2530,41 @@ describeOneTableDetails(const char *schemaname,
 		/* Tablespace info */
 		add_tablespace_footer(&cont, tableinfo.relkind, tableinfo.tablespace,
 							  true);
+
+		/* Print column stores FIXME -- add version dependency */
+		{
+			const char *cs = _("Column stores");
+			int			csw = pg_wcswidth(cs, strlen(cs), pset.encoding);
+
+			/* FIXME get rid of the braces, use JOIN ON? */
+			printfPQExpBuffer(&buf, "SELECT cstamname, cstname, ARRAY(SELECT attname FROM pg_attribute WHERE attrelid = cstrelid AND attnum = ANY(cstatts)) FROM pg_cstore AS cst, pg_class AS cl, pg_cstore_am AS am WHERE cl.oid = cst.cststoreid AND cl.relam = am.oid AND cstrelid = '%s'::regclass ORDER BY cstatts[0];", oid);
+			result = PSQLexec(buf.data);
+			if (!result)
+				goto error_return;
+			else
+				tuples = PQntuples(result);
+
+			for (i = 0; i < tuples; i++)
+			{
+				if (i == 0)
+					printfPQExpBuffer(&buf, "%s: %s USING %s (%s)",
+									  cs,
+									  PQgetvalue(result, i, 1),
+									  PQgetvalue(result, i, 0),
+									  PQgetvalue(result, i, 2));
+				else
+					printfPQExpBuffer(&buf, "%*s  %s USING %s (%s)",
+									  csw, "",
+									  PQgetvalue(result, i, 1),
+									  PQgetvalue(result, i, 0),
+									  PQgetvalue(result, i, 2));
+				if (i < tuples - 1)
+					appendPQExpBufferChar(&buf, ',');
+
+				printTableAddFooter(&cont, buf.data);
+			}
+			PQclear(result);
+		}
 	}
 
 	/* reloptions, if verbose */

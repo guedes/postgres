@@ -3664,6 +3664,8 @@ DATA(insert OID = 2997 ( pg_table_size			PGNSP PGUID 12 1 0 0 0 f f f f t f v 1 
 DESCR("disk space usage for the specified table, including TOAST, free space and visibility map");
 DATA(insert OID = 2998 ( pg_indexes_size		PGNSP PGUID 12 1 0 0 0 f f f f t f v 1 0 20 "2205" _null_ _null_ _null_ _null_ _null_ pg_indexes_size _null_ _null_ _null_ ));
 DESCR("disk space usage for all indexes attached to the specified table");
+DATA(insert OID = 3350 ( pg_column_stores_size	PGNSP PGUID 12 1 0 0 0 f f f f t f v 1 0 20 "2205" _null_ _null_ _null_ _null_ _null_ pg_column_stores_size _null_ _null_ _null_ ));
+DESCR("disk space usage for all column stores attached to the specified table");
 DATA(insert OID = 2999 ( pg_relation_filenode	PGNSP PGUID 12 1 0 0 0 f f f f t f s 1 0 26 "2205" _null_ _null_ _null_ _null_ _null_ pg_relation_filenode _null_ _null_ _null_ ));
 DESCR("filenode identifier of relation");
 DATA(insert OID = 3454 ( pg_filenode_relation PGNSP PGUID 12 1 0 0 0 f f f f t f s 2 0 2205 "26 26" _null_ _null_ _null_ _null_ _null_ pg_filenode_relation _null_ _null_ _null_ ));
@@ -3738,12 +3740,20 @@ DATA(insert OID = 3311 (  tsm_handler_in	PGNSP PGUID 12 1 0 0 0 f f f f f f i 1 
 DESCR("I/O");
 DATA(insert OID = 3312 (  tsm_handler_out	PGNSP PGUID 12 1 0 0 0 f f f f t f i 1 0 2275 "3310" _null_ _null_ _null_ _null_ _null_ tsm_handler_out _null_ _null_ _null_ ));
 DESCR("I/O");
+DATA(insert OID = 3352 (  cstore_handler_in	PGNSP PGUID 12 1 0 0 0 f f f f f f i 1 0 3351 "2275" _null_ _null_ _null_ _null_ _null_ cstore_handler_in _null_ _null_ _null_ ));
+DESCR("I/O");
+DATA(insert OID = 3353 (  cstore_handler_out	PGNSP PGUID 12 1 0 0 0 f f f f t f i 1 0 2275 "3351" _null_ _null_ _null_ _null_ _null_ cstore_handler_out _null_ _null_ _null_ ));
+DESCR("I/O");
 
 /* tablesample method handlers */
 DATA(insert OID = 3313 (  bernoulli			PGNSP PGUID 12 1 0 0 0 f f f f t f v 1 0 3310 "2281" _null_ _null_ _null_ _null_ _null_ tsm_bernoulli_handler _null_ _null_ _null_ ));
 DESCR("BERNOULLI tablesample method handler");
 DATA(insert OID = 3314 (  system			PGNSP PGUID 12 1 0 0 0 f f f f t f v 1 0 3310 "2281" _null_ _null_ _null_ _null_ _null_ tsm_system_handler _null_ _null_ _null_ ));
 DESCR("SYSTEM tablesample method handler");
+
+/* column stores */
+DATA(insert OID = 3354 (  cstore_dummy_handler	PGNSP PGUID 12 1 0 0 0 f f f f t f i 0 0 3351 "" _null_ _null_ _null_ _null_ _null_ cstore_dummy_handler _null_ _null_ _null_ ));
+DESCR("dummy column store method");
 
 /* cryptographic */
 DATA(insert OID =  2311 (  md5	   PGNSP PGUID 12 1 0 0 0 f f f f t f i 1 0 25 "25" _null_ _null_ _null_ _null_ _null_ md5_text _null_ _null_ _null_ ));

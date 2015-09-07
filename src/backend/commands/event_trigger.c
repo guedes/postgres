@@ -90,6 +90,7 @@ static event_trigger_support_data event_trigger_support[] = {
 	{"CAST", true},
 	{"CONSTRAINT", true},
 	{"COLLATION", true},
+	{"COLUMN STORE ACCESS METHOD", true},
 	{"CONVERSION", true},
 	{"DATABASE", false},
 	{"DOMAIN", true},
@@ -1118,6 +1119,8 @@ EventTriggerSupportsObjectType(ObjectType obtype)
 		case OBJECT_USER_MAPPING:
 		case OBJECT_VIEW:
 			return true;
+		case OBJECT_COLSTORE:
+			elog(ERROR, "unsupported --- XXX fill this in");
 	}
 	return true;
 }
@@ -1168,6 +1171,8 @@ EventTriggerSupportsObjectClass(ObjectClass objclass)
 		case OCLASS_EXTENSION:
 		case OCLASS_POLICY:
 			return true;
+		case OCLASS_COLSTORE:
+			elog(ERROR, "unsupported --- XXX fill this in");
 	}
 
 	return true;

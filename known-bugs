@@ -1,0 +1,10 @@
+Known Bugs, Issues and Limitations
+
+* Heisenbug: shared memory error from >100 column stores
+  Simon Riggs can reproduce this, no one else can.
+
+* ERROR:  cache lookup failed for column store 160595
+  This error shows up inexplicably when a table with over 100 column stores is
+  dropped.  (Alvaro's guess is that it's related to pg_depend handling.  Gotta
+  rework that and remove OIDs from pg_cstore).
+

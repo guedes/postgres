@@ -37,6 +37,7 @@ typedef enum NodeTag
 	T_ResultRelInfo,
 	T_EState,
 	T_TupleTableSlot,
+	T_ColumnStoreInfo,
 
 	/*
 	 * TAGS FOR PLAN NODES (plannodes.h)
@@ -82,6 +83,7 @@ typedef enum NodeTag
 	T_NestLoopParam,
 	T_PlanRowMark,
 	T_PlanInvalItem,
+	T_ColumnStoreMaterial,
 
 	/*
 	 * TAGS FOR PLAN STATE NODES (execnodes.h)
@@ -125,6 +127,7 @@ typedef enum NodeTag
 	T_SetOpState,
 	T_LockRowsState,
 	T_LimitState,
+	T_ColumnStoreMaterialState,
 
 	/*
 	 * TAGS FOR PRIMITIVE NODES (primnodes.h)
@@ -249,6 +252,8 @@ typedef enum NodeTag
 	T_PlaceHolderInfo,
 	T_MinMaxAggInfo,
 	T_PlannerParamItem,
+	T_ColumnStoreOptInfo,
+	T_ColumnStoreMaterialPath,
 
 	/*
 	 * TAGS FOR MEMORY NODES (memnodes.h)
@@ -379,6 +384,7 @@ typedef enum NodeTag
 	T_CreatePolicyStmt,
 	T_AlterPolicyStmt,
 	T_CreateTransformStmt,
+	T_CreateColumnStoreAMStmt,
 
 	/*
 	 * TAGS FOR PARSE TREE NODES (parsenodes.h)
@@ -396,6 +402,7 @@ typedef enum NodeTag
 	T_MultiAssignRef,
 	T_TypeCast,
 	T_CollateClause,
+	T_ColumnStoreClause,
 	T_SortBy,
 	T_WindowDef,
 	T_RangeSubselect,
@@ -453,7 +460,8 @@ typedef enum NodeTag
 	T_TIDBitmap,				/* in nodes/tidbitmap.h */
 	T_InlineCodeBlock,			/* in nodes/parsenodes.h */
 	T_FdwRoutine,				/* in foreign/fdwapi.h */
-	T_TsmRoutine				/* in access/tsmapi.h */
+	T_TsmRoutine,				/* in access/tsmapi.h */
+	T_ColumnStoreRoutine		/* in colstore/colstoreapi.h */
 } NodeTag;
 
 /*

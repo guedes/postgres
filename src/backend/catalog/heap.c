@@ -37,6 +37,7 @@
 #include "access/xlog.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/catalog.h"
+#include "catalog/colstore.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
@@ -653,7 +654,7 @@ InsertPgAttributeTuple(Relation pg_attribute_rel,
  *		tuples to pg_attribute.
  * --------------------------------
  */
-static void
+void
 AddNewAttributeTuples(Oid new_rel_oid,
 					  TupleDesc tupdesc,
 					  char relkind,
@@ -712,10 +713,11 @@ AddNewAttributeTuples(Oid new_rel_oid,
 
 	/*
 	 * Next we add the system attributes.  Skip OID if rel has no OIDs. Skip
-	 * all for a view or type relation.  We don't bother with making datatype
-	 * dependencies here, since presumably all these types are pinned.
+	 * all for a colstore, view or type relation.  We don't bother with making
+	 * datatype dependencies here, since presumably all these types are pinned.
 	 */
-	if (relkind != RELKIND_VIEW && relkind != RELKIND_COMPOSITE_TYPE)
+	if (relkind != RELKIND_VIEW && relkind != RELKIND_COMPOSITE_TYPE &&
+		relkind != RELKIND_COLUMN_STORE)
 	{
 		for (i = 0; i < (int) lengthof(SysAtt); i++)
 		{
@@ -792,6 +794,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relallvisible - 1] = Int32GetDatum(rd_rel->relallvisible);
 	values[Anum_pg_class_reltoastrelid - 1] = ObjectIdGetDatum(rd_rel->reltoastrelid);
 	values[Anum_pg_class_relhasindex - 1] = BoolGetDatum(rd_rel->relhasindex);
+	values[Anum_pg_class_relhascstore - 1] = BoolGetDatum(rd_rel->relhascstore);
 	values[Anum_pg_class_relisshared - 1] = BoolGetDatum(rd_rel->relisshared);
 	values[Anum_pg_class_relpersistence - 1] = CharGetDatum(rd_rel->relpersistence);
 	values[Anum_pg_class_relkind - 1] = CharGetDatum(rd_rel->relkind);
@@ -993,6 +996,7 @@ AddNewRelationType(const char *typeName,
  *	ownerid: OID of new rel's owner
  *	tupdesc: tuple descriptor (source of column definitions)
  *	cooked_constraints: list of precooked check constraints and defaults
+ *	colstores: list (of ColumnStoreElem) of column stores for this rel
  *	relkind: relkind for new rel
  *	relpersistence: rel's persistence status (permanent, temp, or unlogged)
  *	shared_relation: TRUE if it's to be a shared relation
@@ -1022,6 +1026,7 @@ heap_create_with_catalog(const char *relname,
 						 Oid ownerid,
 						 TupleDesc tupdesc,
 						 List *cooked_constraints,
+						 List *colstores,
 						 char relkind,
 						 char relpersistence,
 						 bool shared_relation,
@@ -1247,6 +1252,9 @@ heap_create_with_catalog(const char *relname,
 		pfree(relarrayname);
 	}
 
+	/* Set relhascstore correctly */
+	new_rel_desc->rd_rel->relhascstore = colstores != NIL;
+
 	/*
 	 * now create an entry in pg_class for the relation.
 	 *
@@ -1263,6 +1271,13 @@ heap_create_with_catalog(const char *relname,
 						relkind,
 						PointerGetDatum(relacl),
 						reloptions);
+
+	/*
+	 * If the new relation has any column stores, create them now.  This
+	 * assigns their OIDs and creates the files on disk (it's smgr's
+	 * responsibility to remove these files if we fail below.)
+	 */
+	CreateColumnStores(new_rel_desc, colstores);
 
 	/*
 	 * now add tuples to pg_attribute for the attributes in our new relation.

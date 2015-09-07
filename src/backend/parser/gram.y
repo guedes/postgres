@@ -171,6 +171,7 @@ static TypeName *TableFuncTypeName(List *columns);
 static RangeVar *makeRangeVarFromAnyName(List *names, int position, core_yyscan_t yyscanner);
 static void SplitColQualList(List *qualList,
 							 List **constraintList, CollateClause **collClause,
+							 ColumnStoreClause **cstoreClause,
 							 core_yyscan_t yyscanner);
 static void processCASbits(int cas_bits, int location, const char *constrType,
 			   bool *deferrable, bool *initdeferred, bool *not_valid,
@@ -263,7 +264,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 		DeallocateStmt PrepareStmt ExecuteStmt
 		DropOwnedStmt ReassignOwnedStmt
 		AlterTSConfigurationStmt AlterTSDictionaryStmt
-		CreateMatViewStmt RefreshMatViewStmt
+		CreateMatViewStmt RefreshMatViewStmt CreateColumnStoreAMStmt
 
 %type <node>	select_no_parens select_with_parens select_clause
 				simple_select values_clause
@@ -377,6 +378,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 %type <list>	opt_fdw_options fdw_options
 %type <defelt>	fdw_option
+
+%type <list>	opt_cstam_options cstam_options
+%type <defelt>	cstam_option
 
 %type <range>	OptTempTableName
 %type <into>	into_clause create_as_target create_mv_target
@@ -501,7 +505,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <keyword> unreserved_keyword type_func_name_keyword
 %type <keyword> col_name_keyword reserved_keyword
 
-%type <node>	TableConstraint TableLikeClause
+%type <node>	TableConstraint TableLikeClause ColStoreClause
 %type <ival>	TableLikeOptionList TableLikeOption
 %type <list>	ColQualList
 %type <node>	ColConstraint ColConstraintElem ConstraintAttr
@@ -604,7 +608,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL
 	LOCALTIME LOCALTIMESTAMP LOCATION LOCK_P LOCKED LOGGED
 
-	MAPPING MATCH MATERIALIZED MAXVALUE MINUTE_P MINVALUE MODE MONTH_P MOVE
+	MAPPING MATCH MATERIALIZED MAXVALUE METHOD MINUTE_P MINVALUE MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NEXT NO NONE
 	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
@@ -627,7 +631,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	SAVEPOINT SCHEMA SCROLL SEARCH SECOND_P SECURITY SELECT SEQUENCE SEQUENCES
 	SERIALIZABLE SERVER SESSION SESSION_USER SET SETS SETOF SHARE SHOW
 	SIMILAR SIMPLE SKIP SMALLINT SNAPSHOT SOME SQL_P STABLE STANDALONE_P START
-	STATEMENT STATISTICS STDIN STDOUT STORAGE STRICT_P STRIP_P SUBSTRING
+	STATEMENT STATISTICS STDIN STDOUT STORAGE STORE STRICT_P STRIP_P SUBSTRING
 	SYMMETRIC SYSID SYSTEM_P
 
 	TABLE TABLES TABLESAMPLE TABLESPACE TEMP TEMPLATE TEMPORARY TEXT_P THEN
@@ -792,6 +796,7 @@ stmt :
 			| CreateAsStmt
 			| CreateAssertStmt
 			| CreateCastStmt
+			| CreateColumnStoreAMStmt
 			| CreateConversionStmt
 			| CreateDomainStmt
 			| CreateExtensionStmt
@@ -2934,11 +2939,13 @@ TableElement:
 			columnDef							{ $$ = $1; }
 			| TableLikeClause					{ $$ = $1; }
 			| TableConstraint					{ $$ = $1; }
+			| ColStoreClause					{ $$ = $1; }
 		;
 
 TypedTableElement:
 			columnOptions						{ $$ = $1; }
 			| TableConstraint					{ $$ = $1; }
+			| ColStoreClause					{ $$ = $1; }
 		;
 
 columnDef:	ColId Typename create_generic_options ColQualList
@@ -2956,6 +2963,7 @@ columnDef:	ColId Typename create_generic_options ColQualList
 					n->collOid = InvalidOid;
 					n->fdwoptions = $3;
 					SplitColQualList($4, &n->constraints, &n->collClause,
+									 &n->cstoreClause,
 									 yyscanner);
 					n->location = @1;
 					$$ = (Node *)n;
@@ -2976,6 +2984,7 @@ columnOptions:	ColId WITH OPTIONS ColQualList
 					n->cooked_default = NULL;
 					n->collOid = InvalidOid;
 					SplitColQualList($4, &n->constraints, &n->collClause,
+									 &n->cstoreClause,
 									 yyscanner);
 					n->location = @1;
 					$$ = (Node *)n;
@@ -3008,6 +3017,20 @@ ColConstraint:
 					CollateClause *n = makeNode(CollateClause);
 					n->arg = NULL;
 					n->collname = $2;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| COLUMN STORE ColId USING ColId opt_reloptions OptTableSpace
+				{
+					/*
+					 * Note: as with COLLATE, this is here only temporarily.
+					 */
+					ColumnStoreClause *n = makeNode(ColumnStoreClause);
+					n->name = $3;
+					n->storetype = $5;
+					n->columns = NIL;
+					n->options = $6;
+					n->tablespacename = $7;
 					n->location = @1;
 					$$ = (Node *) n;
 				}
@@ -3188,6 +3211,19 @@ TableConstraint:
 					$$ = (Node *) n;
 				}
 			| ConstraintElem						{ $$ = $1; }
+		;
+
+ColStoreClause:
+			COLUMN STORE ColId USING ColId '(' columnList ')' opt_reloptions OptTableSpace
+				{
+					ColumnStoreClause *n = makeNode(ColumnStoreClause);
+					n->name = $3;
+					n->storetype = $5;
+					n->columns = $7;
+					n->options = $9;
+					n->tablespacename = $10;
+					$$ = (Node *) n;
+				}
 		;
 
 ConstraintElem:
@@ -4177,6 +4213,38 @@ fdw_options:
 
 opt_fdw_options:
 			fdw_options							{ $$ = $1; }
+			| /*EMPTY*/							{ $$ = NIL; }
+		;
+
+
+/*****************************************************************************
+ *
+ *		QUERY:
+ *             CREATE COLUMN STORE ACCESS METHOD name options
+ *
+ *****************************************************************************/
+
+CreateColumnStoreAMStmt: CREATE COLUMN STORE ACCESS METHOD name opt_cstam_options
+				{
+					CreateColumnStoreAMStmt *n = makeNode(CreateColumnStoreAMStmt);
+					n->cstamname = $6;
+					n->func_options = $7;
+					$$ = (Node *) n;
+				}
+		;
+
+cstam_option:
+			HANDLER handler_name				{ $$ = makeDefElem("handler", (Node *)$2); }
+			| NO HANDLER						{ $$ = makeDefElem("handler", NULL); }
+		;
+
+cstam_options:
+			cstam_option						{ $$ = list_make1($1); }
+			| cstam_options cstam_option		{ $$ = lappend($1, $2); }
+		;
+
+opt_cstam_options:
+			cstam_options						{ $$ = $1; }
 			| /*EMPTY*/							{ $$ = NIL; }
 		;
 
@@ -8972,6 +9040,7 @@ CreateDomainStmt:
 					n->domainname = $3;
 					n->typeName = $5;
 					SplitColQualList($6, &n->constraints, &n->collClause,
+									 NULL,
 									 yyscanner);
 					$$ = (Node *)n;
 				}
@@ -13754,6 +13823,7 @@ unreserved_keyword:
 			| MATCH
 			| MATERIALIZED
 			| MAXVALUE
+			| METHOD
 			| MINUTE_P
 			| MINVALUE
 			| MODE
@@ -13846,6 +13916,7 @@ unreserved_keyword:
 			| STDIN
 			| STDOUT
 			| STORAGE
+			| STORE
 			| STRICT_P
 			| STRIP_P
 			| SYSID
@@ -14706,6 +14777,7 @@ makeRangeVarFromAnyName(List *names, int position, core_yyscan_t yyscanner)
 static void
 SplitColQualList(List *qualList,
 				 List **constraintList, CollateClause **collClause,
+				 ColumnStoreClause **cstoreClause,
 				 core_yyscan_t yyscanner)
 {
 	ListCell   *cell;
@@ -14735,6 +14807,22 @@ SplitColQualList(List *qualList,
 						 errmsg("multiple COLLATE clauses not allowed"),
 						 parser_errposition(c->location)));
 			*collClause = c;
+		}
+		else if (IsA(n, ColumnStoreClause))
+		{
+			ColumnStoreClause *c = (ColumnStoreClause *) n;
+
+			if (cstoreClause == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("COLUMN STORE clause not allowed here"),
+						 parser_errposition(c->location)));
+			if (*cstoreClause)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("multiple COLUMN STORE clauses not allowed"),
+						 parser_errposition(c->location)));
+			*cstoreClause = c;
 		}
 		else
 			elog(ERROR, "unexpected node type %d", (int) n->type);

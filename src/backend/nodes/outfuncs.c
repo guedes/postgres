@@ -751,6 +751,14 @@ _outMaterial(StringInfo str, const Material *node)
 }
 
 static void
+_outColumnStoreMaterial(StringInfo str, const ColumnStoreMaterial *node)
+{
+	WRITE_NODE_TYPE("COLUMNSTOREMATERIAL");
+
+	_outPlanInfo(str, (const Plan *) node);
+}
+
+static void
 _outSort(StringInfo str, const Sort *node)
 {
 	int			i;
@@ -1725,6 +1733,16 @@ _outMaterialPath(StringInfo str, const MaterialPath *node)
 }
 
 static void
+_outColumnStoreMaterialPath(StringInfo str, const ColumnStoreMaterialPath *node)
+{
+	WRITE_NODE_TYPE("COLUMNSTOREMATERIALPATH");
+
+	_outPathInfo(str, (const Path *) node);
+
+	WRITE_NODE_FIELD(subpath);
+}
+
+static void
 _outUniquePath(StringInfo str, const UniquePath *node)
 {
 	WRITE_NODE_TYPE("UNIQUEPATH");
@@ -1900,6 +1918,23 @@ _outIndexOptInfo(StringInfo str, const IndexOptInfo *node)
 	WRITE_BOOL_FIELD(unique);
 	WRITE_BOOL_FIELD(immediate);
 	WRITE_BOOL_FIELD(hypothetical);
+	/* we don't bother with fields copied from the pg_am entry */
+}
+
+static void
+_outColumnStoreOptInfo(StringInfo str, const ColumnStoreOptInfo *node)
+{
+	WRITE_NODE_TYPE("COLUMNSTOREOPTINFO");
+
+	/* NB: this isn't a complete set of fields */
+	WRITE_OID_FIELD(colstoreoid);
+
+	/* Do NOT print rel field, else infinite recursion */
+	WRITE_UINT_FIELD(pages);
+	WRITE_FLOAT_FIELD(tuples, "%.0f");
+	WRITE_INT_FIELD(ncolumns);
+	/* array fields aren't really worth the trouble to print */
+	WRITE_OID_FIELD(cstam);
 	/* we don't bother with fields copied from the pg_am entry */
 }
 
@@ -2279,6 +2314,7 @@ _outColumnDef(StringInfo str, const ColumnDef *node)
 	WRITE_NODE_FIELD(collClause);
 	WRITE_OID_FIELD(collOid);
 	WRITE_NODE_FIELD(constraints);
+	WRITE_NODE_FIELD(cstoreClause);
 	WRITE_NODE_FIELD(fdwoptions);
 	WRITE_LOCATION_FIELD(location);
 }
@@ -2316,6 +2352,19 @@ _outCollateClause(StringInfo str, const CollateClause *node)
 	WRITE_NODE_FIELD(arg);
 	WRITE_NODE_FIELD(collname);
 	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outColumnStoreClause(StringInfo str, const ColumnStoreClause *node)
+{
+	WRITE_NODE_TYPE("COLUMNSTORECLAUSE");
+
+	WRITE_STRING_FIELD(name);
+	WRITE_STRING_FIELD(storetype);
+	WRITE_NODE_FIELD(columns);
+	WRITE_NODE_FIELD(options);
+	WRITE_LOCATION_FIELD(location);
+	WRITE_STRING_FIELD(tablespacename);
 }
 
 static void
@@ -3062,6 +3111,9 @@ _outNode(StringInfo str, const void *obj)
 			case T_Material:
 				_outMaterial(str, obj);
 				break;
+			case T_ColumnStoreMaterial:
+				_outColumnStoreMaterial(str, obj);
+				break;
 			case T_Sort:
 				_outSort(str, obj);
 				break;
@@ -3269,6 +3321,9 @@ _outNode(StringInfo str, const void *obj)
 			case T_MaterialPath:
 				_outMaterialPath(str, obj);
 				break;
+			case T_ColumnStoreMaterialPath:
+				_outColumnStoreMaterialPath(str, obj);
+				break;
 			case T_UniquePath:
 				_outUniquePath(str, obj);
 				break;
@@ -3329,6 +3384,9 @@ _outNode(StringInfo str, const void *obj)
 			case T_PlannerParamItem:
 				_outPlannerParamItem(str, obj);
 				break;
+			case T_ColumnStoreOptInfo:
+				_outColumnStoreOptInfo(str, obj);
+				break;
 
 			case T_CreateStmt:
 				_outCreateStmt(str, obj);
@@ -3362,6 +3420,9 @@ _outNode(StringInfo str, const void *obj)
 				break;
 			case T_CollateClause:
 				_outCollateClause(str, obj);
+				break;
+			case T_ColumnStoreClause:
+				_outColumnStoreClause(str, obj);
 				break;
 			case T_IndexElem:
 				_outIndexElem(str, obj);

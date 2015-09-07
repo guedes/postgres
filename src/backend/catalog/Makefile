@@ -10,9 +10,9 @@ subdir = src/backend/catalog
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
-OBJS = catalog.o dependency.o heap.o index.o indexing.o namespace.o aclchk.o \
-       objectaccess.o objectaddress.o pg_aggregate.o pg_collation.o \
-       pg_constraint.o pg_conversion.o \
+OBJS = aclchk.o catalog.o colstore.o dependency.o heap.o index.o indexing.o \
+       namespace.o objectaccess.o objectaddress.o \
+       pg_aggregate.o pg_collation.o pg_constraint.o pg_conversion.o \
        pg_depend.o pg_enum.o pg_inherits.o pg_largeobject.o pg_namespace.o \
        pg_operator.o pg_proc.o pg_range.o pg_db_role_setting.o pg_shdepend.o \
        pg_type.o storage.o toasting.o
@@ -41,7 +41,7 @@ POSTGRES_BKI_SRCS = $(addprefix $(top_srcdir)/src/include/catalog/,\
 	pg_foreign_data_wrapper.h pg_foreign_server.h pg_user_mapping.h \
 	pg_foreign_table.h pg_policy.h pg_replication_origin.h \
 	pg_default_acl.h pg_seclabel.h pg_shseclabel.h \
-	pg_collation.h pg_range.h pg_transform.h \
+	pg_collation.h pg_range.h pg_transform.h pg_cstore_am.h pg_cstore.h \
 	toasting.h indexing.h \
     )
 

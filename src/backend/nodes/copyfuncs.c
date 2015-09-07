@@ -786,6 +786,22 @@ _copyMaterial(const Material *from)
 	return newnode;
 }
 
+/*
+ * _copyColumnStoreMaterial
+ */
+static ColumnStoreMaterial *
+_copyColumnStoreMaterial(const ColumnStoreMaterial *from)
+{
+	ColumnStoreMaterial   *newnode = makeNode(ColumnStoreMaterial);
+
+	/*
+	 * copy node superclass fields
+	 */
+	CopyPlanFields((const Plan *) from, (Plan *) newnode);
+
+	return newnode;
+}
+
 
 /*
  * _copySort
@@ -2554,6 +2570,21 @@ _copyCollateClause(const CollateClause *from)
 	return newnode;
 }
 
+static ColumnStoreClause *
+_copyColumnStoreClause(const ColumnStoreClause *from)
+{
+	ColumnStoreClause *newnode = makeNode(ColumnStoreClause);
+
+	COPY_STRING_FIELD(name);
+	COPY_STRING_FIELD(storetype);
+	COPY_NODE_FIELD(columns);
+	COPY_NODE_FIELD(options);
+	COPY_LOCATION_FIELD(location);
+	COPY_STRING_FIELD(tablespacename);
+
+	return newnode;
+}
+
 static IndexElem *
 _copyIndexElem(const IndexElem *from)
 {
@@ -2586,6 +2617,7 @@ _copyColumnDef(const ColumnDef *from)
 	COPY_NODE_FIELD(cooked_default);
 	COPY_NODE_FIELD(collClause);
 	COPY_SCALAR_FIELD(collOid);
+	COPY_NODE_FIELD(cstoreClause);
 	COPY_NODE_FIELD(constraints);
 	COPY_NODE_FIELD(fdwoptions);
 	COPY_LOCATION_FIELD(location);
@@ -3795,6 +3827,17 @@ _copyImportForeignSchemaStmt(const ImportForeignSchemaStmt *from)
 	return newnode;
 }
 
+static CreateColumnStoreAMStmt *
+_copyCreateColumnStoreAMStmt(const CreateColumnStoreAMStmt *from)
+{
+	CreateColumnStoreAMStmt *newnode = makeNode(CreateColumnStoreAMStmt);
+
+	COPY_STRING_FIELD(cstamname);
+	COPY_NODE_FIELD(func_options);
+
+	return newnode;
+}
+
 static CreateTransformStmt *
 _copyCreateTransformStmt(const CreateTransformStmt *from)
 {
@@ -4289,6 +4332,9 @@ copyObject(const void *from)
 		case T_Material:
 			retval = _copyMaterial(from);
 			break;
+		case T_ColumnStoreMaterial:
+			retval = _copyColumnStoreMaterial(from);
+			break;
 		case T_Sort:
 			retval = _copySort(from);
 			break;
@@ -4769,6 +4815,9 @@ copyObject(const void *from)
 		case T_ImportForeignSchemaStmt:
 			retval = _copyImportForeignSchemaStmt(from);
 			break;
+		case T_CreateColumnStoreAMStmt:
+			retval = _copyCreateColumnStoreAMStmt(from);
+			break;
 		case T_CreateTransformStmt:
 			retval = _copyCreateTransformStmt(from);
 			break;
@@ -4882,6 +4931,9 @@ copyObject(const void *from)
 			break;
 		case T_CollateClause:
 			retval = _copyCollateClause(from);
+			break;
+		case T_ColumnStoreClause:
+			retval = _copyColumnStoreClause(from);
 			break;
 		case T_SortBy:
 			retval = _copySortBy(from);
