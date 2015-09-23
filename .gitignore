@@ -24,6 +24,8 @@ coverage/
 *.vcproj
 *.vcxproj
 win32ver.rc
+tags
+*.sw?
 *.exe
 lib*dll.def
 lib*.pc
