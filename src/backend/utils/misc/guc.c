@@ -380,23 +380,6 @@ static const struct config_enum_entry huge_pages_options[] = {
 };
 
 /*
- * Although only "on", "off", and "force" are documented, we
- * accept all the likely variants of "on" and "off".
- */
-static const struct config_enum_entry row_security_options[] = {
-	{"on", ROW_SECURITY_ON, false},
-	{"off", ROW_SECURITY_OFF, false},
-	{"force", ROW_SECURITY_FORCE, false},
-	{"true", ROW_SECURITY_ON, true},
-	{"false", ROW_SECURITY_OFF, true},
-	{"yes", ROW_SECURITY_ON, true},
-	{"no", ROW_SECURITY_OFF, true},
-	{"1", ROW_SECURITY_ON, true},
-	{"0", ROW_SECURITY_OFF, true},
-	{NULL, 0, false}
-};
-
-/*
  * Options for enum values stored in other modules
  */
 extern const struct config_enum_entry wal_level_options[];
@@ -421,6 +404,7 @@ bool		log_statement_stats = false;		/* this is sort of all three
 bool		log_btree_build_stats = false;
 char	   *event_source;
 
+bool		row_security;
 bool		check_function_bodies = true;
 bool		default_with_oids = false;
 bool		SQL_inheritance = true;
@@ -451,8 +435,6 @@ char	   *application_name;
 int			tcp_keepalives_idle;
 int			tcp_keepalives_interval;
 int			tcp_keepalives_count;
-
-int			row_security;
 
 /*
  * This really belongs in pg_shmem.c, but is defined here so that it doesn't
@@ -490,7 +472,6 @@ static int	wal_block_size;
 static bool data_checksums;
 static int	wal_segment_size;
 static bool integer_datetimes;
-static int	effective_io_concurrency;
 static bool assert_enabled;
 
 /* should be static, but commands/variable.c needs to get at this */
@@ -1373,6 +1354,15 @@ static struct config_bool ConfigureNamesBool[] =
 		&XactDeferrable,
 		false,
 		check_transaction_deferrable, NULL, NULL
+	},
+	{
+		{"row_security", PGC_USERSET, CONN_AUTH_SECURITY,
+			gettext_noop("Enable row security."),
+			gettext_noop("When enabled, row security will be applied to all users.")
+		},
+		&row_security,
+		true,
+		NULL, NULL, NULL
 	},
 	{
 		{"check_function_bodies", PGC_USERSET, CLIENT_CONN_STATEMENT,
@@ -2352,7 +2342,7 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&effective_io_concurrency,
 #ifdef USE_PREFETCH
-		1, 0, 1000,
+		1, 0, MAX_IO_CONCURRENCY,
 #else
 		0, 0, 0,
 #endif
@@ -3628,16 +3618,6 @@ static struct config_enum ConfigureNamesEnum[] =
 		},
 		&huge_pages,
 		HUGE_PAGES_TRY, huge_pages_options,
-		NULL, NULL, NULL
-	},
-
-	{
-		{"row_security", PGC_USERSET, CONN_AUTH_SECURITY,
-			gettext_noop("Enable row security."),
-			gettext_noop("When enabled, row security will be applied to all users.")
-		},
-		&row_security,
-		ROW_SECURITY_ON, row_security_options,
 		NULL, NULL, NULL
 	},
 
@@ -9986,47 +9966,9 @@ static bool
 check_effective_io_concurrency(int *newval, void **extra, GucSource source)
 {
 #ifdef USE_PREFETCH
-	double		new_prefetch_pages = 0.0;
-	int			i;
+	double		new_prefetch_pages;
 
-	/*----------
-	 * The user-visible GUC parameter is the number of drives (spindles),
-	 * which we need to translate to a number-of-pages-to-prefetch target.
-	 * The target value is stashed in *extra and then assigned to the actual
-	 * variable by assign_effective_io_concurrency.
-	 *
-	 * The expected number of prefetch pages needed to keep N drives busy is:
-	 *
-	 * drives |   I/O requests
-	 * -------+----------------
-	 *		1 |   1
-	 *		2 |   2/1 + 2/2 = 3
-	 *		3 |   3/1 + 3/2 + 3/3 = 5 1/2
-	 *		4 |   4/1 + 4/2 + 4/3 + 4/4 = 8 1/3
-	 *		n |   n * H(n)
-	 *
-	 * This is called the "coupon collector problem" and H(n) is called the
-	 * harmonic series.  This could be approximated by n * ln(n), but for
-	 * reasonable numbers of drives we might as well just compute the series.
-	 *
-	 * Alternatively we could set the target to the number of pages necessary
-	 * so that the expected number of active spindles is some arbitrary
-	 * percentage of the total.  This sounds the same but is actually slightly
-	 * different.  The result ends up being ln(1-P)/ln((n-1)/n) where P is
-	 * that desired fraction.
-	 *
-	 * Experimental results show that both of these formulas aren't aggressive
-	 * enough, but we don't really have any better proposals.
-	 *
-	 * Note that if *newval = 0 (disabled), we must set target = 0.
-	 *----------
-	 */
-
-	for (i = 1; i <= *newval; i++)
-		new_prefetch_pages += (double) *newval / (double) i;
-
-	/* This range check shouldn't fail, but let's be paranoid */
-	if (new_prefetch_pages >= 0.0 && new_prefetch_pages < (double) INT_MAX)
+	if (ComputeIoConcurrency(*newval, &new_prefetch_pages))
 	{
 		int		   *myextra = (int *) guc_malloc(ERROR, sizeof(int));
 
