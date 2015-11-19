@@ -419,6 +419,7 @@ static void ATExecReplicaIdentity(Relation rel, ReplicaIdentityStmt *stmt, LOCKM
 static void ATExecGenericOptions(Relation rel, List *options);
 static void ATExecEnableRowSecurity(Relation rel);
 static void ATExecDisableRowSecurity(Relation rel);
+static void ATExecForceNoForceRowSecurity(Relation rel, bool force_rls);
 
 static void copy_relation_data(SMgrRelation rel, SMgrRelation dst,
 				   ForkNumber forkNum, char relpersistence);
@@ -2930,6 +2931,8 @@ AlterTableGetLockLevel(List *cmds)
 			case AT_SetNotNull:
 			case AT_EnableRowSecurity:
 			case AT_DisableRowSecurity:
+			case AT_ForceRowSecurity:
+			case AT_NoForceRowSecurity:
 				cmd_lockmode = AccessExclusiveLock;
 				break;
 
@@ -3351,6 +3354,8 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 		case AT_DropOf: /* NOT OF */
 		case AT_EnableRowSecurity:
 		case AT_DisableRowSecurity:
+		case AT_ForceRowSecurity:
+		case AT_NoForceRowSecurity:
 			ATSimplePermissions(rel, ATT_TABLE);
 			/* These commands never recurse */
 			/* No command-specific prep needed */
@@ -3666,6 +3671,12 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			break;
 		case AT_DisableRowSecurity:
 			ATExecDisableRowSecurity(rel);
+			break;
+		case AT_ForceRowSecurity:
+			ATExecForceNoForceRowSecurity(rel, true);
+			break;
+		case AT_NoForceRowSecurity:
+			ATExecForceNoForceRowSecurity(rel, false);
 			break;
 		case AT_GenericOptions:
 			ATExecGenericOptions(rel, (List *) cmd->def);
@@ -4325,6 +4336,9 @@ ATWrongRelkindError(Relation rel, int allowed_targets)
 		case ATT_TABLE | ATT_VIEW:
 			msg = _("\"%s\" is not a table or view");
 			break;
+		case ATT_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE:
+			msg = _("\"%s\" is not a table, view, or foreign table");
+			break;
 		case ATT_TABLE | ATT_VIEW | ATT_MATVIEW | ATT_INDEX:
 			msg = _("\"%s\" is not a table, view, materialized view, or index");
 			break;
@@ -4334,6 +4348,9 @@ ATWrongRelkindError(Relation rel, int allowed_targets)
 		case ATT_TABLE | ATT_MATVIEW | ATT_INDEX:
 			msg = _("\"%s\" is not a table, materialized view, or index");
 			break;
+		case ATT_TABLE | ATT_MATVIEW | ATT_FOREIGN_TABLE:
+			msg = _("\"%s\" is not a table, materialized view, or foreign table");
+			break;
 		case ATT_TABLE | ATT_FOREIGN_TABLE:
 			msg = _("\"%s\" is not a table or foreign table");
 			break;
@@ -4341,7 +4358,7 @@ ATWrongRelkindError(Relation rel, int allowed_targets)
 			msg = _("\"%s\" is not a table, composite type, or foreign table");
 			break;
 		case ATT_TABLE | ATT_MATVIEW | ATT_INDEX | ATT_FOREIGN_TABLE:
-			msg = _("\"%s\" is not a table, materialized view, composite type, or foreign table");
+			msg = _("\"%s\" is not a table, materialized view, index, or foreign table");
 			break;
 		case ATT_VIEW:
 			msg = _("\"%s\" is not a view");
@@ -5662,7 +5679,7 @@ ATPrepDropColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
 }
 
 /*
- * Return value is that of the dropped column.
+ * Return value is the address of the dropped column.
  */
 static ObjectAddress
 ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
@@ -9794,7 +9811,7 @@ AlterTableMoveAll(AlterTableMoveAllStmt *stmt)
 			!ConditionalLockRelationOid(relOid, AccessExclusiveLock))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_IN_USE),
-					 errmsg("aborting because lock on relation \"%s\".\"%s\" is not available",
+					 errmsg("aborting because lock on relation \"%s.%s\" is not available",
 							get_namespace_name(relForm->relnamespace),
 							NameStr(relForm->relname))));
 		else
@@ -10365,7 +10382,7 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
  * coninhcount and conislocal for inherited constraints are adjusted in
  * exactly the same way.
  *
- * Return value is the OID of the relation that is no longer parent.
+ * Return value is the address of the relation that is no longer parent.
  */
 static ObjectAddress
 ATExecDropInherit(Relation rel, RangeVar *parent, LOCKMODE lockmode)
@@ -11067,6 +11084,35 @@ ATExecDisableRowSecurity(Relation rel)
 }
 
 /*
+ * ALTER TABLE FORCE/NO FORCE ROW LEVEL SECURITY
+ */
+static void
+ATExecForceNoForceRowSecurity(Relation rel, bool force_rls)
+{
+	Relation	pg_class;
+	Oid			relid;
+	HeapTuple	tuple;
+
+	relid = RelationGetRelid(rel);
+
+	pg_class = heap_open(RelationRelationId, RowExclusiveLock);
+
+	tuple = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", relid);
+
+	((Form_pg_class) GETSTRUCT(tuple))->relforcerowsecurity = force_rls;
+	simple_heap_update(pg_class, &tuple->t_self, tuple);
+
+	/* keep catalog indexes current */
+	CatalogUpdateIndexes(pg_class, tuple);
+
+	heap_close(pg_class, RowExclusiveLock);
+	heap_freetuple(tuple);
+}
+
+/*
  * ALTER FOREIGN TABLE <name> OPTIONS (...)
  */
 static void
@@ -11167,10 +11213,8 @@ ATPrepChangePersistence(Relation rel, bool toLogged)
 		case RELPERSISTENCE_TEMP:
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					 errmsg("cannot change logged status of table %s",
+					 errmsg("cannot change logged status of table \"%s\" because it is temporary",
 							RelationGetRelationName(rel)),
-					 errdetail("Table %s is temporary.",
-							   RelationGetRelationName(rel)),
 					 errtable(rel)));
 			break;
 		case RELPERSISTENCE_PERMANENT:
@@ -11228,11 +11272,9 @@ ATPrepChangePersistence(Relation rel, bool toLogged)
 				if (foreignrel->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-						 errmsg("cannot change status of table %s to logged",
-								RelationGetRelationName(rel)),
-						  errdetail("Table %s references unlogged table %s.",
-									RelationGetRelationName(rel),
-									RelationGetRelationName(foreignrel)),
+						 errmsg("could not change table \"%s\" to logged because it references unlogged table \"%s\"",
+								RelationGetRelationName(rel),
+								RelationGetRelationName(foreignrel)),
 							 errtableconstraint(rel, NameStr(con->conname))));
 			}
 			else
@@ -11240,11 +11282,9 @@ ATPrepChangePersistence(Relation rel, bool toLogged)
 				if (foreignrel->rd_rel->relpersistence == RELPERSISTENCE_PERMANENT)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
-					   errmsg("cannot change status of table %s to unlogged",
-							  RelationGetRelationName(rel)),
-					  errdetail("Logged table %s is referenced by table %s.",
-								RelationGetRelationName(foreignrel),
-								RelationGetRelationName(rel)),
+					   errmsg("could not change table \"%s\" to unlogged because it references logged table \"%s\"",
+							  RelationGetRelationName(rel),
+							  RelationGetRelationName(foreignrel)),
 							 errtableconstraint(rel, NameStr(con->conname))));
 			}
 
@@ -11310,7 +11350,7 @@ AlterTableNamespace(AlterObjectSchemaStmt *stmt, Oid *oldschema)
 	nspOid = RangeVarGetAndCheckCreationNamespace(newrv, NoLock, NULL);
 
 	/* common checks on switching namespaces */
-	CheckSetNamespace(oldNspOid, nspOid, RelationRelationId, relid);
+	CheckSetNamespace(oldNspOid, nspOid);
 
 	objsMoved = new_object_addresses();
 	AlterTableNamespaceInternal(rel, oldNspOid, nspOid, objsMoved);
@@ -11378,6 +11418,7 @@ AlterRelationNamespaceInternal(Relation classRel, Oid relOid,
 	HeapTuple	classTup;
 	Form_pg_class classForm;
 	ObjectAddress thisobj;
+	bool		already_done = false;
 
 	classTup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relOid));
 	if (!HeapTupleIsValid(classTup))
@@ -11391,9 +11432,12 @@ AlterRelationNamespaceInternal(Relation classRel, Oid relOid,
 	thisobj.objectSubId = 0;
 
 	/*
-	 * Do nothing when there's nothing to do.
+	 * If the object has already been moved, don't move it again.  If it's
+	 * already in the right place, don't move it, but still fire the object
+	 * access hook.
 	 */
-	if (!object_address_present(&thisobj, objsMoved))
+	already_done = object_address_present(&thisobj, objsMoved);
+	if (!already_done && oldNspOid != newNspOid)
 	{
 		/* check for duplicate name (more friendly than unique-index failure) */
 		if (get_relname_relid(NameStr(classForm->relname),
@@ -11419,7 +11463,9 @@ AlterRelationNamespaceInternal(Relation classRel, Oid relOid,
 								newNspOid) != 1)
 			elog(ERROR, "failed to change schema dependency for relation \"%s\"",
 				 NameStr(classForm->relname));
-
+	}
+	if (!already_done)
+	{
 		add_exact_object_address(&thisobj, objsMoved);
 
 		InvokeObjectPostAlterHook(RelationRelationId, relOid, 0);

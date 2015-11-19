@@ -117,6 +117,7 @@ test: alter_operator
 test: misc
 test: psql
 test: async
+test: dbsize
 test: rules
 test: select_views
 test: portals_p2
@@ -135,6 +136,7 @@ test: functional_deps
 test: advisory_lock
 test: json
 test: jsonb
+test: json_encoding
 test: indirect_toast
 test: equivclass
 test: plancache

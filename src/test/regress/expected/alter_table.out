@@ -438,6 +438,19 @@ explain (costs off) select * from nv_parent where d between '2009-08-01'::date a
          Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
 (7 rows)
 
+-- add an inherited NOT VALID constraint
+alter table nv_parent add check (d between '2001-01-01'::date and '2099-12-31'::date) not valid;
+\d nv_child_2009
+Table "public.nv_child_2009"
+ Column | Type | Modifiers 
+--------+------+-----------
+ d      | date | 
+Check constraints:
+    "nv_child_2009_d_check" CHECK (d >= '01-01-2009'::date AND d <= '12-31-2009'::date)
+    "nv_parent_d_check" CHECK (d >= '01-01-2001'::date AND d <= '12-31-2099'::date) NOT VALID
+Inherits: nv_parent
+
+-- we leave nv_parent and children around to help test pg_dump logic
 -- Foreign key adding test with mixed types
 -- Note: these tables are TEMP to avoid name conflicts when this test
 -- is run in parallel with foreign_key.sql.
@@ -538,7 +551,7 @@ create table atacc1 ( test int );
 -- add a check constraint (fails)
 alter table atacc1 add constraint atacc_test1 check (test1>3);
 ERROR:  column "test1" does not exist
-HINT:  Perhaps you meant to reference the column "atacc1"."test".
+HINT:  Perhaps you meant to reference the column "atacc1.test".
 drop table atacc1;
 -- something a little more complicated
 create table atacc1 ( test int, test2 int, test3 int);
@@ -1345,7 +1358,7 @@ select f1 from c1;
 ERROR:  column "f1" does not exist
 LINE 1: select f1 from c1;
                ^
-HINT:  Perhaps you meant to reference the column "c1"."f2".
+HINT:  Perhaps you meant to reference the column "c1.f2".
 drop table p1 cascade;
 NOTICE:  drop cascades to table c1
 create table p1 (f1 int, f2 int);
@@ -1359,7 +1372,7 @@ select f1 from c1;
 ERROR:  column "f1" does not exist
 LINE 1: select f1 from c1;
                ^
-HINT:  Perhaps you meant to reference the column "c1"."f2".
+HINT:  Perhaps you meant to reference the column "c1.f2".
 drop table p1 cascade;
 NOTICE:  drop cascades to table c1
 create table p1 (f1 int, f2 int);
@@ -2120,6 +2133,7 @@ create text search template alter1.tmpl(init = dsimple_init, lexize = dsimple_le
 create text search dictionary alter1.dict(template = alter1.tmpl);
 insert into alter1.t1(f2) values(11);
 insert into alter1.t1(f2) values(12);
+alter table alter1.t1 set schema alter1; -- no-op, same schema
 alter table alter1.t1 set schema alter2;
 alter table alter1.v1 set schema alter2;
 alter function alter1.plus1(int) set schema alter2;
@@ -2128,6 +2142,7 @@ alter operator class alter1.ctype_hash_ops using hash set schema alter2;
 alter operator family alter1.ctype_hash_ops using hash set schema alter2;
 alter operator alter1.=(alter1.ctype, alter1.ctype) set schema alter2;
 alter function alter1.same(alter1.ctype, alter1.ctype) set schema alter2;
+alter type alter1.ctype set schema alter1; -- no-op, same schema
 alter type alter1.ctype set schema alter2;
 alter conversion alter1.ascii_to_utf8 set schema alter2;
 alter text search parser alter1.prs set schema alter2;
@@ -2554,9 +2569,8 @@ ALTER TABLE new_system_table SET SCHEMA pg_catalog;
 -- XXX: it's currently impossible to move relations out of pg_catalog
 ALTER TABLE new_system_table SET SCHEMA public;
 ERROR:  cannot remove dependency on schema pg_catalog because it is a system object
--- move back, will currently error out, already there
+-- move back, will be ignored -- already there
 ALTER TABLE new_system_table SET SCHEMA pg_catalog;
-ERROR:  table new_system_table is already in schema "pg_catalog"
 ALTER TABLE new_system_table RENAME TO old_system_table;
 CREATE INDEX old_system_table__othercol ON old_system_table (othercol);
 INSERT INTO old_system_table(othercol) VALUES ('somedata'), ('otherdata');
@@ -2588,8 +2602,7 @@ CREATE UNLOGGED TABLE unlogged2(f1 SERIAL PRIMARY KEY, f2 INTEGER REFERENCES unl
 CREATE UNLOGGED TABLE unlogged3(f1 SERIAL PRIMARY KEY, f2 INTEGER REFERENCES unlogged3); -- self-referencing foreign key
 ALTER TABLE unlogged3 SET LOGGED; -- skip self-referencing foreign key
 ALTER TABLE unlogged2 SET LOGGED; -- fails because a foreign key to an unlogged table exists
-ERROR:  cannot change status of table unlogged2 to logged
-DETAIL:  Table unlogged2 references unlogged table unlogged1.
+ERROR:  could not change table "unlogged2" to logged because it references unlogged table "unlogged1"
 ALTER TABLE unlogged1 SET LOGGED;
 -- check relpersistence of an unlogged table after changing to permament
 SELECT relname, relkind, relpersistence FROM pg_class WHERE relname ~ '^unlogged1'
@@ -2632,8 +2645,7 @@ ORDER BY relname;
 CREATE TABLE logged2(f1 SERIAL PRIMARY KEY, f2 INTEGER REFERENCES logged1); -- foreign key
 CREATE TABLE logged3(f1 SERIAL PRIMARY KEY, f2 INTEGER REFERENCES logged3); -- self-referencing foreign key
 ALTER TABLE logged1 SET UNLOGGED; -- fails because a foreign key from a permanent table exists
-ERROR:  cannot change status of table logged1 to unlogged
-DETAIL:  Logged table logged2 is referenced by table logged1.
+ERROR:  could not change table "logged1" to unlogged because it references logged table "logged2"
 ALTER TABLE logged3 SET UNLOGGED; -- skip self-referencing foreign key
 ALTER TABLE logged2 SET UNLOGGED;
 ALTER TABLE logged1 SET UNLOGGED;

@@ -4976,9 +4976,10 @@ readRecoveryCommandFile(void)
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("invalid value for recovery parameter \"%s\"",
-								"recovery_target_action"),
-						 errhint("The allowed values are \"pause\", \"promote\", and \"shutdown\".")));
+						 errmsg("invalid value for recovery parameter \"%s\": \"%s\"",
+								"recovery_target_action",
+								item->value),
+						 errhint("Valid values are \"pause\", \"promote\", and \"shutdown\".")));
 
 			ereport(DEBUG2,
 					(errmsg_internal("recovery_target_action = '%s'",
@@ -5058,7 +5059,9 @@ readRecoveryCommandFile(void)
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("invalid value for recovery parameter \"recovery_target\""),
+						 errmsg("invalid value for recovery parameter \"%s\": \"%s\"",
+								"recovery_target",
+								item->value),
 					   errhint("The only allowed value is \"immediate\".")));
 			ereport(DEBUG2,
 					(errmsg_internal("recovery_target = '%s'",
@@ -5826,19 +5829,6 @@ do { \
 						minValue))); \
 } while(0)
 
-#define RecoveryRequiresBoolParameter(param_name, currValue, masterValue) \
-do { \
-	bool _currValue = (currValue); \
-	bool _masterValue = (masterValue); \
-	if (_currValue != _masterValue) \
-		ereport(ERROR, \
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE), \
-				 errmsg("hot standby is not possible because it requires \"%s\" to be same on master and standby (master has \"%s\", standby has \"%s\")", \
-						param_name, \
-						_masterValue ? "true" : "false", \
-						_currValue ? "true" : "false"))); \
-} while(0)
-
 /*
  * Check to see if required parameters are set high enough on this server
  * for various aspects of recovery operation.
@@ -5885,9 +5875,6 @@ CheckRequiredParameterValues(void)
 		RecoveryRequiresIntParameter("max_locks_per_transaction",
 									 max_locks_per_xact,
 									 ControlFile->max_locks_per_xact);
-		RecoveryRequiresBoolParameter("track_commit_timestamp",
-									  track_commit_timestamp,
-									  ControlFile->track_commit_timestamp);
 	}
 }
 
@@ -6158,7 +6145,7 @@ StartupXLOG(void)
 			unlink(TABLESPACE_MAP_OLD);
 			if (rename(TABLESPACE_MAP, TABLESPACE_MAP_OLD) == 0)
 				ereport(LOG,
-					(errmsg("ignoring \"%s\" file because no \"%s\" file exists",
+					(errmsg("ignoring file \"%s\" because no file \"%s\" exists",
 							TABLESPACE_MAP, BACKUP_LABEL_FILE),
 					 errdetail("File \"%s\" was renamed to \"%s\".",
 							   TABLESPACE_MAP, TABLESPACE_MAP_OLD)));
@@ -6166,7 +6153,7 @@ StartupXLOG(void)
 				ereport(LOG,
 						(errmsg("ignoring \"%s\" file because no \"%s\" file exists",
 								TABLESPACE_MAP, BACKUP_LABEL_FILE),
-						 errdetail("File \"%s\" could not be renamed to \"%s\": %m.",
+						 errdetail("Could not rename file \"%s\" to \"%s\": %m.",
 								   TABLESPACE_MAP, TABLESPACE_MAP_OLD)));
 		}
 
@@ -6297,24 +6284,24 @@ StartupXLOG(void)
 	LastRec = RecPtr = checkPointLoc;
 
 	ereport(DEBUG1,
-			(errmsg("redo record is at %X/%X; shutdown %s",
+			(errmsg_internal("redo record is at %X/%X; shutdown %s",
 				  (uint32) (checkPoint.redo >> 32), (uint32) checkPoint.redo,
 					wasShutdown ? "TRUE" : "FALSE")));
 	ereport(DEBUG1,
-			(errmsg("next transaction ID: %u/%u; next OID: %u",
+			(errmsg_internal("next transaction ID: %u/%u; next OID: %u",
 					checkPoint.nextXidEpoch, checkPoint.nextXid,
 					checkPoint.nextOid)));
 	ereport(DEBUG1,
-			(errmsg("next MultiXactId: %u; next MultiXactOffset: %u",
+			(errmsg_internal("next MultiXactId: %u; next MultiXactOffset: %u",
 					checkPoint.nextMulti, checkPoint.nextMultiOffset)));
 	ereport(DEBUG1,
-			(errmsg("oldest unfrozen transaction ID: %u, in database %u",
+			(errmsg_internal("oldest unfrozen transaction ID: %u, in database %u",
 					checkPoint.oldestXid, checkPoint.oldestXidDB)));
 	ereport(DEBUG1,
-			(errmsg("oldest MultiXactId: %u, in database %u",
+			(errmsg_internal("oldest MultiXactId: %u, in database %u",
 					checkPoint.oldestMulti, checkPoint.oldestMultiDB)));
 	ereport(DEBUG1,
-			(errmsg("commit timestamp Xid oldest/newest: %u/%u",
+			(errmsg_internal("commit timestamp Xid oldest/newest: %u/%u",
 					checkPoint.oldestCommitTs,
 					checkPoint.newestCommitTs)));
 	if (!TransactionIdIsNormal(checkPoint.nextXid))
@@ -6330,7 +6317,6 @@ StartupXLOG(void)
 	SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
 	SetCommitTsLimit(checkPoint.oldestCommitTs,
 					 checkPoint.newestCommitTs);
-	MultiXactSetSafeTruncate(checkPoint.oldestMulti);
 	XLogCtl->ckptXidEpoch = checkPoint.nextXidEpoch;
 	XLogCtl->ckptXid = checkPoint.nextXid;
 
@@ -6347,10 +6333,8 @@ StartupXLOG(void)
 	StartupReorderBuffer();
 
 	/*
-	 * Startup MultiXact.  We need to do this early for two reasons: one is
-	 * that we might try to access multixacts when we do tuple freezing, and
-	 * the other is we need its state initialized because we attempt
-	 * truncation during restartpoints.
+	 * Startup MultiXact. We need to do this early to be able to replay
+	 * truncations.
 	 */
 	StartupMultiXact();
 
@@ -6586,7 +6570,7 @@ StartupXLOG(void)
 			 * maintained during recovery and need not be started yet.
 			 */
 			StartupCLOG();
-			StartupCommitTs();
+			StartupCommitTs(ControlFile->track_commit_timestamp);
 			StartupSUBTRANS(oldestActiveXID);
 
 			/*
@@ -7355,7 +7339,7 @@ StartupXLOG(void)
 	if (standbyState == STANDBY_DISABLED)
 	{
 		StartupCLOG();
-		StartupCommitTs();
+		StartupCommitTs(false);
 		StartupSUBTRANS(oldestActiveXID);
 	}
 
@@ -8508,12 +8492,6 @@ CreateCheckPoint(int flags)
 	END_CRIT_SECTION();
 
 	/*
-	 * Now that the checkpoint is safely on disk, we can update the point to
-	 * which multixact can be truncated.
-	 */
-	MultiXactSetSafeTruncate(checkPoint.oldestMulti);
-
-	/*
 	 * Let smgr do post-checkpoint cleanup (eg, deleting old files).
 	 */
 	smgrpostckpt();
@@ -8551,11 +8529,6 @@ CreateCheckPoint(int flags)
 	 */
 	if (!RecoveryInProgress())
 		TruncateSUBTRANS(GetOldestXmin(NULL, false));
-
-	/*
-	 * Truncate pg_multixact too.
-	 */
-	TruncateMultiXact();
 
 	/* Real work is done, but log and update stats before releasing lock. */
 	LogCheckpointEnd(false);
@@ -8885,21 +8858,6 @@ CreateRestartPoint(int flags)
 		if (RecoveryInProgress())
 			ThisTimeLineID = 0;
 	}
-
-	/*
-	 * Due to a historical accident multixact truncations are not WAL-logged,
-	 * but just performed everytime the mxact horizon is increased. So, unless
-	 * we explicitly execute truncations on a standby it will never clean out
-	 * /pg_multixact which obviously is bad, both because it uses space and
-	 * because we can wrap around into pre-existing data...
-	 *
-	 * We can only do the truncation here, after the UpdateControlFile()
-	 * above, because we've now safely established a restart point.  That
-	 * guarantees we will not need to access those multis.
-	 *
-	 * It's probably worth improving this.
-	 */
-	TruncateMultiXact();
 
 	/*
 	 * Truncate pg_subtrans if possible.  We can throw away all data before
@@ -9261,9 +9219,10 @@ xlog_redo(XLogReaderState *record)
 		LWLockRelease(OidGenLock);
 		MultiXactSetNextMXact(checkPoint.nextMulti,
 							  checkPoint.nextMultiOffset);
+
+		MultiXactAdvanceOldest(checkPoint.oldestMulti,
+							   checkPoint.oldestMultiDB);
 		SetTransactionIdLimit(checkPoint.oldestXid, checkPoint.oldestXidDB);
-		SetMultiXactIdLimit(checkPoint.oldestMulti, checkPoint.oldestMultiDB);
-		MultiXactSetSafeTruncate(checkPoint.oldestMulti);
 
 		/*
 		 * If we see a shutdown checkpoint while waiting for an end-of-backup
@@ -9353,14 +9312,17 @@ xlog_redo(XLogReaderState *record)
 		LWLockRelease(OidGenLock);
 		MultiXactAdvanceNextMXact(checkPoint.nextMulti,
 								  checkPoint.nextMultiOffset);
+
+		/*
+		 * NB: This may perform multixact truncation when replaying WAL
+		 * generated by an older primary.
+		 */
+		MultiXactAdvanceOldest(checkPoint.oldestMulti,
+							   checkPoint.oldestMultiDB);
 		if (TransactionIdPrecedes(ShmemVariableCache->oldestXid,
 								  checkPoint.oldestXid))
 			SetTransactionIdLimit(checkPoint.oldestXid,
 								  checkPoint.oldestXidDB);
-		MultiXactAdvanceOldest(checkPoint.oldestMulti,
-							   checkPoint.oldestMultiDB);
-		MultiXactSetSafeTruncate(checkPoint.oldestMulti);
-
 		/* ControlFile->checkPointCopy always tracks the latest ckpt XID */
 		ControlFile->checkPointCopy.nextXidEpoch = checkPoint.nextXidEpoch;
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
@@ -9497,25 +9459,9 @@ xlog_redo(XLogReaderState *record)
 			ControlFile->minRecoveryPointTLI = ThisTimeLineID;
 		}
 
-		/*
-		 * Update the commit timestamp tracking. If there was a change it
-		 * needs to be activated or deactivated accordingly.
-		 */
-		if (track_commit_timestamp != xlrec.track_commit_timestamp)
-		{
-			track_commit_timestamp = xlrec.track_commit_timestamp;
-			ControlFile->track_commit_timestamp = track_commit_timestamp;
-			if (track_commit_timestamp)
-				ActivateCommitTs();
-			else
-
-				/*
-				 * We can't create a new WAL record here, but that's OK as
-				 * master did the WAL logging already and we will replay the
-				 * record from master in case we crash.
-				 */
-				DeactivateCommitTs(false);
-		}
+		CommitTsParameterChange(xlrec.track_commit_timestamp,
+								ControlFile->track_commit_timestamp);
+		ControlFile->track_commit_timestamp = xlrec.track_commit_timestamp;
 
 		UpdateControlFile();
 		LWLockRelease(ControlFileLock);

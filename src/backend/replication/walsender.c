@@ -299,6 +299,7 @@ IdentifySystem(void)
 	char		xpos[MAXFNAMELEN];
 	XLogRecPtr	logptr;
 	char	   *dbname = NULL;
+	Size		len;
 
 	/*
 	 * Reply with a result set with one row, four columns. First col is system
@@ -380,21 +381,32 @@ IdentifySystem(void)
 	/* Send a DataRow message */
 	pq_beginmessage(&buf, 'D');
 	pq_sendint(&buf, 4, 2);		/* # of columns */
-	pq_sendint(&buf, strlen(sysid), 4); /* col1 len */
-	pq_sendbytes(&buf, (char *) &sysid, strlen(sysid));
-	pq_sendint(&buf, strlen(tli), 4);	/* col2 len */
-	pq_sendbytes(&buf, (char *) tli, strlen(tli));
-	pq_sendint(&buf, strlen(xpos), 4);	/* col3 len */
-	pq_sendbytes(&buf, (char *) xpos, strlen(xpos));
-	/* send NULL if not connected to a database */
+
+	/* column 1: system identifier */
+	len = strlen(sysid);
+	pq_sendint(&buf, len, 4);
+	pq_sendbytes(&buf, (char *) &sysid, len);
+
+	/* column 2: timeline */
+	len = strlen(tli);
+	pq_sendint(&buf, len, 4);
+	pq_sendbytes(&buf, (char *) tli, len);
+
+	/* column 3: xlog position */
+	len = strlen(xpos);
+	pq_sendint(&buf, len, 4);
+	pq_sendbytes(&buf, (char *) xpos, len);
+
+	/* column 4: database name, or NULL if none */
 	if (dbname)
 	{
-		pq_sendint(&buf, strlen(dbname), 4);	/* col4 len */
-		pq_sendbytes(&buf, (char *) dbname, strlen(dbname));
+		len = strlen(dbname);
+		pq_sendint(&buf, len, 4);
+		pq_sendbytes(&buf, (char *) dbname, len);
 	}
 	else
 	{
-		pq_sendint(&buf, -1, 4);	/* col4 len, NULL */
+		pq_sendint(&buf, -1, 4);
 	}
 
 	pq_endmessage(&buf);
@@ -413,6 +425,7 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	int			fd;
 	off_t		histfilelen;
 	off_t		bytesleft;
+	Size		len;
 
 	/*
 	 * Reply with a result set with one row, and two columns. The first col is
@@ -448,8 +461,9 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	/* Send a DataRow message */
 	pq_beginmessage(&buf, 'D');
 	pq_sendint(&buf, 2, 2);		/* # of columns */
-	pq_sendint(&buf, strlen(histfname), 4);		/* col1 len */
-	pq_sendbytes(&buf, histfname, strlen(histfname));
+	len = strlen(histfname);
+	pq_sendint(&buf, len, 4);		/* col1 len */
+	pq_sendbytes(&buf, histfname, len);
 
 	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY, 0666);
 	if (fd < 0)
@@ -641,8 +655,7 @@ StartReplication(StartReplicationCmd *cmd)
 
 		/* Initialize shared memory status, too */
 		{
-			/* use volatile pointer to prevent code rearrangement */
-			volatile WalSnd *walsnd = MyWalSnd;
+			WalSnd *walsnd = MyWalSnd;
 
 			SpinLockAcquire(&walsnd->mutex);
 			walsnd->sentPtr = sentPtr;
@@ -675,6 +688,7 @@ StartReplication(StartReplicationCmd *cmd)
 	{
 		char		tli_str[11];
 		char		startpos_str[8 + 1 + 8 + 1];
+		Size		len;
 
 		snprintf(tli_str, sizeof(tli_str), "%u", sendTimeLineNextTLI);
 		snprintf(startpos_str, sizeof(startpos_str), "%X/%X",
@@ -711,11 +725,13 @@ StartReplication(StartReplicationCmd *cmd)
 		pq_beginmessage(&buf, 'D');
 		pq_sendint(&buf, 2, 2); /* number of columns */
 
-		pq_sendint(&buf, strlen(tli_str), 4);	/* length */
-		pq_sendbytes(&buf, tli_str, strlen(tli_str));
+		len = strlen(tli_str);
+		pq_sendint(&buf, len, 4);	/* length */
+		pq_sendbytes(&buf, tli_str, len);
 
-		pq_sendint(&buf, strlen(startpos_str), 4);		/* length */
-		pq_sendbytes(&buf, startpos_str, strlen(startpos_str));
+		len = strlen(startpos_str);
+		pq_sendint(&buf, len, 4);		/* length */
+		pq_sendbytes(&buf, startpos_str, len);
 
 		pq_endmessage(&buf);
 	}
@@ -763,10 +779,10 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 static void
 CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 {
-	const char *slot_name;
 	const char *snapshot_name = NULL;
 	char		xpos[MAXFNAMELEN];
 	StringInfoData buf;
+	Size		len;
 
 	Assert(!MyReplicationSlot);
 
@@ -792,14 +808,11 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 
 	initStringInfo(&output_message);
 
-	slot_name = NameStr(MyReplicationSlot->data.name);
-
 	if (cmd->kind == REPLICATION_KIND_LOGICAL)
 	{
 		LogicalDecodingContext *ctx;
 
-		ctx = CreateInitDecodingContext(
-										cmd->plugin, NIL,
+		ctx = CreateInitDecodingContext(cmd->plugin, NIL,
 										logical_read_xlog_page,
 										WalSndPrepareWrite, WalSndWriteData);
 
@@ -835,7 +848,6 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 		ReplicationSlotSave();
 	}
 
-	slot_name = NameStr(MyReplicationSlot->data.name);
 	snprintf(xpos, sizeof(xpos), "%X/%X",
 			 (uint32) (MyReplicationSlot->data.confirmed_flush >> 32),
 			 (uint32) MyReplicationSlot->data.confirmed_flush);
@@ -886,30 +898,34 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 	pq_sendint(&buf, 4, 2);		/* # of columns */
 
 	/* slot_name */
-	pq_sendint(&buf, strlen(slot_name), 4);		/* col1 len */
-	pq_sendbytes(&buf, slot_name, strlen(slot_name));
+	len = strlen(NameStr(MyReplicationSlot->data.name));
+	pq_sendint(&buf, len, 4);		/* col1 len */
+	pq_sendbytes(&buf, NameStr(MyReplicationSlot->data.name), len);
 
 	/* consistent wal location */
-	pq_sendint(&buf, strlen(xpos), 4);	/* col2 len */
-	pq_sendbytes(&buf, xpos, strlen(xpos));
+	len = strlen(xpos);
+	pq_sendint(&buf, len, 4);
+	pq_sendbytes(&buf, xpos, len);
 
-	/* snapshot name */
+	/* snapshot name, or NULL if none */
 	if (snapshot_name != NULL)
 	{
-		pq_sendint(&buf, strlen(snapshot_name), 4);		/* col3 len */
-		pq_sendbytes(&buf, snapshot_name, strlen(snapshot_name));
+		len = strlen(snapshot_name);
+		pq_sendint(&buf, len, 4);
+		pq_sendbytes(&buf, snapshot_name, len);
 	}
 	else
-		pq_sendint(&buf, -1, 4);	/* col3 len, NULL */
+		pq_sendint(&buf, -1, 4);
 
-	/* plugin */
+	/* plugin, or NULL if none */
 	if (cmd->plugin != NULL)
 	{
-		pq_sendint(&buf, strlen(cmd->plugin), 4);		/* col4 len */
-		pq_sendbytes(&buf, cmd->plugin, strlen(cmd->plugin));
+		len = strlen(cmd->plugin);
+		pq_sendint(&buf, len, 4);
+		pq_sendbytes(&buf, cmd->plugin, len);
 	}
 	else
-		pq_sendint(&buf, -1, 4);	/* col4 len, NULL */
+		pq_sendint(&buf, -1, 4);
 
 	pq_endmessage(&buf);
 
@@ -990,8 +1006,7 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 
 	/* Also update the sent position status in shared memory */
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = MyWalSnd;
+		WalSnd *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = MyReplicationSlot->data.restart_lsn;
@@ -1494,9 +1509,7 @@ static void
 PhysicalConfirmReceivedLocation(XLogRecPtr lsn)
 {
 	bool		changed = false;
-
-	/* use volatile pointer to prevent code rearrangement */
-	volatile ReplicationSlot *slot = MyReplicationSlot;
+	ReplicationSlot *slot = MyReplicationSlot;
 
 	Assert(lsn != InvalidXLogRecPtr);
 	SpinLockAcquire(&slot->mutex);
@@ -1554,8 +1567,7 @@ ProcessStandbyReplyMessage(void)
 	 * standby.
 	 */
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = MyWalSnd;
+		WalSnd *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->write = writePtr;
@@ -1584,7 +1596,7 @@ static void
 PhysicalReplicationSlotNewXmin(TransactionId feedbackXmin)
 {
 	bool		changed = false;
-	volatile ReplicationSlot *slot = MyReplicationSlot;
+	ReplicationSlot *slot = MyReplicationSlot;
 
 	SpinLockAcquire(&slot->mutex);
 	MyPgXact->xmin = InvalidTransactionId;
@@ -1934,8 +1946,7 @@ InitWalSenderSlot(void)
 	 */
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd *walsnd = &WalSndCtl->walsnds[i];
 
 		SpinLockAcquire(&walsnd->mutex);
 
@@ -2145,8 +2156,7 @@ retry:
 	 */
 	if (am_cascading_walsender)
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = MyWalSnd;
+		WalSnd *walsnd = MyWalSnd;
 		bool		reload;
 
 		SpinLockAcquire(&walsnd->mutex);
@@ -2384,8 +2394,7 @@ XLogSendPhysical(void)
 
 	/* Update shared memory status */
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = MyWalSnd;
+		WalSnd *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = sentPtr;
@@ -2447,8 +2456,7 @@ XLogSendLogical(void)
 
 	/* Update shared memory status */
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = MyWalSnd;
+		WalSnd *walsnd = MyWalSnd;
 
 		SpinLockAcquire(&walsnd->mutex);
 		walsnd->sentPtr = sentPtr;
@@ -2539,8 +2547,7 @@ WalSndRqstFileReload(void)
 
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd *walsnd = &WalSndCtl->walsnds[i];
 
 		if (walsnd->pid == 0)
 			continue;
@@ -2692,8 +2699,7 @@ WalSndWakeup(void)
 void
 WalSndSetState(WalSndState state)
 {
-	/* use volatile pointer to prevent code rearrangement */
-	volatile WalSnd *walsnd = MyWalSnd;
+	WalSnd *walsnd = MyWalSnd;
 
 	Assert(am_walsender);
 
@@ -2777,8 +2783,7 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd *walsnd = &WalSndCtl->walsnds[i];
 		XLogRecPtr	sentPtr;
 		XLogRecPtr	write;
 		XLogRecPtr	flush;
@@ -2934,8 +2939,7 @@ GetOldestWALSendPointer(void)
 
 	for (i = 0; i < max_wal_senders; i++)
 	{
-		/* use volatile pointer to prevent code rearrangement */
-		volatile WalSnd *walsnd = &WalSndCtl->walsnds[i];
+		WalSnd *walsnd = &WalSndCtl->walsnds[i];
 		XLogRecPtr	recptr;
 
 		if (walsnd->pid == 0)

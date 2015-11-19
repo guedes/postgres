@@ -99,6 +99,8 @@ typedef struct PlannerGlobal
 
 	Index		lastRowMarkId;	/* highest PlanRowMark ID assigned */
 
+	int			lastPlanNodeId;	/* highest plan node ID assigned */
+
 	bool		transientPlan;	/* redo plan when TransactionXmin changes? */
 
 	bool		hasRowSecurity; /* row security applied? */
@@ -450,6 +452,7 @@ typedef struct RelOptInfo
 	/* per-relation planner control flags */
 	bool		consider_startup;		/* keep cheap-startup-cost paths? */
 	bool		consider_param_startup; /* ditto, for parameterized paths? */
+	bool		consider_parallel;		/* consider parallel paths? */
 
 	/* materialization information */
 	List	   *reltargetlist;	/* Vars to be output by scan of relation */
@@ -751,6 +754,7 @@ typedef struct Path
 
 	RelOptInfo *parent;			/* the relation this path can build */
 	ParamPathInfo *param_info;	/* parameterization info, or NULL if none */
+	bool		parallel_aware; /* engage parallel-aware logic? */
 
 	/* estimated size/costs for path (see costsize.c for more info) */
 	double		rows;			/* estimated number of result tuples */
@@ -1043,6 +1047,19 @@ typedef struct UniquePath
 	List	   *in_operators;	/* equality operators of the IN clause */
 	List	   *uniq_exprs;		/* expressions to be made unique */
 } UniquePath;
+
+/*
+ * GatherPath runs several copies of a plan in parallel and collects the
+ * results.  The parallel leader may also execute the plan, unless the
+ * single_copy flag is set.
+ */
+typedef struct GatherPath
+{
+	Path		path;
+	Path	   *subpath;		/* path for each worker */
+	int			num_workers;	/* number of workers sought to help */
+	bool		single_copy;	/* path must not be executed >1x */
+} GatherPath;
 
 /*
  * All join-type paths share these fields.

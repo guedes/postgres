@@ -437,6 +437,14 @@ int			tcp_keepalives_interval;
 int			tcp_keepalives_count;
 
 /*
+ * SSL renegotiation was been removed in PostgreSQL 9.5, but we tolerate it
+ * being set to zero (meaning never renegotiate) for backward compatibility.
+ * This avoids breaking compatibility with clients that have never supported
+ * renegotiation and therefore always try to zero it.
+ */
+int			ssl_renegotiation_limit;
+
+/*
  * This really belongs in pg_shmem.c, but is defined here so that it doesn't
  * need to be duplicated in all the different implementations of pg_shmem.c.
  */
@@ -580,6 +588,8 @@ const char *const config_group_names[] =
 	gettext_noop("Reporting and Logging / When to Log"),
 	/* LOGGING_WHAT */
 	gettext_noop("Reporting and Logging / What to Log"),
+	/* PROCESS_TITLE */
+	gettext_noop("Process Title"),
 	/* STATS */
 	gettext_noop("Statistics"),
 	/* STATS_MONITORING */
@@ -1180,7 +1190,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
-		{"update_process_title", PGC_SUSET, STATS_COLLECTOR,
+		{"update_process_title", PGC_SUSET, PROCESS_TITLE,
 			gettext_noop("Updates the process title to show the active SQL command."),
 			gettext_noop("Enables updating of the process title every time a new SQL command is received by the server.")
 		},
@@ -2451,7 +2461,7 @@ static struct config_int ConfigureNamesInt[] =
 
 	{
 		{"wal_retrieve_retry_interval", PGC_SIGHUP, REPLICATION_STANDBY,
-			gettext_noop("Sets the time to wait before retrying to retrieve WAL"
+			gettext_noop("Sets the time to wait before retrying to retrieve WAL "
 						 "after a failed attempt."),
 			NULL,
 			GUC_UNIT_MS
@@ -2510,17 +2520,17 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&autovacuum_freeze_max_age,
 		/* see pg_resetxlog if you change the upper-limit value */
-		200000000, 100000000, 2000000000,
+		200000000, 100000, 2000000000,
 		NULL, NULL, NULL
 	},
 	{
-		/* see varsup.c for why this is PGC_POSTMASTER not PGC_SIGHUP */
+		/* see multixact.c for why this is PGC_POSTMASTER not PGC_SIGHUP */
 		{"autovacuum_multixact_freeze_max_age", PGC_POSTMASTER, AUTOVACUUM,
 			gettext_noop("Multixact age at which to autovacuum a table to prevent multixact wraparound."),
 			NULL
 		},
 		&autovacuum_multixact_freeze_max_age,
-		400000000, 10000000, 2000000000,
+		400000000, 10000, 2000000000,
 		NULL, NULL, NULL
 	},
 	{
@@ -2532,6 +2542,16 @@ static struct config_int ConfigureNamesInt[] =
 		&autovacuum_max_workers,
 		3, 1, MAX_BACKENDS,
 		check_autovacuum_max_workers, NULL, NULL
+	},
+
+	{
+		{"max_parallel_degree", PGC_SUSET, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("Sets the maximum number of parallel processes per executor node."),
+			NULL
+		},
+		&max_parallel_degree,
+		0, 0, MAX_BACKENDS,
+		NULL, NULL, NULL
 	},
 
 	{
@@ -2565,6 +2585,17 @@ static struct config_int ConfigureNamesInt[] =
 		&tcp_keepalives_interval,
 		0, 0, INT_MAX,
 		NULL, assign_tcp_keepalives_interval, show_tcp_keepalives_interval
+	},
+
+	{
+		{"ssl_renegotiation_limit", PGC_USERSET, CONN_AUTH_SECURITY,
+			gettext_noop("SSL regenotiation is no longer supported; this can only be 0."),
+			NULL,
+			GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
+		},
+		&ssl_renegotiation_limit,
+		0, 0, 0,
+		NULL, NULL, NULL
 	},
 
 	{
@@ -2709,6 +2740,26 @@ static struct config_real ConfigureNamesReal[] =
 		},
 		&cpu_operator_cost,
 		DEFAULT_CPU_OPERATOR_COST, 0, DBL_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"parallel_tuple_cost", PGC_USERSET, QUERY_TUNING_COST,
+			gettext_noop("Sets the planner's estimate of the cost of "
+				  "passing each tuple (row) from worker to master backend."),
+			NULL
+		},
+		&parallel_tuple_cost,
+		DEFAULT_PARALLEL_TUPLE_COST, 0, DBL_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"parallel_setup_cost", PGC_USERSET, QUERY_TUNING_COST,
+			gettext_noop("Sets the planner's estimate of the cost of "
+				  "starting up worker processes for parallel query."),
+			NULL
+		},
+		&parallel_setup_cost,
+		DEFAULT_PARALLEL_SETUP_COST, 0, DBL_MAX,
 		NULL, NULL, NULL
 	},
 
@@ -3365,8 +3416,8 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"cluster_name", PGC_POSTMASTER, LOGGING_WHAT,
-			gettext_noop("Sets the name of the cluster which is included in the process title."),
+		{"cluster_name", PGC_POSTMASTER, PROCESS_TITLE,
+			gettext_noop("Sets the name of the cluster, which is included in the process title."),
 			NULL,
 			GUC_IS_NAME
 		},

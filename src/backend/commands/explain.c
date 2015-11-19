@@ -853,6 +853,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_SampleScan:
 			pname = sname = "Sample Scan";
 			break;
+		case T_Gather:
+			pname = sname = "Gather";
+			break;
 		case T_IndexScan:
 			pname = sname = "Index Scan";
 			break;
@@ -981,6 +984,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			appendStringInfoString(es->str, "->  ");
 			es->indent += 2;
 		}
+		if (plan->parallel_aware)
+			appendStringInfoString(es->str, "Parallel ");
 		appendStringInfoString(es->str, pname);
 		es->indent++;
 	}
@@ -997,6 +1002,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			ExplainPropertyText("Subplan Name", plan_name, es);
 		if (custom_name)
 			ExplainPropertyText("Custom Plan Provider", custom_name, es);
+		if (plan->parallel_aware)
+			ExplainPropertyText("Parallel Aware", "true", es);
 	}
 
 	switch (nodeTag(plan))
@@ -1275,6 +1282,22 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
+			break;
+		case T_Gather:
+			{
+				Gather *gather = (Gather *) plan;
+
+				show_scan_qual(plan->qual, "Filter", planstate, ancestors, es);
+				if (plan->qual)
+					show_instrumentation_count("Rows Removed by Filter", 1,
+											   planstate, es);
+				ExplainPropertyInteger("Number of Workers",
+									   gather->num_workers, es);
+				if (gather->single_copy)
+					ExplainPropertyText("Single Copy",
+										gather->single_copy ? "true" : "false",
+										es);
+			}
 			break;
 		case T_FunctionScan:
 			if (es->verbose)

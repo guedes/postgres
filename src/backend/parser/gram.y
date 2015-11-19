@@ -966,16 +966,6 @@ AlterOptRoleElem:
 						$$ = makeDefElem("superuser", (Node *)makeInteger(TRUE));
 					else if (strcmp($1, "nosuperuser") == 0)
 						$$ = makeDefElem("superuser", (Node *)makeInteger(FALSE));
-					else if (strcmp($1, "createuser") == 0)
-					{
-						/* For backwards compatibility, synonym for SUPERUSER */
-						$$ = makeDefElem("superuser", (Node *)makeInteger(TRUE));
-					}
-					else if (strcmp($1, "nocreateuser") == 0)
-					{
-						/* For backwards compatibility, synonym for SUPERUSER */
-						$$ = makeDefElem("superuser", (Node *)makeInteger(FALSE));
-					}
 					else if (strcmp($1, "createrole") == 0)
 						$$ = makeDefElem("createrole", (Node *)makeInteger(TRUE));
 					else if (strcmp($1, "nocreaterole") == 0)
@@ -2351,6 +2341,20 @@ alter_table_cmd:
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 					n->subtype = AT_DisableRowSecurity;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> FORCE ROW LEVEL SECURITY */
+			| FORCE ROW LEVEL SECURITY
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_ForceRowSecurity;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> NO FORCE ROW LEVEL SECURITY */
+			| NO FORCE ROW LEVEL SECURITY
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_NoForceRowSecurity;
 					$$ = (Node *)n;
 				}
 			| alter_generic_options
@@ -3875,6 +3879,10 @@ create_extension_opt_item:
 			| FROM NonReservedWord_or_Sconst
 				{
 					$$ = makeDefElem("old_version", (Node *)makeString($2));
+				}
+			| CASCADE
+				{
+					$$ = makeDefElem("cascade", (Node *)makeInteger(TRUE));
 				}
 		;
 

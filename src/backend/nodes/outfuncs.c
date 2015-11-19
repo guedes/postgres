@@ -13,9 +13,11 @@
  * NOTES
  *	  Every node type that can appear in stored rules' parsetrees *must*
  *	  have an output function defined here (as well as an input function
- *	  in readfuncs.c).  For use in debugging, we also provide output
- *	  functions for nodes that appear in raw parsetrees, path, and plan trees.
- *	  These nodes however need not have input functions.
+ *	  in readfuncs.c).  In addition, plan nodes should have input and
+ *	  output functions so that they can be sent to parallel workers.
+ *	  For use in debugging, we also provide output functions for nodes
+ *	  that appear in raw parsetrees and path.  These nodes however need
+ *	  not have input functions.
  *
  *-------------------------------------------------------------------------
  */
@@ -269,6 +271,8 @@ _outPlanInfo(StringInfo str, const Plan *node)
 	WRITE_FLOAT_FIELD(total_cost, "%.2f");
 	WRITE_FLOAT_FIELD(plan_rows, "%.0f");
 	WRITE_INT_FIELD(plan_width);
+	WRITE_BOOL_FIELD(parallel_aware);
+	WRITE_INT_FIELD(plan_node_id);
 	WRITE_NODE_FIELD(targetlist);
 	WRITE_NODE_FIELD(qual);
 	WRITE_NODE_FIELD(lefttree);
@@ -430,6 +434,17 @@ _outBitmapOr(StringInfo str, const BitmapOr *node)
 }
 
 static void
+_outGather(StringInfo str, const Gather *node)
+{
+	WRITE_NODE_TYPE("GATHER");
+
+	_outPlanInfo(str, (const Plan *) node);
+
+	WRITE_INT_FIELD(num_workers);
+	WRITE_BOOL_FIELD(single_copy);
+}
+
+static void
 _outScan(StringInfo str, const Scan *node)
 {
 	WRITE_NODE_TYPE("SCAN");
@@ -580,6 +595,7 @@ _outForeignScan(StringInfo str, const ForeignScan *node)
 	WRITE_NODE_FIELD(fdw_exprs);
 	WRITE_NODE_FIELD(fdw_private);
 	WRITE_NODE_FIELD(fdw_scan_tlist);
+	WRITE_NODE_FIELD(fdw_recheck_quals);
 	WRITE_BITMAPSET_FIELD(fs_relids);
 	WRITE_BOOL_FIELD(fsSystemCol);
 }
@@ -597,10 +613,11 @@ _outCustomScan(StringInfo str, const CustomScan *node)
 	WRITE_NODE_FIELD(custom_private);
 	WRITE_NODE_FIELD(custom_scan_tlist);
 	WRITE_BITMAPSET_FIELD(custom_relids);
+	/* Dump library and symbol name instead of raw pointer */
 	appendStringInfoString(str, " :methods ");
-	_outToken(str, node->methods->CustomName);
-	if (node->methods->TextOutCustomScan)
-		node->methods->TextOutCustomScan(str, node);
+	_outToken(str, node->methods->LibraryName);
+	appendStringInfoChar(str, ' ');
+	_outToken(str, node->methods->SymbolName);
 }
 
 static void
@@ -649,7 +666,7 @@ _outMergeJoin(StringInfo str, const MergeJoin *node)
 
 	appendStringInfoString(str, " :mergeNullsFirst");
 	for (i = 0; i < numCols; i++)
-		appendStringInfo(str, " %d", (int) node->mergeNullsFirst[i]);
+		appendStringInfo(str, " %s", booltostr(node->mergeNullsFirst[i]));
 }
 
 static void
@@ -1570,6 +1587,7 @@ _outPathInfo(StringInfo str, const Path *node)
 		_outBitmapset(str, node->param_info->ppi_req_outer);
 	else
 		_outBitmapset(str, NULL);
+	WRITE_BOOL_FIELD(parallel_aware);
 	WRITE_FLOAT_FIELD(rows, "%.0f");
 	WRITE_FLOAT_FIELD(startup_cost, "%.2f");
 	WRITE_FLOAT_FIELD(total_cost, "%.2f");
@@ -1739,6 +1757,18 @@ _outUniquePath(StringInfo str, const UniquePath *node)
 }
 
 static void
+_outGatherPath(StringInfo str, const GatherPath *node)
+{
+	WRITE_NODE_TYPE("GATHERPATH");
+
+	_outPathInfo(str, (const Path *) node);
+
+	WRITE_NODE_FIELD(subpath);
+	WRITE_INT_FIELD(num_workers);
+	WRITE_BOOL_FIELD(single_copy);
+}
+
+static void
 _outNestPath(StringInfo str, const NestPath *node)
 {
 	WRITE_NODE_TYPE("NESTPATH");
@@ -1853,6 +1883,7 @@ _outRelOptInfo(StringInfo str, const RelOptInfo *node)
 	WRITE_INT_FIELD(width);
 	WRITE_BOOL_FIELD(consider_startup);
 	WRITE_BOOL_FIELD(consider_param_startup);
+	WRITE_BOOL_FIELD(consider_parallel);
 	WRITE_NODE_FIELD(reltargetlist);
 	WRITE_NODE_FIELD(pathlist);
 	WRITE_NODE_FIELD(ppilist);
@@ -2383,7 +2414,6 @@ _outQuery(StringInfo str, const Query *node)
 	WRITE_NODE_FIELD(rtable);
 	WRITE_NODE_FIELD(jointree);
 	WRITE_NODE_FIELD(targetList);
-	WRITE_NODE_FIELD(withCheckOptions);
 	WRITE_NODE_FIELD(onConflict);
 	WRITE_NODE_FIELD(returningList);
 	WRITE_NODE_FIELD(groupClause);
@@ -2997,6 +3027,9 @@ _outNode(StringInfo str, const void *obj)
 			case T_BitmapOr:
 				_outBitmapOr(str, obj);
 				break;
+			case T_Gather:
+				_outGather(str, obj);
+				break;
 			case T_Scan:
 				_outScan(str, obj);
 				break;
@@ -3275,6 +3308,9 @@ _outNode(StringInfo str, const void *obj)
 				break;
 			case T_UniquePath:
 				_outUniquePath(str, obj);
+				break;
+			case T_GatherPath:
+				_outGatherPath(str, obj);
 				break;
 			case T_NestPath:
 				_outNestPath(str, obj);

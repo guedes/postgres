@@ -729,6 +729,13 @@ static const SchemaQuery Query_for_list_of_matviews = {
 "   FROM pg_catalog.pg_available_extensions "\
 "  WHERE substring(pg_catalog.quote_ident(name),1,%d)='%s' AND installed_version IS NULL"
 
+/* the silly-looking length condition is just to eat up the current word */
+#define Query_for_list_of_available_extension_versions \
+" SELECT pg_catalog.quote_ident(version) "\
+"   FROM pg_catalog.pg_available_extension_versions "\
+"  WHERE (%d = pg_catalog.length('%s'))"\
+"    AND pg_catalog.quote_ident(name)='%s'"
+
 #define Query_for_list_of_prepared_statements \
 " SELECT pg_catalog.quote_ident(name) "\
 "   FROM pg_catalog.pg_prepared_statements "\
@@ -1209,12 +1216,21 @@ psql_completion(const char *text, int start, int end)
 	/* ALTER INDEX <foo> SET|RESET ( */
 	else if (pg_strcasecmp(prev5_wd, "ALTER") == 0 &&
 			 pg_strcasecmp(prev4_wd, "INDEX") == 0 &&
-			 (pg_strcasecmp(prev2_wd, "SET") == 0 ||
-			  pg_strcasecmp(prev2_wd, "RESET") == 0) &&
+			 pg_strcasecmp(prev2_wd, "RESET") == 0 &&
 			 pg_strcasecmp(prev_wd, "(") == 0)
 	{
 		static const char *const list_INDEXOPTIONS[] =
 		{"fillfactor", "fastupdate", "gin_pending_list_limit", NULL};
+
+		COMPLETE_WITH_LIST(list_INDEXOPTIONS);
+	}
+	else if (pg_strcasecmp(prev5_wd, "ALTER") == 0 &&
+			 pg_strcasecmp(prev4_wd, "INDEX") == 0 &&
+			 pg_strcasecmp(prev2_wd, "SET") == 0 &&
+			 pg_strcasecmp(prev_wd, "(") == 0)
+	{
+		static const char *const list_INDEXOPTIONS[] =
+		{"fillfactor =", "fastupdate =", "gin_pending_list_limit =", NULL};
 
 		COMPLETE_WITH_LIST(list_INDEXOPTIONS);
 	}
@@ -1257,8 +1273,8 @@ psql_completion(const char *text, int start, int end)
 	{
 		static const char *const list_ALTERUSER[] =
 		{"BYPASSRLS", "CONNECTION LIMIT", "CREATEDB", "CREATEROLE",
-			"CREATEUSER", "ENCRYPTED", "INHERIT", "LOGIN", "NOBYPASSRLS",
-			"NOCREATEDB", "NOCREATEROLE", "NOCREATEUSER", "NOINHERIT",
+			"ENCRYPTED", "INHERIT", "LOGIN", "NOBYPASSRLS",
+			"NOCREATEDB", "NOCREATEROLE", "NOINHERIT",
 			"NOLOGIN", "NOREPLICATION", "NOSUPERUSER", "PASSWORD", "RENAME TO",
 			"REPLICATION", "RESET", "SET", "SUPERUSER", "UNENCRYPTED",
 		"VALID UNTIL", "WITH", NULL};
@@ -1275,8 +1291,8 @@ psql_completion(const char *text, int start, int end)
 		/* Similar to the above, but don't complete "WITH" again. */
 		static const char *const list_ALTERUSER_WITH[] =
 		{"BYPASSRLS", "CONNECTION LIMIT", "CREATEDB", "CREATEROLE",
-			"CREATEUSER", "ENCRYPTED", "INHERIT", "LOGIN", "NOBYPASSRLS",
-			"NOCREATEDB", "NOCREATEROLE", "NOCREATEUSER", "NOINHERIT",
+			"ENCRYPTED", "INHERIT", "LOGIN", "NOBYPASSRLS",
+			"NOCREATEDB", "NOCREATEROLE", "NOINHERIT",
 			"NOLOGIN", "NOREPLICATION", "NOSUPERUSER", "PASSWORD", "RENAME TO",
 			"REPLICATION", "RESET", "SET", "SUPERUSER", "UNENCRYPTED",
 		"VALID UNTIL", NULL};
@@ -2264,7 +2280,20 @@ psql_completion(const char *text, int start, int end)
 	/* CREATE EXTENSION <name> */
 	else if (pg_strcasecmp(prev3_wd, "CREATE") == 0 &&
 			 pg_strcasecmp(prev2_wd, "EXTENSION") == 0)
-		COMPLETE_WITH_CONST("WITH SCHEMA");
+	{
+		static const char *const list_CREATE_EXTENSION[] =
+		{"WITH SCHEMA", "CASCADE", "VERSION", NULL};
+
+		COMPLETE_WITH_LIST(list_CREATE_EXTENSION);
+	}
+	/* CREATE EXTENSION <name> VERSION */
+	else if (pg_strcasecmp(prev4_wd, "CREATE") == 0 &&
+			 pg_strcasecmp(prev3_wd, "EXTENSION") == 0 &&
+			 pg_strcasecmp(prev_wd, "VERSION") == 0)
+	{
+		completion_info_charp = prev2_wd;
+		COMPLETE_WITH_QUERY(Query_for_list_of_available_extension_versions);
+	}
 
 	/* CREATE FOREIGN */
 	else if (pg_strcasecmp(prev2_wd, "CREATE") == 0 &&
@@ -2651,8 +2680,8 @@ psql_completion(const char *text, int start, int end)
 	{
 		static const char *const list_CREATEROLE[] =
 		{"ADMIN", "BYPASSRLS", "CONNECTION LIMIT", "CREATEDB", "CREATEROLE",
-			"CREATEUSER", "ENCRYPTED", "IN", "INHERIT", "LOGIN", "NOBYPASSRLS",
-			"NOCREATEDB", "NOCREATEROLE", "NOCREATEUSER", "NOINHERIT",
+			"ENCRYPTED", "IN", "INHERIT", "LOGIN", "NOBYPASSRLS",
+			"NOCREATEDB", "NOCREATEROLE", "NOINHERIT",
 			"NOLOGIN", "NOREPLICATION", "NOSUPERUSER", "PASSWORD",
 			"REPLICATION", "ROLE", "SUPERUSER", "SYSID", "UNENCRYPTED",
 		"VALID UNTIL", "WITH", NULL};
@@ -2670,8 +2699,8 @@ psql_completion(const char *text, int start, int end)
 		/* Similar to the above, but don't complete "WITH" again. */
 		static const char *const list_CREATEROLE_WITH[] =
 		{"ADMIN", "BYPASSRLS", "CONNECTION LIMIT", "CREATEDB", "CREATEROLE",
-			"CREATEUSER", "ENCRYPTED", "IN", "INHERIT", "LOGIN", "NOBYPASSRLS",
-			"NOCREATEDB", "NOCREATEROLE", "NOCREATEUSER", "NOINHERIT",
+			"ENCRYPTED", "IN", "INHERIT", "LOGIN", "NOBYPASSRLS",
+			"NOCREATEDB", "NOCREATEROLE", "NOINHERIT",
 			"NOLOGIN", "NOREPLICATION", "NOSUPERUSER", "PASSWORD",
 			"REPLICATION", "ROLE", "SUPERUSER", "SYSID", "UNENCRYPTED",
 		"VALID UNTIL", NULL};
@@ -3227,15 +3256,6 @@ psql_completion(const char *text, int start, int end)
 			COMPLETE_WITH_CONST("FROM");
 	}
 
-	/* Complete "GRANT/REVOKE * ON * *" with TO/FROM */
-	else if (pg_strcasecmp(prev5_wd, "GRANT") == 0 &&
-			 pg_strcasecmp(prev3_wd, "ON") == 0)
-		COMPLETE_WITH_CONST("TO");
-
-	else if (pg_strcasecmp(prev5_wd, "REVOKE") == 0 &&
-			 pg_strcasecmp(prev3_wd, "ON") == 0)
-		COMPLETE_WITH_CONST("FROM");
-
 	/* Complete "GRANT/REVOKE * ON ALL * IN SCHEMA *" with TO/FROM */
 	else if ((pg_strcasecmp(prev8_wd, "GRANT") == 0 ||
 			  pg_strcasecmp(prev8_wd, "REVOKE") == 0) &&
@@ -3294,6 +3314,15 @@ psql_completion(const char *text, int start, int end)
 			   pg_strcasecmp(prev5_wd, "REVOKE") == 0) &&
 			  pg_strcasecmp(prev_wd, "FROM") == 0))
 		COMPLETE_WITH_QUERY(Query_for_list_of_grant_roles);
+
+	/* Complete "GRANT/REVOKE * ON * *" with TO/FROM */
+	else if (pg_strcasecmp(prev5_wd, "GRANT") == 0 &&
+			 pg_strcasecmp(prev3_wd, "ON") == 0)
+		COMPLETE_WITH_CONST("TO");
+
+	else if (pg_strcasecmp(prev5_wd, "REVOKE") == 0 &&
+			 pg_strcasecmp(prev3_wd, "ON") == 0)
+		COMPLETE_WITH_CONST("FROM");
 
 	/*
 	 * Complete "GRANT/REVOKE * TO/FROM" with username, PUBLIC,

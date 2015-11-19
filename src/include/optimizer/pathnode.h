@@ -31,7 +31,7 @@ extern bool add_path_precheck(RelOptInfo *parent_rel,
 				  List *pathkeys, Relids required_outer);
 
 extern Path *create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
-					Relids required_outer);
+					Relids required_outer, int nworkers);
 extern Path *create_samplescan_path(PlannerInfo *root, RelOptInfo *rel,
 					   Relids required_outer);
 extern IndexPath *create_index_path(PlannerInfo *root,
@@ -69,6 +69,9 @@ extern ResultPath *create_result_path(List *quals);
 extern MaterialPath *create_material_path(RelOptInfo *rel, Path *subpath);
 extern UniquePath *create_unique_path(PlannerInfo *root, RelOptInfo *rel,
 				   Path *subpath, SpecialJoinInfo *sjinfo);
+extern GatherPath *create_gather_path(PlannerInfo *root,
+				   RelOptInfo *rel, Path *subpath, Relids required_outer,
+				   int nworkers);
 extern Path *create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel,
 						 List *pathkeys, Relids required_outer);
 extern Path *create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
